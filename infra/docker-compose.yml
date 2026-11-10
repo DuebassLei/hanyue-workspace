@@ -1,0 +1,110 @@
+services:
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hanyue}:${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hanyue}
+      SECRET_KEY: ${SECRET_KEY:?请在 infra/.env 设置至少 32 字符的随机 SECRET_KEY}
+      ENVIRONMENT: production
+      # 生产必须关闭任意 subject 换 token 的开发登录入口
+      ALLOW_DEV_LOGIN: "false"
+      STORAGE_DIR: /data/storage
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      REDIS_URL: redis://redis:6379/0
+      # Phase 0 核验证据；内容为空时全部平台保持 confirmed=False
+      PLATFORM_EVIDENCE_FILE: /data/config/platform-evidence.json
+      # AI 生图供应商；在 infra/.env 或 shell 中导出这三个值即可启用（留空为未配置）
+      IMAGE_PROVIDER_BASE_URL: ${IMAGE_PROVIDER_BASE_URL:-}
+      IMAGE_PROVIDER_API_KEY: ${IMAGE_PROVIDER_API_KEY:-}
+      IMAGE_PROVIDER_MODEL: ${IMAGE_PROVIDER_MODEL:-}
+      # 公众号草稿箱（AppID/AppSecret，非 OAuth）；留空则该能力按未配置处理
+      WECHAT_MP_APPID: ${WECHAT_MP_APPID:-}
+      WECHAT_MP_APPSECRET: ${WECHAT_MP_APPSECRET:-}
+      WECHAT_MP_AUTHOR: ${WECHAT_MP_AUTHOR:-}
+      WECHAT_MP_API_BASE: ${WECHAT_MP_API_BASE:-}
+      WECHAT_MP_NEED_OPEN_COMMENT: ${WECHAT_MP_NEED_OPEN_COMMENT:-}
+      WECHAT_MP_ONLY_FANS_CAN_COMMENT: ${WECHAT_MP_ONLY_FANS_CAN_COMMENT:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - storage:/data/storage
+      - ./platform-evidence.json:/data/config/platform-evidence.json:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
+      interval: 10s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: apps/worker/Dockerfile
+    command: ["python", "worker.py"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hanyue}:${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hanyue}
+      SECRET_KEY: ${SECRET_KEY:?请在 infra/.env 设置至少 32 字符的随机 SECRET_KEY}
+      ENVIRONMENT: production
+      ALLOW_DEV_LOGIN: "false"
+      STORAGE_DIR: /data/storage
+      REDIS_URL: redis://redis:6379/0
+      # 生图任务由 worker 执行，必须与 api 拿到同一份供应商配置与能力证据
+      IMAGE_PROVIDER_BASE_URL: ${IMAGE_PROVIDER_BASE_URL:-}
+      IMAGE_PROVIDER_API_KEY: ${IMAGE_PROVIDER_API_KEY:-}
+      IMAGE_PROVIDER_MODEL: ${IMAGE_PROVIDER_MODEL:-}
+      PLATFORM_EVIDENCE_FILE: /data/config/platform-evidence.json
+      # 草稿推送任务由 worker 执行，必须与 api 拿到同一份公众号凭据
+      WECHAT_MP_APPID: ${WECHAT_MP_APPID:-}
+      WECHAT_MP_APPSECRET: ${WECHAT_MP_APPSECRET:-}
+      WECHAT_MP_AUTHOR: ${WECHAT_MP_AUTHOR:-}
+      WECHAT_MP_API_BASE: ${WECHAT_MP_API_BASE:-}
+      WECHAT_MP_NEED_OPEN_COMMENT: ${WECHAT_MP_NEED_OPEN_COMMENT:-}
+      WECHAT_MP_ONLY_FANS_CAN_COMMENT: ${WECHAT_MP_ONLY_FANS_CAN_COMMENT:-}
+    volumes:
+      - storage:/data/storage
+      - ./platform-evidence.json:/data/config/platform-evidence.json:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,redis,sys; c=redis.Redis.from_url(os.environ['REDIS_URL']); sys.exit(0 if c.get('hanyue:worker:heartbeat') else 1)"]
+      interval: 10s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hanyue}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-hanyue}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hanyue}"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  storage:
+  redisdata:

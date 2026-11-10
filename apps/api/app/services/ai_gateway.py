@@ -1,0 +1,405 @@
+"""AI Gateway：统一适配器 + SSE 事件（设计文档第 6 章）。
+
+原则：没有可用的模型连接就明确报 `provider_unavailable`，**不生成本地占位文本冒充 AI 产出**。
+所有生成事件都带 provider 标识；调用方不得把错误事件当成成功落库。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from collections.abc import AsyncIterator
+
+import httpx
+
+from sqlalchemy import select
+
+from .. import models
+from ..core import ssrf
+from ..core.security import decrypt_secret
+
+TEXT_CAPABILITIES = {"text.generate", "text.stream"}
+
+# 长文生成首 token 可能很慢（推理型模型尤甚），读超时按 3 分钟设置；
+# 60 秒会在正常生成中被误判成 ReadTimeout 直接失败。
+TEXT_REQUEST_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=60.0, pool=10.0)
+
+TASK_LABELS = {
+    "idea_expand": "选题扩展",
+    "outline": "大纲",
+    "article": "初稿",
+    "rewrite": "改写",
+    "polish": "润色",
+    "summarize": "摘要",
+    "platform_variant": "平台版本",
+    "image_prompt": "配图提示词",
+}
+
+SYSTEM_RULES = (
+    "你是中文自媒体创作助手。只输出可直接使用的正文，不解释过程，"
+    "不编造具体数据来源，不使用绝对化承诺。"
+)
+# 提示词模板版本（设计 §6.5）：每次修改 SYSTEM_RULES / build_prompt 必须同步升级，
+# 生成记录会带上版本号，便于复盘时区分不同模板下的产出。
+PROMPT_TEMPLATE_VERSION = "2026-11-06.v1"
+
+
+class ProviderHTTPError(httpx.HTTPStatusError):
+    """供应商返回错误状态码：携带响应体，便于把可操作原因透传到任务错误里。"""
+
+    def __init__(self, message: str, *, request, response, detail: str, retryable: bool) -> None:
+        super().__init__(message, request=request, response=response)
+        self.detail = detail
+        self.retryable = retryable
+
+
+def build_prompt(task_type: str, prompt: str, constraints: dict | None = None) -> str:
+    constraints = constraints or {}
+    parts = [f"任务：{TASK_LABELS.get(task_type, task_type)}", f"需求：{prompt}"]
+    if constraints.get("targetLength"):
+        parts.append(f"目标字数：约 {constraints['targetLength']} 字")
+    if constraints.get("tone"):
+        parts.append(f"语气：{constraints['tone']}")
+    if constraints.get("audience"):
+        parts.append(f"受众：{constraints['audience']}")
+    if constraints.get("platform"):
+        parts.append(f"目标平台：{constraints['platform']}")
+    return "\n".join(parts)
+
+
+async def stream_text(
+    db,
+    *,
+    connection: models.ModelConnection | None,
+    model_code: str,
+    task_type: str,
+    prompt: str,
+    constraints: dict | None = None,
+    system_prompt: str | None = None,
+) -> AsyncIterator[dict]:
+    """产出统一事件：delta / usage / done / error（started 由调用方带 generationId 发送）。
+
+    system_prompt 不为空时覆盖内置 SYSTEM_RULES，用于 Skill 自定义写作风格。
+    """
+    started = time.perf_counter()
+    full_prompt = build_prompt(task_type, prompt, constraints)
+    api_key = decrypt_secret(connection.credential_ciphertext) if connection else ""
+    provider = connection.provider_type if connection else "none"
+
+    if not (connection and connection.base_url and api_key):
+        yield {
+            "event": "generation.error",
+            "data": {
+                "code": "provider_unavailable",
+                "message": "尚未配置可用的模型连接与 API Key；请在「设置 → 模型连接」登记并测试通过后重试",
+                "retryable": False,
+                "provider": "none",
+                "isPlaceholder": False,
+            },
+        }
+        return
+
+    try:
+        async for chunk in _stream_openai_compatible(
+            base_url=connection.base_url,
+            api_key=api_key,
+            model=model_code,
+            prompt=full_prompt,
+            system_prompt=system_prompt,
+        ):
+            yield {
+                "event": "generation.delta",
+                "data": {"text": chunk, "provider": provider, "isPlaceholder": False},
+            }
+    except ProviderHTTPError as exc:
+        detail = (exc.detail or "").strip()[:300]
+        message = f"供应商返回 HTTP {exc.response.status_code}"
+        if detail:
+            message += f"：{detail}"
+        yield {
+            "event": "generation.error",
+            "data": {
+                "code": "provider_unavailable",
+                "message": message,
+                "retryable": exc.retryable,
+                "provider": provider,
+                "isPlaceholder": False,
+            },
+        }
+        return
+    except (httpx.HTTPError, ssrf.UnsafeUrl) as exc:
+        detail = str(exc).strip()
+        message = f"供应商请求失败：{type(exc).__name__}"
+        if detail:
+            message += f"：{detail}"
+        yield {
+            "event": "generation.error",
+            "data": {
+                "code": "provider_unavailable",
+                "message": message,
+                "retryable": True,
+                "provider": provider,
+                "isPlaceholder": False,
+            },
+        }
+        return
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    yield {
+        "event": "generation.usage",
+        "data": {"durationMs": duration_ms, "promptChars": len(full_prompt), "provider": provider},
+    }
+    yield {
+        "event": "generation.done",
+        "data": {"durationMs": duration_ms, "provider": provider, "isPlaceholder": False},
+    }
+
+
+async def _stream_openai_compatible(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    system_prompt: str | None = None,
+) -> AsyncIterator[str]:
+    url = base_url.rstrip("/") + "/chat/completions"
+    # system_prompt 不为空时覆盖内置规则（Skill 自定义风格），否则回退 SYSTEM_RULES
+    system_content = system_prompt.strip() if system_prompt else SYSTEM_RULES
+    payload = {
+        "model": model,
+        "stream": True,
+        "messages": [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    # 走代理时不能固定 IP：httpcore 的代理隧道不读 sni_hostname，
+    # 固定 IP 会让 TLS 按 IP 校验证书而失败（表现为 ConnectError，误判成供应商不可达）。
+    via_proxy = ssrf.proxy_in_effect()
+    try:
+        async for chunk in _stream_once(
+            payload=payload,
+            url=url,
+            api_key=api_key,
+            trust_env=True,
+            use_pin=not via_proxy,
+        ):
+            yield chunk
+    except (httpx.ConnectError, httpx.ProxyError, httpx.ConnectTimeout):
+        if not via_proxy:
+            raise
+        # 代理配了但连不上，回退直连（此时必须恢复 IP 固定）
+        async for chunk in _stream_once(
+            payload=payload,
+            url=url,
+            api_key=api_key,
+            trust_env=False,
+            use_pin=True,
+        ):
+            yield chunk
+
+
+async def _stream_once(
+    *,
+    payload: dict,
+    url: str,
+    api_key: str,
+    trust_env: bool,
+    use_pin: bool,
+) -> AsyncIterator[str]:
+    if use_pin:
+        target, pinned_headers, extensions = await asyncio.to_thread(ssrf.pin_url, url)
+    else:
+        # 仍要过一遍校验（解析并拦截内网地址），只是不做 IP 固定
+        ssrf.assert_safe_url(url)
+        target, pinned_headers, extensions = url, {}, {}
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        **pinned_headers,
+    }
+    RETRYABLE = {429, 500, 502, 503, 504}
+    async with httpx.AsyncClient(
+        timeout=TEXT_REQUEST_TIMEOUT, follow_redirects=False, trust_env=trust_env
+    ) as client:
+        for attempt in range(3):
+            request = client.build_request("POST", target, json=payload, headers=headers)
+            request.extensions.update(extensions)
+            response = await client.send(request, stream=True)
+            try:
+                code = response.status_code
+                if code in RETRYABLE and attempt < 2:
+                    await response.aread()
+                    await asyncio.sleep(0.4 * (2**attempt))  # 指数退避
+                    continue
+                if 300 <= code < 400:
+                    raise httpx.HTTPStatusError(
+                        "供应商返回重定向，已拒绝跟随以防 SSRF",
+                        request=response.request,
+                        response=response,
+                    )
+                if code >= 400:
+                    # 把供应商的错误体带出来（如「该模型是 image 模型」「订阅已过期」），
+                    # 否则上层只能看到无意义的 HTTPStatusError，用户无从修复。
+                    body = (await response.aread()).decode("utf-8", "replace")
+                    raise ProviderHTTPError(
+                        f"供应商返回 HTTP {code}",
+                        request=response.request,
+                        response=response,
+                        detail=body,
+                        retryable=code in RETRYABLE,
+                    )
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        parsed = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = (parsed.get("choices") or [{}])[0].get("delta") or {}
+                    text = delta.get("content")
+                    if text:
+                        yield text
+                return
+            finally:
+                await response.aclose()
+
+
+def resolve_connection(db, owner_user_id: str):
+    """取该用户第一个可用连接与模型；无连接时返回 (None, "unconfigured")。"""
+    candidates = resolve_connections(db, owner_user_id, limit=1)
+    return candidates[0] if candidates else (None, "unconfigured")
+
+
+def resolve_connections(db, owner_user_id: str, limit: int = 3) -> list[tuple]:
+    """按创建顺序返回候选 (connection, modelCode)，供备用模型降级使用（设计 §6.4）。
+
+    同一个连接下登记的多个 enabled 模型也各自成为一个候选，降级链不再只覆盖连接级。
+    只挑文本能力模型：图像/视频模型混进文本降级链会被供应商直接 400 拒绝。
+    """
+    rows = db.scalars(
+        select(models.ModelConnection)
+        .where(models.ModelConnection.owner_user_id == owner_user_id)
+        .order_by(models.ModelConnection.created_at)
+    ).all()
+    candidates: list[tuple] = []
+    for connection in rows:
+        entries = db.scalars(
+            select(models.ModelCatalogEntry)
+            .where(
+                models.ModelCatalogEntry.connection_id == connection.id,
+                models.ModelCatalogEntry.enabled.is_(True),
+            )
+            .order_by(models.ModelCatalogEntry.created_at)
+        ).all()
+        for entry in entries:
+            if not _is_text_model(entry):
+                continue
+            candidates.append((connection, entry.model_code))
+            if len(candidates) >= limit:
+                return candidates
+        if not entries:
+            # 连接尚未登记任何模型：保留为候选，供状态页提示补齐模型/密钥
+            candidates.append((connection, "unconfigured"))
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
+def _is_text_model(entry: models.ModelCatalogEntry) -> bool:
+    """能力未登记的历史模型按文本模型处理，已登记的必须声明文本能力。"""
+    capabilities = entry.capabilities or []
+    if not capabilities:
+        return True
+    return any(str(cap) in TEXT_CAPABILITIES for cap in capabilities)
+
+
+async def _collect(
+    db,
+    *,
+    connection,
+    model_code: str,
+    task_type: str,
+    prompt: str,
+    constraints: dict | None,
+    system_prompt: str | None = None,
+) -> dict:
+    collected: list[str] = []
+    error_code: str | None = None
+    error_message: str = ""
+    async for event in stream_text(
+        db,
+        connection=connection,
+        model_code=model_code,
+        task_type=task_type,
+        prompt=prompt,
+        constraints=constraints,
+        system_prompt=system_prompt,
+    ):
+        if event["event"] == "generation.delta":
+            collected.append(event["data"]["text"])
+        elif event["event"] == "generation.error":
+            error_code = event["data"].get("code")
+            error_message = event["data"].get("message") or ""
+    text = "".join(collected)
+    return {
+        "text": text,
+        "modelCode": model_code,
+        "provider": "none" if connection is None else connection.provider_type,
+        "errorCode": error_code if not text else None,
+        "errorMessage": error_message if not text else "",
+    }
+
+
+async def generate_text(
+    db,
+    *,
+    owner_user_id: str,
+    task_type: str,
+    prompt: str,
+    constraints: dict | None = None,
+    system_prompt: str | None = None,
+) -> dict:
+    """非流式生成，供工作流节点等后台链路使用。
+
+    system_prompt 不为空时覆盖内置系统规则（Skill 自定义风格）。
+    逐个尝试所有候选模型（设计 §6.4），全部失败则 text 为空并带 errorCode，
+    调用方必须据此把节点标为失败，不得用占位文本伪装成功。
+    """
+    candidates = resolve_connections(db, owner_user_id)
+    if not candidates:
+        candidates = [(None, "unconfigured")]
+    primary_error: str | None = None
+    last_result: dict = {}
+    for index, (connection, model_code) in enumerate(candidates):
+        last_result = await _collect(
+            db,
+            connection=connection,
+            model_code=model_code,
+            task_type=task_type,
+            prompt=prompt,
+            constraints=constraints,
+            system_prompt=system_prompt,
+        )
+        if last_result["text"] and not last_result["errorCode"]:
+            return {
+                **last_result,
+                "fallbackUsed": index > 0,
+                "primaryErrorCode": primary_error,
+                "attempts": index + 1,
+            }
+        if index == 0:
+            primary_error = last_result["errorCode"]
+    return {
+        **last_result,
+        "text": "",
+        "fallbackUsed": len(candidates) > 1,
+        "primaryErrorCode": primary_error,
+        "attempts": len(candidates),
+        "errorCode": last_result.get("errorCode") or "provider_unavailable",
+    }

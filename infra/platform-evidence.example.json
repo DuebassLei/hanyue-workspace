@@ -1,0 +1,20 @@
+{
+  "_readme": "示例模板，默认不会启用任何平台能力。核验完成后：把所有『替换』占位值换成官方开放平台文档链接与实际应用获批的 scope，把 verifiedAt / evidenceDate 改成核验当天（本地日期，超过 365 天需重新核验），再把 confirmed 改为 true，最后复制为 platform-evidence.json 并重启 API。含占位文本、非 HTTPS、内网地址、无效日期或空 scopes 的证据会被拒绝，自动发布保持禁用。",
+  "verifiedAt": "替换成核验当天的 YYYY-MM-DD",
+  "platforms": {
+    "xiaohongshu": {
+      "confirmed": false,
+      "accountAuth": false,
+      "publish": false,
+      "scheduledPublish": false,
+      "imagePublish": false,
+      "draftUpload": false,
+      "accountMetrics": false,
+      "contentMetrics": false,
+      "evidenceDate": "替换成核验当天的 YYYY-MM-DD",
+      "evidenceUrl": "替换成官方开放平台文档 HTTPS 链接",
+      "scopes": [],
+      "note": "依据官方开放平台文档与应用资质审批结果核验"
+    }
+  }
+}

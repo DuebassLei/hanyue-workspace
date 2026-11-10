@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+*.db
+storage/
+.env
+.DS_Store
+
+# 工具与测试产物
+.pytest_cache/
+.playwright-mcp/
+.screenshots/
+.trae/
+.workbuddy/
+*.log
+
+# 本地运行时配置
+infra/platform-evidence.json

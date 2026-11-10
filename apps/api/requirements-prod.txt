@@ -1,0 +1,7 @@
+# 生产镜像额外依赖（Dockerfile 会与 requirements.txt 一起安装）
+# 注意：这两个包只在容器镜像中安装，本机 venv 与离线环境无法解析 PyPI 索引，
+# 因此这里保留范围约束；如需完全可复现的构建，请用 pip-compile 生成带哈希的 lock。
+# PostgreSQL 驱动：docker-compose.yml 使用 postgresql+psycopg:// 连接串
+psycopg[binary]>=3.2,<4
+# 跨进程任务队列：配置 REDIS_URL 后由 apps/worker/worker.py 消费
+redis>=5.0,<7
