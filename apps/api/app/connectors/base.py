@@ -14,8 +14,17 @@ from dataclasses import dataclass, field
 PLATFORMS = ["wechat_official"]
 
 PLATFORM_LABELS = {
-    "wechat_official": "公众号",
+    "wechat_official": "微信公众号",
+    "xiaohongshu": "小红书",
+    "douyin": "抖音",
 }
+
+# 渠道目录：available=False 表示平台尚未接入，界面只展示占位与"未接入"，不可绑定
+PLATFORM_CATALOG: list[tuple[str, bool]] = [
+    ("wechat_official", True),
+    ("xiaohongshu", False),
+    ("douyin", False),
+]
 
 
 @dataclass(frozen=True)
@@ -81,8 +90,20 @@ def evidence_report() -> dict:
 
 def get_capability(platform: str) -> PlatformCapability:
     return CAPABILITIES.get(platform) or PlatformCapability(
-        platform=platform, label=platform, note="未知平台"
+        platform=platform,
+        label=PLATFORM_LABELS.get(platform, platform),
+        note="该平台尚未接入",
     )
+
+
+def catalog_payload() -> list[dict]:
+    """渠道目录：已接入平台带真实能力，未接入平台只作占位。"""
+    items = []
+    for platform, available in PLATFORM_CATALOG:
+        data = get_capability(platform).to_dict()
+        data["available"] = available
+        items.append(data)
+    return items
 
 
 def capability_allows_publish(platform: str) -> bool:

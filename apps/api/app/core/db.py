@@ -39,6 +39,7 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("publish_jobs", "target", "VARCHAR(24) DEFAULT 'publish'"),
     ("publish_jobs", "theme_id", "VARCHAR(32) DEFAULT ''"),
     ("publish_jobs", "layout_snapshot", "JSON"),
+    ("publish_jobs", "content_item_id", "VARCHAR(32)"),
     ("connected_accounts", "auth_source", "VARCHAR(24) DEFAULT 'none'"),
     ("connected_accounts", "app_id", "VARCHAR(64) DEFAULT ''"),
     ("connected_accounts", "app_secret_ciphertext", "TEXT DEFAULT ''"),

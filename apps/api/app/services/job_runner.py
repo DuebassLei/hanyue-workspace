@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import update
+from sqlalchemy import or_, select, update
 
 from .. import models
 from ..connectors import registry
@@ -20,7 +20,7 @@ from ..core.config import get_settings
 from ..core.db import SessionLocal
 from ..core.deps import default_workspace
 from ..core.security import decrypt_secret, sign_asset_url
-from . import image_provider, image_service, publish_state, wechat_article
+from . import handdraw, image_provider, image_service, publish_state, wechat_article
 
 RETRYABLE_CODES = {"provider_unreachable", "provider_error", "provider_timeout", "rate_limited"}
 MAX_ATTEMPTS = queue.MAX_ATTEMPTS
@@ -220,10 +220,68 @@ def _store_asset(db, user, workspace_id: str, raw: bytes, mime: str, name: str, 
     return asset
 
 
+def _load_reference_images(db, job: models.BackgroundJob, payload: dict) -> list[tuple[bytes, str, str]]:
+    """读取参考图素材；文件缺失或不属于任务创建者时明确失败。"""
+    references: list[tuple[bytes, str, str]] = []
+    for asset_id in payload.get("referenceAssetIds") or []:
+        asset = db.get(models.Asset, asset_id)
+        if not asset or asset.owner_user_id != job.owner_user_id:
+            raise JobFailure("asset_not_found", "参考图素材不存在")
+        path = image_service.storage_path(get_settings().storage_dir, asset.storage_key)
+        if not path.exists():
+            raise JobFailure("asset_not_found", "参考图文件已丢失")
+        references.append((path.read_bytes(), asset.mime_type, f"{asset.id}{_ext(asset.mime_type)}"))
+    return references
+
+
+def _builtin_reference(number: str | None, model_code: str | None, room: int) -> tuple[bytes, str, str] | None:
+    """按内置手绘风格补参考图；该风格不需要参考图时返回 None。
+
+    选了风格却读不到参考图时明确失败，不静默降级成无参考图生成。
+    """
+    if not number:
+        return None
+    session = SessionLocal()
+    try:
+        style = session.scalar(
+            select(models.HanddrawStyle).where(
+                or_(
+                    models.HanddrawStyle.style_number == str(number).strip().upper(),
+                    models.HanddrawStyle.style_number == handdraw.normalize_style_number(number),
+                )
+            )
+        )
+        if style is None:
+            raise JobFailure("style_not_found", f"手绘风格不存在：{number}")
+        activation = handdraw.resolve_activation(style, model_code)
+        if not activation.need_reference:
+            return None
+        path = handdraw.resolve_reference_file(style)
+        if path is None:
+            raise JobFailure("reference_missing", f"手绘风格 {style.style_number} 的参考图缺失")
+        if room <= 0:
+            raise JobFailure("too_many_references", "内置参考图与所选素材合计超出 4 张上限")
+        return path.read_bytes(), "image/webp", f"{style.style_number}.webp"
+    except ValueError as exc:
+        raise JobFailure("style_not_found", str(exc)) from exc
+    finally:
+        session.close()
+
+
 def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
     payload = job.payload or {}
     user = db.get(models.User, job.owner_user_id)
     workspace = default_workspace(db, user)
+    references = _load_reference_images(db, job, payload)
+    provider = image_provider.resolve_image_provider(db, job.owner_user_id, payload.get("modelId"))
+    model_code = provider.get("modelCode") if provider else None
+    builtin = _builtin_reference(
+        payload.get("builtinReferenceStyleNumber"),
+        model_code,
+        handdraw.MAX_REFERENCES - len(references),
+    )
+    if builtin is not None:
+        references = [builtin, *references]
     try:
         images = image_provider.generate_images(
             db,
@@ -232,6 +290,7 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             aspect_ratio=payload.get("aspectRatio") or "3:4",
             count=int(payload.get("count") or 1),
             model_id=payload.get("modelId"),
+            reference_images=references or None,
         )
     except image_provider.ImageProviderUnavailable as exc:
         raise JobFailure(exc.code, exc.message, exc.code in RETRYABLE_CODES) from exc

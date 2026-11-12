@@ -36,19 +36,77 @@ class ImageProviderUnavailable(RuntimeError):
         self.message = message
 
 
-def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) -> dict | None:
-    """返回 {baseUrl, apiKey, modelCode}；无可用供应商返回 None。"""
+def _env_provider() -> dict | None:
     env_base = os.getenv("IMAGE_PROVIDER_BASE_URL", "").strip()
     env_key = os.getenv("IMAGE_PROVIDER_API_KEY", "").strip()
     env_model = os.getenv("IMAGE_PROVIDER_MODEL", "").strip()
     if env_base and env_key and env_model:
-        return {"baseUrl": env_base.rstrip("/"), "apiKey": env_key, "modelCode": env_model}
+        return {"modelId": None, "baseUrl": env_base.rstrip("/"), "apiKey": env_key, "modelCode": env_model}
+    return None
+
+
+def list_providers(db, owner_user_id: str) -> list[dict]:
+    """列出当前用户可用于生图的供应商（环境变量 + 本人连接里带 image.generate 的模型）。
+
+    返回项：{modelId, modelCode, label, source}；modelId 为 None 表示环境变量供应商。
+    """
+    providers: list[dict] = []
+    env = _env_provider()
+    if env:
+        providers.append(
+            {
+                "modelId": None,
+                "modelCode": env["modelCode"],
+                "label": f"环境变量 · {env['modelCode']}",
+                "source": "env",
+            }
+        )
+    stmt = select(models.ModelCatalogEntry).where(models.ModelCatalogEntry.enabled.is_(True))
+    for entry in db.scalars(stmt).all():
+        if "image.generate" not in (entry.capabilities or []):
+            continue
+        connection = db.get(models.ModelConnection, entry.connection_id)
+        if not connection or connection.owner_user_id != owner_user_id:
+            continue
+        if not connection.base_url or not decrypt_secret(connection.credential_ciphertext):
+            continue
+        providers.append(
+            {
+                "modelId": entry.id,
+                "modelCode": entry.model_code,
+                "label": f"{connection.display_name} · {entry.display_name or entry.model_code}",
+                "source": "connection",
+            }
+        )
+    return providers
+
+
+def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) -> dict | None:
+    """返回 {baseUrl, apiKey, modelCode}；无可用供应商返回 None。
+
+    指定 model_id 时优先使用对应连接（支持多供应商动态切换），否则回退环境变量。
+    """
+    if model_id:
+        entry = db.get(models.ModelCatalogEntry, model_id)
+        if entry and entry.enabled and "image.generate" in (entry.capabilities or []):
+            connection = db.get(models.ModelConnection, entry.connection_id)
+            if connection and connection.owner_user_id == owner_user_id and connection.base_url:
+                key = decrypt_secret(connection.credential_ciphertext)
+                if key:
+                    return {
+                        "baseUrl": connection.base_url.rstrip("/"),
+                        "apiKey": key,
+                        "modelCode": entry.model_code,
+                    }
+        # 明确指定了供应商却不可用时不静默回退，避免「切了没生效」的错觉
+        return None
+    env = _env_provider()
+    if env:
+        return {"baseUrl": env["baseUrl"], "apiKey": env["apiKey"], "modelCode": env["modelCode"]}
 
     stmt = select(models.ModelCatalogEntry).where(
         models.ModelCatalogEntry.enabled.is_(True)
     )
-    if model_id:
-        stmt = stmt.where(models.ModelCatalogEntry.id == model_id)
     for entry in db.scalars(stmt).all():
         if "image.generate" not in (entry.capabilities or []):
             continue
@@ -66,11 +124,13 @@ def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) 
 
 
 def status(db, owner_user_id: str) -> dict:
+    providers = list_providers(db, owner_user_id)
     provider = resolve_image_provider(db, owner_user_id)
     return {
         "available": provider is not None,
         "modelCode": provider["modelCode"] if provider else None,
         "note": "已配置图像生成供应商" if provider else "未接入图像生成供应商，配图需指定已上传素材",
+        "providers": providers,
     }
 
 
@@ -112,34 +172,70 @@ def generate_images(
     aspect_ratio: str = "3:4",
     count: int = 1,
     model_id: str | None = None,
+    reference_images: list[tuple[bytes, str, str]] | None = None,
 ) -> list[tuple[bytes, str]]:
+    """文生图走 /images/generations；带参考图时改走 /images/edits（multipart）。
+
+    reference_images 为 [(raw, mime, filename)]，调用方负责校验素材归属。
+    """
     provider = resolve_image_provider(db, owner_user_id, model_id)
     if not provider:
+        if model_id:
+            raise ImageProviderUnavailable(
+                "image_provider_unavailable",
+                "指定的图像供应商不可用或已被移除，请重新选择",
+            )
         raise ImageProviderUnavailable(
             "image_provider_unavailable",
             "未接入图像生成供应商；请在设置中配置支持 image.generate 能力的模型，或上传素材后指定 assetId",
         )
-    payload = {
-        "model": provider["modelCode"],
-        "prompt": prompt,
-        "n": max(1, min(count, 4)),
-        "size": SIZE_MAP.get(aspect_ratio, "1024x1536"),
-        "response_format": "b64_json",
-    }
+    size = SIZE_MAP.get(aspect_ratio, "1024x1536")
+    batch = max(1, min(count, 4))
+    headers = {"Authorization": f"Bearer {provider['apiKey']}", "Accept": "application/json"}
+    if reference_images:
+        endpoint = f"{provider['baseUrl']}/images/edits"
+        files = [
+            ("image[]", (filename, raw, mime))
+            for raw, mime, filename in reference_images
+        ]
+        form_body = {
+            "model": provider["modelCode"],
+            "prompt": prompt,
+            "n": str(batch),
+            "size": size,
+            "response_format": "b64_json",
+        }
+        json_body = None
+    else:
+        endpoint = f"{provider['baseUrl']}/images/generations"
+        files = None
+        form_body = None
+        json_body = {
+            "model": provider["modelCode"],
+            "prompt": prompt,
+            "n": batch,
+            "size": size,
+            "response_format": "b64_json",
+        }
     try:
         response = ssrf.safe_request(
             "POST",
-            f"{provider['baseUrl']}/images/generations",
-            headers={"Authorization": f"Bearer {provider['apiKey']}", "Accept": "application/json"},
-            json_body=payload,
-            timeout=60.0,
+            endpoint,
+            headers=headers,
+            json_body=json_body,
+            form_body=form_body,
+            files=files,
+            timeout=90.0,
         )
     except (ssrf.UnsafeUrl, httpx.HTTPError) as exc:
         raise ImageProviderUnavailable("provider_unreachable", f"图像供应商请求失败：{exc}") from exc
     if response.status_code in (401, 403):
         raise ImageProviderUnavailable("unauthorized", "图像供应商拒绝了凭据")
     if response.status_code >= 400:
-        raise ImageProviderUnavailable("provider_error", f"图像供应商返回 HTTP {response.status_code}")
+        hint = "（供应商可能不支持参考图编辑 /images/edits）" if reference_images else ""
+        raise ImageProviderUnavailable(
+            "provider_error", f"图像供应商返回 HTTP {response.status_code}{hint}"
+        )
     try:
         items = response.json().get("data") or []
     except ValueError as exc:

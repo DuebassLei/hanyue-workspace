@@ -76,7 +76,12 @@ export const api = {
 
 /** 把接口相对路径拼成绝对地址（正文里的图片链接要能被外部发布端取用） */
 export function apiUrl(path) {
-  return new URL(`${BASE}${path}`, window.location.origin).href
+  const raw = String(path || '')
+  // 已是绝对地址直接返回
+  if (/^https?:\/\//i.test(raw)) return raw
+  // 后端下发的直链（如 /api/v1/assets/xx/raw?exp=..&sig=..）已带前缀，不能重复拼接
+  const withPrefix = raw.startsWith(`${BASE}/`) ? raw : `${BASE}${raw.startsWith('/') ? '' : '/'}${raw}`
+  return new URL(withPrefix, window.location.origin).href
 }
 
 /** 读取需要鉴权的二进制资源（素材原图），返回可放进 <img src> 的 object URL */

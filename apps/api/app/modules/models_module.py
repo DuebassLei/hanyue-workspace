@@ -353,14 +353,16 @@ def _persist_version(
             models.ContentVersion.content_item_id == item.id
         )
     )
+    # 文章类任务是 JSON 契约输出，直接落库会把整个 JSON 写进正文
+    ai_title, ai_body = ai_article.article_from_raw_output(text)
     version = models.ContentVersion(
         content_item_id=item.id,
         version_no=(max_no or 0) + 1,
         parent_version_id=item.current_version_id,
         source_type="ai",
         model_id=payload.model_id,
-        title=item.title,
-        body=text,
+        title=ai_title or item.title,
+        body=ai_body,
         summary=f"{payload.task_type} 生成",
     )
     db.add(version)

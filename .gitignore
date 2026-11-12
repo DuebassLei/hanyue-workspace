@@ -14,6 +14,8 @@ storage/
 .screenshots/
 .trae/
 .workbuddy/
+.superpowers/
+.trae-html-share-packages/
 *.log
 
 # 本地运行时配置

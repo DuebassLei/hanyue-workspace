@@ -26,6 +26,7 @@ import { TableCell } from '@tiptap/extension-table-cell'
 import { TableHeader } from '@tiptap/extension-table-header'
 import Placeholder from '@tiptap/extension-placeholder'
 import { editorToMarkdown, setEditorFromMarkdown } from '../utils/markdownSerializer'
+import { articleBodyFromOutput } from '../utils/aiArticle'
 import { api, apiUrl, streamGeneration } from '../api/client'
 
 // ---------- props / emits ----------
@@ -124,7 +125,13 @@ watch(() => props.modelValue, (val) => {
   const next = val ?? ''
   if (mode.value === 'source') {
     // source 模式下编辑器可能已销毁，仅同步工作副本
-    if (next !== sourceValue.value) sourceValue.value = next
+    if (next !== sourceValue.value) {
+      sourceValue.value = next
+      // 显示值必须一起同步：textarea 绑的是 sourceView，
+      // 落后于实际内容时任何一次重渲染都会把 DOM 回滚、光标甩到末尾
+      if (sourceExpanded.value) sourceView.value = next
+      else refreshSourceView()
+    }
     lastEmitted = next
     return
   }
@@ -146,9 +153,12 @@ function switchToSource() {
   const md = editorToMarkdown(editor.value)
   sourceValue.value = md
   lastEmitted = md
-  sourceExpanded.value = false
+  // 进入源码模式默认展示原文：折叠文本只能看，直接编辑会把省略号写进正文
+  sourceExpanded.value = true
   refreshSourceView()
   mode.value = 'source'
+  // 光标直接落进 textarea，否则回车/输入会落到隐藏的富文本编辑器里
+  nextTick(() => sourceEl.value?.focus())
 }
 
 function switchToWysiwyg() {
@@ -166,9 +176,13 @@ function switchToWysiwyg() {
 }
 
 function onSourceInput(e) {
-  sourceValue.value = e.target.value
-  lastEmitted = e.target.value
-  emit('update:modelValue', e.target.value)
+  const value = e.target.value
+  sourceValue.value = value
+  // 同步显示值：textarea 是受控的，sourceView 落后时父组件的重渲染
+  // （字数、自动保存状态、折叠提示条）会覆盖 DOM 内容并把光标顶到末尾
+  sourceView.value = value
+  lastEmitted = value
+  emit('update:modelValue', value)
 }
 
 // ---------- 源码模式：超长图片地址折叠 ----------
@@ -209,6 +223,26 @@ function collapseSource() {
 }
 
 const sourceEl = ref(null)
+
+/** 源码模式下把 Markdown 片段插到光标处（图片等），不经过隐藏的富文本编辑器 */
+function insertSourceMarkdown(markdown) {
+  const el = sourceEl.value
+  const current = sourceValue.value
+  const start = el?.selectionStart ?? current.length
+  const end = el?.selectionEnd ?? start
+  const next = `${current.slice(0, start)}${markdown}${current.slice(end)}`
+  sourceExpanded.value = true
+  sourceValue.value = next
+  sourceView.value = next
+  lastEmitted = next
+  emit('update:modelValue', next)
+  nextTick(() => {
+    if (!el) return
+    el.focus()
+    const caret = start + markdown.length
+    el.setSelectionRange(caret, caret)
+  })
+}
 
 /** 源码模式下统计被折叠的长地址数量，用于决定是否显示「展开」按钮 */
 const foldedCount = computed(() => {
@@ -299,10 +333,17 @@ async function onLocalImagePicked(e) {
     const form = new FormData()
     form.append('file', file)
     const asset = await api.upload(`/assets?sessionId=${encodeURIComponent(session.sessionId)}`, form)
-    const alt = file.name.replace(/\.[^.]+$/, '')
-    editor.value?.chain().focus()
-      .setImage({ src: apiUrl(`/assets/${asset.id}/raw`), alt })
-      .run()
+    // alt 里的方括号会截断 ![]() 语法，先剔掉
+    const alt = file.name.replace(/\.[^.]+$/, '').replace(/[[\]]/g, '')
+    // /assets/{id}/raw 需要签名才能读（<img> 带不了 Authorization 头），
+    // 漏掉 asset.url 里的 exp/sig 会直接 401，正文里只剩一张裂图
+    const query = String(asset.url || '').split('?')[1] || ''
+    const src = apiUrl(`/assets/${asset.id}/raw${query ? `?${query}` : ''}`)
+    if (mode.value === 'source') {
+      insertSourceMarkdown(`![${alt}](${src})`)
+    } else {
+      editor.value?.chain().focus().setImage({ src, alt }).run()
+    }
   } catch (err) {
     imageError.value = err.message || '图片上传失败'
   } finally {
@@ -337,11 +378,13 @@ function runAiBubble(taskValue) {
         aiBubbleTask.value = null
       },
       onEnd: () => {
-        if (result && editor.value) {
+        // 润色/改写同样走文章 JSON 契约，选区里只能落 markdown 正文
+        const insertText = result ? articleBodyFromOutput(result) : ''
+        if (insertText && editor.value) {
           const { from: f, to: t } = editor.value.state.selection
           editor.value.chain().focus()
             .deleteRange({ from: f, to: t })
-            .insertContentAt(f, result)
+            .insertContentAt(f, insertText)
             .run()
         }
         aiRunning.value = false
@@ -371,6 +414,9 @@ onBeforeUnmount(() => {
 
     <!-- 工具栏 -->
     <div v-if="!readonly" class="md-editor-toolbar">
+      <!-- 富文本命令只在预览模式可用：源码模式下它们会 focus 到隐藏的编辑器，
+           抢走 textarea 焦点，导致回车/输入失效 -->
+      <template v-if="mode === 'wysiwyg'">
       <!-- 格式 -->
       <button
         v-if="tb.heading" class="tbar-btn" title="H1"
@@ -436,12 +482,6 @@ onBeforeUnmount(() => {
         @click="insertTable"
       >表格</button>
       <button
-        v-if="tb.image" class="tbar-btn" title="插入图片（自动上传为素材）"
-        :disabled="imageUploading"
-        @click="localImageInput?.click()"
-      >{{ imageUploading ? '上传中…' : '图片' }}</button>
-      <span v-if="imageError" class="tbar-error" :title="imageError">{{ imageError }}</span>
-      <button
         v-if="base64Count"
         class="tbar-btn tbar-convert"
         :disabled="convertingBase64"
@@ -465,6 +505,15 @@ onBeforeUnmount(() => {
         :disabled="!editor?.can().redo()"
         @click="editor?.chain().focus().redo().run()"
       >↪</button>
+      </template>
+
+      <!-- 插图两种模式都支持：源码模式直接写进 textarea -->
+      <button
+        v-if="tb.image" class="tbar-btn" title="插入图片（自动上传为素材）"
+        :disabled="imageUploading"
+        @click="localImageInput?.click()"
+      >{{ imageUploading ? '上传中…' : '图片' }}</button>
+      <span v-if="imageError" class="tbar-error" :title="imageError">{{ imageError }}</span>
 
       <!-- 模式切换 -->
       <span class="tbar-spacer" />
@@ -518,6 +567,7 @@ onBeforeUnmount(() => {
       v-show="mode === 'source'"
       ref="sourceEl"
       :value="sourceView"
+      :readonly="!sourceExpanded && foldedCount > 0"
       class="md-editor-source"
       spellcheck="false"
       @input="onSourceInput"
@@ -525,7 +575,7 @@ onBeforeUnmount(() => {
 
     <!-- 折叠提示条：只在真的折叠了长地址时出现 -->
     <div v-if="mode === 'source' && foldedCount" class="md-source-fold-note">
-      <span>已折叠 {{ foldedCount }} 个超长图片地址（内容未改变）</span>
+      <span>{{ sourceExpanded ? '已展开' : '已折叠' }} {{ foldedCount }} 个超长图片地址（真实内容不变）</span>
       <button type="button" class="md-source-fold-btn" @click="sourceExpanded ? collapseSource() : expandSource()">
         {{ sourceExpanded ? '折叠' : '展开原文' }}
       </button>

@@ -25,6 +25,12 @@ def create_image_generation(
     """创建异步生图任务；没有供应商时任务会明确失败，不会产出假图。"""
     if payload.count < 1 or payload.count > 4:
         raise ApiError("invalid_count", "生成数量需在 1~4 之间")
+    if len(payload.reference_asset_ids) > 4:
+        raise ApiError("invalid_references", "参考图最多 4 张")
+    for asset_id in payload.reference_asset_ids:
+        asset = db.get(models.Asset, asset_id)
+        if not asset or asset.owner_user_id != user.id:
+            raise not_found("参考图素材")
     job_id = queue.enqueue(
         db,
         owner_user_id=user.id,
@@ -36,6 +42,8 @@ def create_image_generation(
             "aspectRatio": payload.aspect_ratio,
             "count": payload.count,
             "modelId": payload.model_id,
+            "referenceAssetIds": payload.reference_asset_ids,
+            "builtinReferenceStyleNumber": payload.builtin_reference_style_number,
         },
     )
     return {

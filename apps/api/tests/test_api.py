@@ -511,6 +511,70 @@ def test_asset_upload_and_image_job(client):
     assert still_there.status_code == 200
 
 
+def test_asset_search_by_keyword(client):
+    from PIL import Image
+
+    headers = login(client, "user-asset-search")
+    for name in ("summer-cover.png", "winter-photo.png"):
+        buffer = io.BytesIO()
+        Image.new("RGB", (40, 30), (90, 120, 90)).save(buffer, format="PNG")
+        buffer.seek(0)
+        res = client.post(
+            "/api/v1/assets",
+            files={"file": (name, buffer, "image/png")},
+            headers=headers,
+        )
+        assert res.status_code == 201, res.text
+
+    assert len(client.get("/api/v1/assets", headers=headers).json()) == 2
+
+    matched = client.get("/api/v1/assets?q=summer", headers=headers).json()
+    assert [a["originalName"] for a in matched] == ["summer-cover.png"]
+
+    # 关键字大小写不敏感
+    assert len(client.get("/api/v1/assets?q=WINTER", headers=headers).json()) == 1
+
+    # LIKE 通配符按字面匹配，不能把全部素材都返回
+    assert client.get("/api/v1/assets?q=%25", headers=headers).json() == []
+
+
+def test_asset_filter_by_source_format_and_days(client):
+    from PIL import Image
+
+    headers = login(client, "user-asset-filter")
+    uploads = [("hero.png", "image/png", "PNG"), ("hero.webp", "image/webp", "WEBP")]
+    for name, mime, fmt in uploads:
+        buffer = io.BytesIO()
+        Image.new("RGB", (30, 20), (70, 110, 90)).save(buffer, format=fmt)
+        buffer.seek(0)
+        res = client.post(
+            "/api/v1/assets",
+            files={"file": (name, buffer, mime)},
+            headers=headers,
+        )
+        assert res.status_code == 201, res.text
+
+    assert len(client.get("/api/v1/assets", headers=headers).json()) == 2
+
+    png_only = client.get("/api/v1/assets?format=png", headers=headers).json()
+    assert [a["originalName"] for a in png_only] == ["hero.png"]
+
+    # 手动上传的 sourceType 为 upload
+    uploaded = client.get("/api/v1/assets?sourceType=upload", headers=headers).json()
+    assert len(uploaded) == 2
+    assert client.get("/api/v1/assets?sourceType=derived", headers=headers).json() == []
+
+    # 时间筛选：刚上传的素材落在近 7 天内
+    assert len(client.get("/api/v1/assets?days=7", headers=headers).json()) == 2
+
+    # 组合筛选：关键字 + 格式
+    combined = client.get("/api/v1/assets?q=hero&format=webp", headers=headers).json()
+    assert [a["originalName"] for a in combined] == ["hero.webp"]
+
+    # 非法天数应被参数校验拦截
+    assert client.get("/api/v1/assets?days=0", headers=headers).status_code == 422
+
+
 def test_dashboard_shape(client):
     headers = login(client)
     data = client.get("/api/v1/dashboard", headers=headers).json()
@@ -550,7 +614,7 @@ def test_manual_publish_mode_schedules_without_platform_call(client):
             "body": "正文内容",
             "reviewed": True,
             "mode": "manual",
-            "scheduledAt": "2026-11-10T10:00:00Z",
+            "scheduledAt": "2099-11-10T10:00:00Z",
         },
         headers=headers,
     )

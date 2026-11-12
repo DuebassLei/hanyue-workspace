@@ -14,18 +14,49 @@ from sqlalchemy import select
 from .. import models
 from ..connectors import base as connectors
 from ..connectors import registry
+from ..connectors import wechat_mp
 from ..core.deps import ApiError, CurrentUser, DbSession, not_found
 
 router = APIRouter(tags=["platform-auth"])
 
 
 @router.get("/platforms/connectors/status")
-def connectors_status(db: DbSession) -> dict:
+def connectors_status(user: CurrentUser, db: DbSession) -> dict:
     report = connectors.evidence_report()
+    platforms = [registry.connector_status(code, db) for code in connectors.PLATFORMS]
+    # 账号级凭据（AppID/AppSecret 存在账号上、部署级没配）同样算已配置，
+    # 否则发布页会显示「未配置」，把已经绑定好的账号挡住
+    account = db.scalar(
+        select(models.ConnectedAccount)
+        .where(
+            models.ConnectedAccount.owner_user_id == user.id,
+            models.ConnectedAccount.platform == "wechat_official",
+            models.ConnectedAccount.app_id != "",
+            models.ConnectedAccount.app_secret_ciphertext != "",
+        )
+        .order_by(models.ConnectedAccount.created_at.desc())
+        .limit(1)
+    )
+    if account is not None:
+        masked = wechat_mp.WeChatMPConfig(app_id=account.app_id, app_secret="").app_id_masked
+        for item in platforms:
+            if item["platform"] == "wechat_official" and not item["configured"]:
+                item.update(
+                    {
+                        "configured": True,
+                        "reason": "",
+                        "mode": "app_secret",
+                        "appId": masked,
+                        "draftCapable": True,
+                        "verifyCapable": True,
+                        "verifyNote": "使用账号级 AppID/AppSecret（绑定即真实验证）",
+                        "credentialSource": "account",
+                    }
+                )
     return {
-        "platforms": [registry.connector_status(code, db) for code in connectors.PLATFORMS],
+        "platforms": platforms,
         "evidence": report,
-        "note": "configured 只表示公众号凭据已配置；草稿箱推送不依赖发布能力核验",
+        "note": "configured 表示已配置公众号凭据（部署级或账号级）；草稿箱推送不依赖发布能力核验",
     }
 
 

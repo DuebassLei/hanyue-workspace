@@ -12,6 +12,25 @@ const OPERATIONS = [
   { value: 'split_panels', label: '条漫分格', hint: 'panels' },
 ]
 
+const SOURCE_OPTIONS = [
+  { value: 'upload', label: '手动上传' },
+  { value: 'generated', label: 'AI 生成' },
+  { value: 'derived', label: '处理派生' },
+]
+
+const FORMAT_OPTIONS = [
+  { value: 'png', label: 'PNG' },
+  { value: 'jpeg', label: 'JPEG' },
+  { value: 'webp', label: 'WebP' },
+]
+
+const TIME_OPTIONS = [
+  { value: 7, label: '近 7 天' },
+  { value: 30, label: '近 30 天' },
+]
+
+const SOURCE_LABELS = { upload: '上传', generated: 'AI 生成', derived: '派生', agent: 'Agent' }
+
 const assets = ref([])
 const loading = ref(true)
 const error = ref('')
@@ -31,52 +50,191 @@ const options = reactive({
 })
 const thumbs = ref({})
 const jobs = ref([])
-const provider = ref({ available: false, note: '', modelCode: null })
-const aiForm = reactive({ prompt: '', aspectRatio: '3:4', count: 1 })
-const aiBusy = ref(false)
+const jobsCursor = ref('')
+const jobsHasMore = ref(false)
+const jobsLoadedMore = ref(false)
+const jobsLoadingMore = ref(false)
+const previewAsset = ref(null)
+const copiedId = ref('')
+let copiedTimer = null
 let pollTimer = null
 let pollRounds = 0
 const MAX_POLL_ROUNDS = 120 // 1.5s × 120 = 3 分钟，避免任务卡住时无限轮询
 
+const keyword = ref('')
+const searching = ref(false)
+const filters = reactive({ sourceType: '', format: '', days: 0 })
+const filterOpen = ref(false) // 窄屏下筛选面板的抽屉开关
+const panelOpen = ref(false) // 右侧图像处理 / 任务抽屉
+const panelTab = ref('process')
+let searchTimer = null
+let assetSeq = 0
+
 const selected = computed(() => assets.value.find((a) => a.id === selectedId.value) || null)
 const optionHint = computed(() => OPERATIONS.find((o) => o.value === operation.value)?.hint)
+const activeFilterCount = computed(
+  () => [filters.sourceType, filters.format, filters.days].filter(Boolean).length,
+)
+const hasFilters = computed(() => Boolean(keyword.value.trim()) || activeFilterCount.value > 0)
+
+function assetsUrl(q = keyword.value) {
+  const params = new URLSearchParams()
+  const text = (q || '').trim()
+  if (text) params.set('q', text)
+  if (filters.sourceType) params.set('sourceType', filters.sourceType)
+  if (filters.format) params.set('format', filters.format)
+  if (filters.days) params.set('days', String(filters.days))
+  const qs = params.toString()
+  return qs ? `/assets?${qs}` : '/assets'
+}
+
+function reconcileSelection(list) {
+  if (!list.some((a) => a.id === selectedId.value)) selectedId.value = list[0]?.id || ''
+}
 
 function releaseThumbs() {
   for (const url of Object.values(thumbs.value)) URL.revokeObjectURL(url)
   thumbs.value = {}
 }
 
-async function loadThumbs() {
-  releaseThumbs()
+async function loadThumbs(requestId) {
   const map = {}
-  for (const asset of assets.value.slice(0, 60)) {
+  const snapshot = assets.value.slice(0, 60)
+  for (const asset of snapshot) {
     try {
       map[asset.id] = await fetchBlobUrl(`/assets/${asset.id}/raw`)
     } catch {
       map[asset.id] = ''
     }
+    if (requestId !== assetSeq) break
   }
+  if (requestId !== assetSeq) {
+    // 已有更新的请求接管，丢弃本次缩略图并释放临时 blob，避免串图
+    for (const url of Object.values(map)) if (url) URL.revokeObjectURL(url)
+    return
+  }
+  releaseThumbs()
   thumbs.value = map
 }
 
 async function load() {
+  const requestId = ++assetSeq
   loading.value = true
   error.value = ''
   try {
-    const [list, status, recent] = await Promise.all([
-      api.get('/assets'),
-      api.get('/ai/image-provider/status'),
-      api.get('/jobs?limit=20'),
-    ])
+    const [list, recent] = await Promise.all([api.get(assetsUrl()), fetchJobsPage()])
+    if (requestId !== assetSeq) return
     assets.value = list
-    provider.value = status
     jobs.value = recent.items || []
-    if (!selectedId.value && list.length) selectedId.value = list[0].id
-    await loadThumbs()
+    jobsCursor.value = recent.nextCursor || ''
+    jobsHasMore.value = Boolean(recent.nextCursor)
+    jobsLoadedMore.value = false
+    reconcileSelection(list)
+    await loadThumbs(requestId)
   } catch (err) {
-    error.value = err.message
+    if (requestId === assetSeq) error.value = err.message
   } finally {
-    loading.value = false
+    if (requestId === assetSeq) loading.value = false
+  }
+}
+
+async function searchAssets() {
+  const requestId = ++assetSeq
+  searching.value = true
+  error.value = ''
+  try {
+    const list = await api.get(assetsUrl())
+    if (requestId !== assetSeq) return
+    assets.value = list
+    reconcileSelection(list)
+    await loadThumbs(requestId)
+  } catch (err) {
+    if (requestId === assetSeq) error.value = `搜索素材失败：${err.message}`
+  } finally {
+    if (requestId === assetSeq) searching.value = false
+  }
+}
+
+function onKeywordInput() {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    searchAssets()
+  }, 300)
+}
+
+function searchNow() {
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+    searchTimer = null
+  }
+  searchAssets()
+}
+
+function setFilter(key, value) {
+  filters[key] = filters[key] === value ? '' : value
+  searchNow()
+}
+
+function setDays(value) {
+  filters.days = filters.days === value ? 0 : value
+  searchNow()
+}
+
+function resetFilters() {
+  keyword.value = ''
+  filters.sourceType = ''
+  filters.format = ''
+  filters.days = 0
+  searchNow()
+}
+
+async function refreshAssets() {
+  const requestId = ++assetSeq
+  const list = await api.get(assetsUrl())
+  if (requestId !== assetSeq) return
+  assets.value = list
+  reconcileSelection(list)
+  await loadThumbs(requestId)
+}
+
+function fetchJobsPage(cursor = '') {
+  const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
+  return api.get(`/jobs?limit=20${suffix}`)
+}
+
+/** 轮询只刷新最新一页，已加载的历史任务保持原样并就地更新状态 */
+function mergeJobs(incoming) {
+  const previous = new Map(jobs.value.map((job) => [job.id, job]))
+  const merged = incoming.map((job) => ({ ...(previous.get(job.id) || {}), ...job }))
+  const seen = new Set(merged.map((job) => job.id))
+  for (const job of jobs.value) {
+    if (!seen.has(job.id)) merged.push(job)
+  }
+  return merged
+}
+
+/** 翻页只追加新任务，保持「新任务在前、历史任务在后」的顺序 */
+function appendJobs(incoming) {
+  const known = new Set(jobs.value.map((job) => job.id))
+  const additions = incoming.filter((job) => !known.has(job.id))
+  if (additions.length) jobs.value = [...jobs.value, ...additions]
+}
+
+async function loadMoreJobs() {
+  if (jobsLoadingMore.value || !jobsHasMore.value) return
+  jobsLoadingMore.value = true
+  error.value = ''
+  try {
+    const data = await fetchJobsPage(jobsCursor.value)
+    appendJobs(data.items || [])
+    jobsCursor.value = data.nextCursor || ''
+    jobsHasMore.value = Boolean(data.nextCursor)
+    jobsLoadedMore.value = true
+  } catch (err) {
+    error.value = `加载更多任务失败：${err.message}`
+  } finally {
+    jobsLoadingMore.value = false
   }
 }
 
@@ -96,12 +254,22 @@ function startPolling() {
       return
     }
     try {
-      const data = await api.get('/jobs?limit=20')
-      jobs.value = data.items || []
-      const active = jobs.value.some((j) => ['queued', 'running'].includes(j.status))
+      const data = await fetchJobsPage()
+      const latest = data.items || []
+      jobs.value = mergeJobs(latest)
+      // 已经翻过页时保留原有游标，避免新任务插入后重复拉取旧数据
+      if (!jobsLoadedMore.value) {
+        jobsCursor.value = data.nextCursor || ''
+        jobsHasMore.value = Boolean(data.nextCursor)
+      }
+      const active = latest.some((j) => ['queued', 'running'].includes(j.status))
       if (!active) {
         stopPolling()
-        await load()
+        try {
+          await refreshAssets()
+        } catch (err) {
+          error.value = err.message
+        }
       }
     } catch (err) {
       stopPolling()
@@ -124,6 +292,15 @@ async function onUpload(event) {
       `/assets?sessionId=${encodeURIComponent(session.sessionId)}`,
       form,
     )
+    // 新素材可能不匹配当前筛选条件，重置筛选确保上传结果可见
+    keyword.value = ''
+    filters.sourceType = ''
+    filters.format = ''
+    filters.days = 0
+    if (searchTimer) {
+      clearTimeout(searchTimer)
+      searchTimer = null
+    }
     selectedId.value = created.id
     await load()
   } catch (err) {
@@ -172,31 +349,10 @@ async function runOperation() {
       { id: res.jobId, queue: 'image-processing', status: 'queued', progress: 0 },
       ...jobs.value.filter((j) => j.id !== res.jobId),
     ]
+    panelTab.value = 'jobs'
     startPolling()
   } catch (err) {
     error.value = err.message
-  }
-}
-
-async function generate() {
-  if (!aiForm.prompt.trim()) return
-  aiBusy.value = true
-  error.value = ''
-  try {
-    const res = await api.post('/ai/image-generations', {
-      prompt: aiForm.prompt.trim(),
-      aspectRatio: aiForm.aspectRatio,
-      count: Number(aiForm.count),
-    })
-    jobs.value = [
-      { id: res.jobId, queue: 'ai-image', status: 'queued', progress: 0 },
-      ...jobs.value.filter((j) => j.id !== res.jobId),
-    ]
-    startPolling()
-  } catch (err) {
-    error.value = err.message
-  } finally {
-    aiBusy.value = false
   }
 }
 
@@ -205,15 +361,77 @@ async function remove(asset) {
   try {
     await api.del(`/assets/${asset.id}`)
     if (selectedId.value === asset.id) selectedId.value = ''
+    if (previewAsset.value?.id === asset.id) previewAsset.value = null
     await load()
   } catch (err) {
     error.value = err.message
   }
 }
 
+function openPreview(asset) {
+  previewAsset.value = asset
+}
+
+function closePreview() {
+  previewAsset.value = null
+}
+
+function openProcess(asset) {
+  if (asset) selectedId.value = asset.id
+  panelTab.value = 'process'
+  panelOpen.value = true
+}
+
+function closePanel() {
+  panelOpen.value = false
+}
+
+function onPreviewKeydown(event) {
+  if (event.key !== 'Escape') return
+  if (previewAsset.value) closePreview()
+  else if (panelOpen.value) closePanel()
+}
+
+function selectFromPreview() {
+  if (!previewAsset.value) return
+  openProcess(previewAsset.value)
+  closePreview()
+}
+
+async function copyPrompt(asset) {
+  const text = asset?.prompt || ''
+  if (!text) return
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(text)
+    copiedId.value = asset.id
+    if (copiedTimer) clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => {
+      copiedId.value = ''
+      copiedTimer = null
+    }, 1600)
+  } catch {
+    error.value = '复制失败，请打开大图后手动选中提示词复制'
+  }
+}
+
 function sizeLabel(bytes) {
   if (!bytes) return '—'
   return bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function dimensionLabel(asset) {
+  if (!asset?.width || !asset?.height) return '尺寸未知'
+  return `${asset.width}×${asset.height}`
+}
+
+function sourceLabel(value) {
+  return SOURCE_LABELS[value] || value || '未知'
+}
+
+function dateLabel(iso) {
+  if (!iso) return ''
+  return iso.slice(5, 16).replace('T', ' ')
 }
 
 function jobTone(status) {
@@ -225,19 +443,23 @@ function jobTone(status) {
 onMounted(() => {
   load()
   startPolling()
+  document.addEventListener('keydown', onPreviewKeydown)
 })
 onBeforeUnmount(() => {
   stopPolling()
   releaseThumbs()
+  document.removeEventListener('keydown', onPreviewKeydown)
+  if (copiedTimer) clearTimeout(copiedTimer)
+  if (searchTimer) clearTimeout(searchTimer)
 })
 </script>
 
 <template>
-  <div class="page">
+  <div class="page gallery-page">
     <div class="page-head">
       <div>
-        <h1 class="page-title">素材与配图</h1>
-        <p class="page-sub">上传原图、基础图像处理与 AI 生成封面；原图永不覆盖，派生图单独保存。</p>
+        <h1 class="page-title">素材图库</h1>
+        <p class="page-sub">集中浏览、搜索和管理创作素材。原图始终保留，图像处理会另存为派生素材。</p>
       </div>
       <div class="row row-tight">
         <label class="btn btn-sm" style="cursor: pointer">
@@ -253,75 +475,254 @@ onBeforeUnmount(() => {
       <button class="btn btn-ghost btn-sm" @click="error = ''">知道了</button>
     </div>
 
-    <div class="stack" style="gap: var(--space-4)">
-      <!-- 素材库 -->
-      <section class="card">
-        <div class="row">
-          <h2 class="section-title">素材库</h2>
+    <div class="gallery-shell">
+      <!-- 筛选侧栏 -->
+      <aside class="filter-panel" :class="{ 'is-open': filterOpen }" aria-label="素材筛选">
+        <div class="filter-head">
+          <span class="filter-title">筛选</span>
+          <span v-if="activeFilterCount" class="filter-count">{{ activeFilterCount }}</span>
           <div class="spacer" />
-          <span class="field-hint">{{ assets.length }} 个素材</span>
-        </div>
-        <div v-if="loading" class="skeleton" style="height: 140px; margin-top: var(--space-3)" />
-        <div v-else-if="!assets.length" class="empty-state" style="margin-top: var(--space-3)">
-          <span class="empty-title">还没有素材</span>
-          <span>点击右上角「上传图片」开始，上传后即可在这里处理或用于画布配图节点。</span>
-        </div>
-        <div v-else class="asset-grid" style="margin-top: var(--space-3)">
           <button
-            v-for="asset in assets"
-            :key="asset.id"
-            class="asset-card"
-            :class="{ 'is-selected': selectedId === asset.id }"
+            class="filter-close icon-btn icon-btn-sm"
             type="button"
-            :aria-pressed="selectedId === asset.id"
-            @click="selectedId = asset.id"
+            aria-label="关闭筛选"
+            @click="filterOpen = false"
           >
-            <img v-if="thumbs[asset.id]" :src="thumbs[asset.id]" :alt="asset.originalName" />
-            <div v-else class="asset-placeholder" aria-hidden="true">▣</div>
-            <div class="asset-meta">
-              <span class="asset-name" :title="asset.originalName">{{ asset.originalName }}</span>
-              <span class="field-hint">
-                {{ asset.width }}×{{ asset.height }} · {{ sizeLabel(asset.sizeBytes) }}
-              </span>
-              <span class="tag tag-sm">{{ asset.sourceType }}</span>
-            </div>
+            ✕
           </button>
         </div>
-      </section>
 
-      <!-- 图像处理 -->
-      <section class="card">
-        <h2 class="section-title">基础图像处理</h2>
-        <p class="field-hint" style="margin-top: 4px">
-          任务走队列异步执行，结果可在下方任务列表查看；大图不会阻塞接口请求。
-        </p>
-        <div class="row row-tight" style="flex-wrap: wrap; margin-top: var(--space-3)">
-          <label class="field" style="min-width: 180px">
+        <div class="filter-group">
+          <span class="filter-group-label">来源</span>
+          <button
+            v-for="item in SOURCE_OPTIONS"
+            :key="item.value"
+            type="button"
+            class="filter-item"
+            :class="{ 'is-active': filters.sourceType === item.value }"
+            :aria-pressed="filters.sourceType === item.value"
+            @click="setFilter('sourceType', item.value)"
+          >
+            <span class="filter-dot" :class="`dot-${item.value}`" aria-hidden="true" />
+            {{ item.label }}
+          </button>
+        </div>
+
+        <div class="filter-group">
+          <span class="filter-group-label">格式</span>
+          <button
+            v-for="item in FORMAT_OPTIONS"
+            :key="item.value"
+            type="button"
+            class="filter-item"
+            :class="{ 'is-active': filters.format === item.value }"
+            :aria-pressed="filters.format === item.value"
+            @click="setFilter('format', item.value)"
+          >
+            {{ item.label }}
+          </button>
+        </div>
+
+        <div class="filter-group">
+          <span class="filter-group-label">时间</span>
+          <button
+            v-for="item in TIME_OPTIONS"
+            :key="item.value"
+            type="button"
+            class="filter-item"
+            :class="{ 'is-active': filters.days === item.value }"
+            :aria-pressed="filters.days === item.value"
+            @click="setDays(item.value)"
+          >
+            {{ item.label }}
+          </button>
+        </div>
+
+        <button
+          v-if="hasFilters"
+          class="btn btn-ghost btn-sm filter-reset"
+          type="button"
+          @click="resetFilters"
+        >
+          清除全部筛选
+        </button>
+      </aside>
+      <div v-if="filterOpen" class="filter-scrim" @click="filterOpen = false" />
+
+      <!-- 主区 -->
+      <section class="gallery-main">
+        <div class="gallery-toolbar">
+          <label class="gallery-search">
+            <input
+              v-model="keyword"
+              class="input gallery-search-input"
+              type="text"
+              placeholder="搜索名称或提示词"
+              aria-label="按关键字搜索素材"
+              @input="onKeywordInput"
+              @keydown.enter.prevent="searchNow"
+            />
+            <button
+              v-if="keyword"
+              class="gallery-search-clear"
+              type="button"
+              aria-label="清空搜索"
+              @click="resetFilters"
+            >
+              ✕
+            </button>
+          </label>
+          <button class="btn btn-ghost btn-sm filter-toggle" type="button" @click="filterOpen = true">
+            筛选<span v-if="activeFilterCount"> {{ activeFilterCount }}</span>
+          </button>
+          <div class="spacer" />
+          <span v-if="searching" class="field-hint">搜索中…</span>
+          <span v-else class="field-hint">
+            {{ hasFilters ? `匹配 ${assets.length} 个素材` : `${assets.length} 个素材` }}
+          </span>
+        </div>
+
+        <div v-if="loading" class="gallery-grid">
+          <div v-for="n in 8" :key="n" class="skeleton skeleton-card" />
+        </div>
+
+        <div v-else-if="!assets.length && hasFilters" class="empty-state gallery-empty">
+          <span class="empty-title">没有匹配的素材</span>
+          <span>换个关键字或放宽筛选条件试试。</span>
+          <button class="btn btn-ghost btn-sm" style="align-self: flex-start" @click="resetFilters">
+            清除筛选
+          </button>
+        </div>
+
+        <div v-else-if="!assets.length" class="empty-state gallery-empty">
+          <span class="empty-title">图库还是空的</span>
+          <span>点击右上角「上传图片」开始，上传后就能在这里筛选、预览和处理。</span>
+        </div>
+
+        <div v-else class="gallery-grid">
+          <article
+            v-for="asset in assets"
+            :key="asset.id"
+            class="gallery-card"
+            :class="{ 'is-selected': selectedId === asset.id }"
+          >
+            <button
+              class="gallery-thumb"
+              type="button"
+              :aria-label="`查看大图：${asset.originalName}`"
+              @click="openPreview(asset)"
+            >
+              <img v-if="thumbs[asset.id]" :src="thumbs[asset.id]" :alt="asset.originalName" />
+              <span v-else class="gallery-placeholder" aria-hidden="true">▣</span>
+            </button>
+            <div class="gallery-actions">
+              <button class="gallery-action" type="button" @click.stop="openPreview(asset)">
+                预览
+              </button>
+              <button class="gallery-action is-primary" type="button" @click.stop="openProcess(asset)">
+                处理
+              </button>
+            </div>
+            <div class="gallery-meta">
+              <button
+                class="gallery-name"
+                type="button"
+                :title="asset.originalName"
+                @click="openPreview(asset)"
+              >
+                {{ asset.originalName }}
+              </button>
+              <div class="gallery-meta-row">
+                <span class="field-hint">{{ dimensionLabel(asset) }} · {{ sizeLabel(asset.sizeBytes) }}</span>
+                <span class="tag tag-sm">{{ sourceLabel(asset.sourceType) }}</span>
+              </div>
+              <div class="gallery-meta-row">
+                <span class="field-hint">{{ dateLabel(asset.createdAt) }}</span>
+                <button
+                  v-if="asset.prompt"
+                  class="gallery-prompt-btn"
+                  type="button"
+                  @click.stop="copyPrompt(asset)"
+                >
+                  {{ copiedId === asset.id ? '已复制' : '复制提示词' }}
+                </button>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </div>
+
+    <!-- 图像处理 / 任务抽屉 -->
+    <div v-if="panelOpen" class="drawer-scrim" @click.self="closePanel">
+      <aside class="drawer" role="dialog" aria-modal="true" aria-label="图像处理面板">
+        <div class="drawer-head">
+          <div class="drawer-tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              class="drawer-tab"
+              :class="{ 'is-active': panelTab === 'process' }"
+              :aria-selected="panelTab === 'process'"
+              @click="panelTab = 'process'"
+            >
+              图像处理
+            </button>
+            <button
+              type="button"
+              role="tab"
+              class="drawer-tab"
+              :class="{ 'is-active': panelTab === 'jobs' }"
+              :aria-selected="panelTab === 'jobs'"
+              @click="panelTab = 'jobs'"
+            >
+              任务状态
+              <span v-if="jobs.length" class="drawer-tab-count">{{ jobs.length }}</span>
+            </button>
+          </div>
+          <button class="icon-btn icon-btn-sm" aria-label="关闭面板" @click="closePanel">✕</button>
+        </div>
+
+        <div v-if="panelTab === 'process'" class="drawer-body">
+          <div v-if="selected" class="drawer-target">
+            <img v-if="thumbs[selected.id]" :src="thumbs[selected.id]" alt="" class="drawer-target-img" />
+            <div v-else class="drawer-target-img is-empty" aria-hidden="true">▣</div>
+            <div class="drawer-target-text">
+              <span class="drawer-target-name" :title="selected.originalName">
+                {{ selected.originalName }}
+              </span>
+              <span class="field-hint">{{ dimensionLabel(selected) }} · {{ sizeLabel(selected.sizeBytes) }}</span>
+            </div>
+          </div>
+          <div v-else class="field-hint drawer-hint">在左侧网格中选择一张素材后再执行处理。</div>
+
+          <label class="field">
             <span class="field-label">操作</span>
             <select v-model="operation" class="select">
               <option v-for="op in OPERATIONS" :key="op.value" :value="op.value">{{ op.label }}</option>
             </select>
           </label>
-          <label v-if="optionHint === 'maxSize'" class="field" style="width: 130px">
+
+          <label v-if="optionHint === 'maxSize'" class="field">
             <span class="field-label">最大边长</span>
             <input v-model.number="options.maxSize" class="input" type="number" min="16" max="4096" />
           </label>
-          <template v-if="optionHint === 'size'">
-            <label class="field" style="width: 120px">
+          <div v-if="optionHint === 'size'" class="field-row">
+            <label class="field">
               <span class="field-label">宽</span>
               <input v-model.number="options.width" class="input" type="number" min="1" max="8000" />
             </label>
-            <label class="field" style="width: 120px">
+            <label class="field">
               <span class="field-label">高</span>
               <input v-model.number="options.height" class="input" type="number" min="1" max="8000" />
             </label>
-          </template>
-          <label v-if="optionHint === 'ratio'" class="field" style="width: 130px">
+          </div>
+          <label v-if="optionHint === 'ratio'" class="field">
             <span class="field-label">比例 W:H</span>
             <input v-model="options.aspectRatio" class="input" placeholder="3:4" />
           </label>
-          <template v-if="optionHint === 'quality' || optionHint === 'format'">
-            <label class="field" style="width: 130px">
+          <div v-if="optionHint === 'quality' || optionHint === 'format'" class="field-row">
+            <label class="field">
               <span class="field-label">输出格式</span>
               <select v-model="options.format" class="select">
                 <option value="webp">WebP</option>
@@ -329,25 +730,27 @@ onBeforeUnmount(() => {
                 <option value="png">PNG</option>
               </select>
             </label>
-            <label class="field" style="width: 120px">
+            <label class="field">
               <span class="field-label">质量</span>
               <input v-model.number="options.quality" class="input" type="number" min="10" max="100" />
             </label>
-          </template>
-          <label v-if="optionHint === 'text'" class="field" style="min-width: 200px">
+          </div>
+          <label v-if="optionHint === 'text'" class="field">
             <span class="field-label">水印文字</span>
             <input v-model="options.text" class="input" placeholder="例如：@瀚月" />
           </label>
           <template v-if="optionHint === 'panels'">
-            <label class="field" style="width: 130px">
-              <span class="field-label">最小间隔(px)</span>
-              <input v-model.number="options.minGap" class="input" type="number" min="2" max="200" />
-            </label>
-            <label class="field" style="width: 130px">
-              <span class="field-label">最多分格</span>
-              <input v-model.number="options.maxPanels" class="input" type="number" min="1" max="30" />
-            </label>
-            <label class="field" style="width: 130px">
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">最小间隔(px)</span>
+                <input v-model.number="options.minGap" class="input" type="number" min="2" max="200" />
+              </label>
+              <label class="field">
+                <span class="field-label">最多分格</span>
+                <input v-model.number="options.maxPanels" class="input" type="number" min="1" max="30" />
+              </label>
+            </div>
+            <label class="field">
               <span class="field-label">输出格式</span>
               <select v-model="options.format" class="select">
                 <option value="jpeg">JPEG</option>
@@ -356,153 +759,638 @@ onBeforeUnmount(() => {
               </select>
             </label>
           </template>
-          <div class="spacer" />
-          <button class="btn btn-sm" :disabled="!selected" @click="runOperation">执行处理</button>
-          <button class="btn btn-ghost btn-sm" :disabled="!selected" @click="remove(selected)">
-            删除原图
-          </button>
-        </div>
-        <p v-if="selected" class="field-hint" style="margin-top: var(--space-2)">
-          已选：{{ selected.originalName }}（{{ selected.id }}）
-        </p>
-      </section>
 
-      <!-- AI 生图 -->
-      <section class="card">
-        <div class="row">
-          <h2 class="section-title">AI 生成封面</h2>
-          <div class="spacer" />
-          <span class="tag" :class="provider.available ? 'tag-success' : 'tag-warning'">
-            {{ provider.available ? `供应商已配置 · ${provider.modelCode}` : '供应商未接入' }}
-          </span>
+          <p class="field-hint">任务走队列异步执行，结果在「任务状态」中查看，大图不会阻塞接口请求。</p>
         </div>
-        <p class="field-hint" style="margin-top: 4px">{{ provider.note }}</p>
-        <div class="row row-tight" style="flex-wrap: wrap; margin-top: var(--space-3)">
-          <label class="field" style="flex: 1 1 280px">
-            <span class="field-label">画面描述</span>
-            <input v-model="aiForm.prompt" class="input" placeholder="例如：清晨书桌上的笔记本与咖啡，柔和自然光" />
-          </label>
-          <label class="field" style="width: 130px">
-            <span class="field-label">比例</span>
-            <select v-model="aiForm.aspectRatio" class="select">
-              <option value="3:4">3:4</option>
-              <option value="1:1">1:1</option>
-              <option value="16:9">16:9</option>
-              <option value="9:16">9:16</option>
-            </select>
-          </label>
-          <label class="field" style="width: 110px">
-            <span class="field-label">数量</span>
-            <select v-model.number="aiForm.count" class="select">
-              <option :value="1">1</option>
-              <option :value="2">2</option>
-              <option :value="3">3</option>
-              <option :value="4">4</option>
-            </select>
-          </label>
-          <button
-            class="btn btn-sm"
-            :disabled="!provider.available || !aiForm.prompt.trim() || aiBusy"
-            @click="generate"
-          >
-            {{ aiBusy ? '提交中…' : '生成图片' }}
-          </button>
-        </div>
-        <div v-if="!provider.available" class="banner banner-warning" style="margin-top: var(--space-3)">
-          未配置图像生成供应商时不会生成占位图。可在设置中添加支持 image.generate 能力的模型，
-          或设置 IMAGE_PROVIDER_BASE_URL / IMAGE_PROVIDER_API_KEY / IMAGE_PROVIDER_MODEL 后重启服务。
-        </div>
-      </section>
 
-      <!-- 任务列表 -->
-      <section class="card">
-        <h2 class="section-title">任务状态</h2>
-        <div v-if="!jobs.length" class="field-hint" style="margin-top: var(--space-2)">暂无任务</div>
-        <div v-else class="stack" style="margin-top: var(--space-2)">
-          <div v-for="job in jobs" :key="job.id" class="row row-tight card-flat" style="padding: var(--space-2)">
-            <span class="tag" :class="jobTone(job.status)">{{ job.status }}</span>
-            <span class="field-hint">{{ job.queue || job.kind }} · {{ job.id }}</span>
-            <span v-if="job.errorCode" class="field-hint" style="color: var(--color-danger)">
-              {{ job.errorCode }} · {{ job.errorMessage }}
-            </span>
-            <div class="spacer" />
-            <span v-if="job.result?.assetIds?.length" class="field-hint">
-              产出 {{ job.result.assetIds.length }} 张
-            </span>
-            <span v-if="job.progress" class="field-hint">{{ job.progress }}%</span>
+        <div v-else class="drawer-body">
+          <div v-if="!jobs.length" class="field-hint">暂无任务</div>
+          <div v-else class="stack drawer-jobs">
+            <div v-for="job in jobs" :key="job.id" class="drawer-job">
+              <div class="row row-tight">
+                <span class="tag" :class="jobTone(job.status)">{{ job.status }}</span>
+                <span class="field-hint">{{ job.queue || job.kind }}</span>
+                <div class="spacer" />
+                <span v-if="job.progress" class="field-hint">{{ job.progress }}%</span>
+              </div>
+              <span class="field-hint drawer-job-id">{{ job.id }}</span>
+              <span v-if="job.errorCode" class="field-hint" style="color: var(--color-danger)">
+                {{ job.errorCode }} · {{ job.errorMessage }}
+              </span>
+              <span v-if="job.result?.assetIds?.length" class="field-hint">
+                产出 {{ job.result.assetIds.length }} 张
+              </span>
+            </div>
+          </div>
+          <div v-if="jobs.length" class="drawer-jobs-more">
+            <button
+              v-if="jobsHasMore"
+              class="btn btn-ghost btn-sm"
+              :disabled="jobsLoadingMore"
+              @click="loadMoreJobs"
+            >
+              {{ jobsLoadingMore ? '加载中…' : '加载更多任务' }}
+            </button>
+            <span v-else class="field-hint">已加载全部 {{ jobs.length }} 条任务</span>
           </div>
         </div>
-      </section>
+
+        <div class="drawer-foot">
+          <button class="btn btn-ghost btn-sm" :disabled="!selected" @click="remove(selected)">
+            删除素材
+          </button>
+          <div class="spacer" />
+          <button class="btn btn-sm" :disabled="!selected" @click="runOperation">执行处理</button>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 素材大图预览 -->
+    <div v-if="previewAsset" class="modal-backdrop" role="presentation" @click.self="closePreview">
+      <div
+        class="modal preview-modal"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="`素材预览：${previewAsset.originalName}`"
+      >
+        <div class="row" style="margin-bottom: var(--space-3)">
+          <h2 class="modal-title" style="margin: 0; overflow: hidden; text-overflow: ellipsis">
+            {{ previewAsset.originalName }}
+          </h2>
+          <div class="spacer" />
+          <button class="icon-btn" aria-label="关闭" @click="closePreview">✕</button>
+        </div>
+        <div class="preview-body">
+          <div class="preview-figure">
+            <img
+              v-if="thumbs[previewAsset.id] || previewAsset.url"
+              :src="thumbs[previewAsset.id] || previewAsset.url"
+              :alt="previewAsset.originalName"
+              class="preview-image"
+            />
+            <div v-else class="gallery-placeholder" style="height: 240px">▣</div>
+          </div>
+          <div class="preview-side">
+            <p class="field-hint" style="margin: 0">
+              {{ dimensionLabel(previewAsset) }} · {{ sizeLabel(previewAsset.sizeBytes) }} ·
+              {{ sourceLabel(previewAsset.sourceType) }}
+            </p>
+            <template v-if="previewAsset.prompt">
+              <span class="field-label">生成提示词</span>
+              <p class="preview-prompt">{{ previewAsset.prompt }}</p>
+              <button class="btn btn-sm" type="button" @click="copyPrompt(previewAsset)">
+                {{ copiedId === previewAsset.id ? '已复制' : '复制提示词' }}
+              </button>
+            </template>
+            <p v-else class="field-hint" style="margin: 0">
+              该素材没有记录生成提示词（手动上传或处理后的派生图）。
+            </p>
+            <div class="spacer" />
+            <button class="btn btn-ghost btn-sm" type="button" @click="selectFromPreview">
+              选为处理对象
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.section-title {
-  margin: 0;
-  font-size: var(--font-section);
+.gallery-page {
+  gap: var(--space-4);
+}
+
+/* ---------- 两栏骨架 ---------- */
+.gallery-shell {
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.filter-panel {
+  position: sticky;
+  top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+.filter-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.filter-title {
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--color-text-primary);
 }
-.asset-grid {
+.filter-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+.filter-close {
+  display: none;
+}
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.filter-group-label {
+  margin-bottom: var(--space-2);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--color-text-muted);
+}
+.filter-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 7px var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.filter-item:hover {
+  background: var(--color-surface-raised);
+  color: var(--color-text-primary);
+}
+.filter-item.is-active {
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 600;
+}
+.filter-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--color-border-strong);
+}
+.dot-upload {
+  background: #7ba392;
+}
+.dot-generated {
+  background: #8a7ba3;
+}
+.dot-derived {
+  background: #a3927b;
+}
+.filter-reset {
+  align-self: flex-start;
+}
+.filter-scrim,
+.filter-toggle {
+  display: none;
+}
+
+/* ---------- 主区 ---------- */
+.gallery-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.gallery-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.gallery-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 260px;
+  max-width: 100%;
+}
+.gallery-search-input {
+  width: 100%;
+  height: 34px;
+  padding-right: 28px;
+}
+.gallery-search-clear {
+  position: absolute;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+.gallery-search-clear:hover {
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+}
+
+/* ---------- 网格 ---------- */
+.gallery-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
   gap: var(--space-3);
 }
-.asset-card {
-  display: block;
-  width: 100%;
-  padding: 0;
-  text-align: left;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md, 10px);
-  background: var(--color-surface);
-  color: var(--color-text-primary);
-  overflow: hidden;
-  cursor: pointer;
-  min-height: 44px;
+.skeleton-card {
+  height: 190px;
+  border-radius: var(--radius-md);
 }
-.asset-card.is-selected {
+.gallery-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  overflow: hidden;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.gallery-card:hover {
+  border-color: var(--color-border-strong);
+  box-shadow: var(--shadow-sm);
+}
+.gallery-card.is-selected {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 2px var(--color-accent-soft);
 }
-.asset-card img,
-.asset-placeholder {
+.gallery-thumb {
+  display: block;
   width: 100%;
-  height: 120px;
+  padding: 0;
+  border: 0;
+  background: var(--color-bg);
+  cursor: zoom-in;
+}
+.gallery-thumb img,
+.gallery-placeholder {
+  display: block;
+  width: 100%;
+  height: 124px;
   object-fit: cover;
+  background: var(--color-bg);
+}
+.gallery-placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--color-bg);
-  font-size: 28px;
+  font-size: 26px;
+  color: var(--color-text-muted);
 }
-.asset-meta {
+.gallery-actions {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.gallery-card:hover .gallery-actions,
+.gallery-card:focus-within .gallery-actions {
+  opacity: 1;
+  transform: translateY(0);
+}
+.gallery-action {
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: var(--radius-sm);
+  background: rgba(20, 26, 22, 0.72);
+  color: #fff;
+  font-family: inherit;
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+.gallery-action:hover {
+  background: rgba(20, 26, 22, 0.88);
+}
+.gallery-action.is-primary {
+  background: var(--color-accent);
+  border-color: transparent;
+}
+.gallery-action.is-primary:hover {
+  background: var(--color-accent-hover);
+}
+.gallery-meta {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--space-2);
+  gap: 3px;
+  padding: var(--space-2) var(--space-3) var(--space-3);
 }
-.asset-name {
+.gallery-name {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  font: inherit;
   font-size: var(--font-sm);
+  font-weight: 500;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.gallery-name:hover {
+  color: var(--color-accent);
+}
+.gallery-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.gallery-meta-row .field-hint {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.empty-state {
+.gallery-prompt-btn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-accent);
+  font-family: inherit;
+  font-size: var(--font-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.gallery-prompt-btn:hover {
+  text-decoration: underline;
+}
+.tag-sm {
+  flex-shrink: 0;
+  font-size: var(--font-xs);
+}
+.gallery-empty {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: var(--space-4);
+  padding: var(--space-6);
   border: 1px dashed var(--color-border);
-  border-radius: var(--radius-md, 10px);
+  border-radius: var(--radius-md);
   font-size: var(--font-sm);
+  align-items: flex-start;
 }
 .empty-title {
   font-weight: 600;
 }
-.tag-sm {
-  align-self: flex-start;
+
+/* ---------- 处理抽屉 ---------- */
+.drawer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(20, 26, 22, 0.36);
+}
+.drawer {
+  display: flex;
+  flex-direction: column;
+  width: min(400px, 100%);
+  height: 100%;
+  background: var(--color-surface);
+  border-left: 1px solid var(--color-border);
+  box-shadow: var(--shadow-lg);
+}
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+.drawer-tabs {
+  display: flex;
+  gap: var(--space-1);
+}
+.drawer-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  cursor: pointer;
+}
+.drawer-tab.is-active {
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 600;
+}
+.drawer-tab-count {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--color-surface);
   font-size: var(--font-xs);
+}
+.drawer-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  overflow-y: auto;
+}
+.drawer-hint {
+  margin: 0;
+}
+.drawer-target {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+}
+.drawer-target-img {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.drawer-target-img.is-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+}
+.drawer-target-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.drawer-target-name {
+  font-size: var(--font-sm);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+}
+.drawer-jobs {
+  gap: var(--space-2);
+}
+.drawer-job {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+}
+.drawer-job-id {
+  word-break: break-all;
+}
+.drawer-jobs-more {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--space-2);
+}
+.drawer-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+/* ---------- 大图预览 ---------- */
+.preview-modal {
+  width: min(880px, 100%);
+}
+.preview-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: var(--space-4);
+}
+.preview-figure {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  min-height: 200px;
+}
+.preview-image {
+  display: block;
+  width: 100%;
+  max-height: 62vh;
+  object-fit: contain;
+}
+.preview-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.preview-prompt {
+  margin: 0;
+  padding: var(--space-3);
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  font-size: var(--font-sm);
+  line-height: 1.65;
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+@media (max-width: 1023px) {
+  .gallery-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .filter-panel {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 60;
+    width: 240px;
+    border-radius: 0;
+    border-left: 0;
+    border-top: 0;
+    border-bottom: 0;
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+  }
+  .filter-panel.is-open {
+    transform: translateX(0);
+  }
+  .filter-close,
+  .filter-toggle {
+    display: inline-flex;
+  }
+  .filter-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(20, 26, 22, 0.36);
+  }
+}
+
+@media (max-width: 767px) {
+  .gallery-search {
+    width: 100%;
+  }
+  .gallery-grid {
+    grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
+  }
+  .preview-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .preview-image {
+    max-height: 46vh;
+  }
 }
 </style>

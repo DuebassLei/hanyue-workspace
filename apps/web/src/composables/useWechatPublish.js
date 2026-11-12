@@ -23,6 +23,7 @@ export function useWechatPublish() {
     needOpenComment: false,
   })
   const wechatAccountId = ref('')
+  const wechatContentId = ref('')
   const wechatKey = ref('')
   const wechatPreview = ref(null)
   const wechatPushError = ref('')
@@ -165,6 +166,7 @@ export function useWechatPublish() {
   function wechatPayload() {
     return {
       accountId: wechatAccountId.value,
+      contentItemId: wechatContentId.value || null,
       title: wechatForm.title,
       body: wechatForm.body,
       digest: wechatForm.digest,
@@ -211,12 +213,13 @@ export function useWechatPublish() {
 
   /**
    * 用稿件内容初始化发布表单，并触发排版渲染。
-   * @param {{ title?: string, body?: string }} defaults
+   * @param {{ title?: string, body?: string, contentId?: string }} defaults
    */
   function initForm(defaults = {}) {
     clearTimeout(layoutTimer)
     layoutRequestId += 1
     layoutBusy.value = false
+    wechatContentId.value = defaults.contentId || ''
     wechatForm.title = defaults.title || ''
     wechatForm.body = defaults.body || ''
     wechatForm.digest = ''

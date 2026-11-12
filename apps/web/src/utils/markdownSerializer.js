@@ -145,13 +145,9 @@ const serializerNodes = {
     state.write(`![${alt}](${src.replace(/[()]/g, '\\$&')}${title})`)
   },
 
-  hardBreak(state, node, parent, index) {
-    for (let i = index + 1; i < parent.childCount; i += 1) {
-      if (parent.child(i).type !== node.type) {
-        state.write('  \n')
-        return
-      }
-    }
+  hardBreak(state) {
+    // 行尾的换行也要写出来，否则用户在源码模式最后一行按的回车会丢
+    state.write('  \n')
   },
   hard_break(state, node, parent, index) {
     serializerNodes.hardBreak(state, node, parent, index)
@@ -281,7 +277,9 @@ let mdIt = null
 function getMarkdownIt() {
   if (mdIt) return mdIt
   // html: true 让 <mark> / <u> / <table> 这类标签原样透传，tiptap 的 DOM 解析器才能识别
-  mdIt = new MarkdownIt({ html: true, breaks: false, linkify: false, typographer: false })
+  // breaks: true —— 源码模式下用户按一次回车就应在预览里换行；
+  // 关掉的话软换行会在 markdown-it 里变成空白，切回预览时回车全部消失
+  mdIt = new MarkdownIt({ html: true, breaks: true, linkify: false, typographer: false })
   mdIt.enable('table')
   return mdIt
 }

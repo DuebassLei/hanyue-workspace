@@ -334,12 +334,20 @@ def clear_credentials(user: CurrentUser, db: DbSession) -> None:
 def draft_status(user: CurrentUser, db: DbSession) -> dict:
     connector = registry.get_connector(PLATFORM, db)
     account = _bound_account(db, user)
+    # 账号自带 AppID/AppSecret 时，即使部署级没配也要算「已配置」：
+    # 推送走的是账号凭据，否则这里报未配置会把已经能用的账号挡住
+    account_level = False
+    if account is not None and not isinstance(connector, wechat.WeChatMPConnector):
+        account_connector = registry.get_account_connector(account, db)
+        if isinstance(account_connector, wechat.WeChatMPConnector):
+            connector = account_connector
+            account_level = True
     base = {
         "platform": PLATFORM,
         "draftCapable": True,
         "publishSupported": False,
         "publishNote": "本接入只推送到草稿箱；正式群发请在公众号后台完成",
-        "credentialSource": wechat.config_source_label(db),
+        "credentialSource": "account" if account_level else wechat.config_source_label(db),
         "limits": {
             "titleChars": wechat_article.MAX_TITLE_CHARS,
             "digestChars": wechat_article.MAX_DIGEST_CHARS,
@@ -640,9 +648,16 @@ def push_draft(
         )
 
     workspace = default_workspace(db, user)
+    content_item_id = None
+    if payload.content_item_id:
+        item = db.get(models.ContentItem, payload.content_item_id)
+        # 只允许关联本人稿件，跨用户传入按未关联处理
+        if item and item.owner_user_id == user.id:
+            content_item_id = item.id
     job = models.PublishJob(
         owner_user_id=user.id,
         workspace_id=workspace.id,
+        content_item_id=content_item_id,
         connected_account_id=account.id,
         platform=PLATFORM,
         target="draft",

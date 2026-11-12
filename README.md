@@ -104,7 +104,7 @@ cd ../web && npm run build                               # 前端构建
 
 ## 启用 AI 生图
 
-默认**未启用**：不配供应商时 `POST /ai/image-generations` 的任务明确进入 `failed` 并给出 `image_provider_unavailable`，不会生成假图。启用后「素材与配图」页与 `POST /ai/image-generations` 都会真实调用供应商。
+默认**未启用**：不配供应商时 `POST /ai/image-generations` 的任务明确进入 `failed` 并给出 `image_provider_unavailable`，不会生成假图。启用后「素材图库」页与 `POST /ai/image-generations` 都会真实调用供应商。
 
 ### 两种启用方式
 
@@ -167,7 +167,7 @@ curl -H "Authorization: Bearer <TOKEN>" \
   http://127.0.0.1:8000/api/v1/jobs/<JOB_ID>
 ```
 
-界面验证：打开「素材与配图」页，顶部显示「已配置图像生成供应商」→ 填写提示词生成 → 任务列表变为 `succeeded` → 素材网格出现新图片。
+界面验证：打开「素材图库」页，顶部显示「已配置图像生成供应商」→ 填写提示词生成 → 任务列表变为 `succeeded` → 素材网格出现新图片。
 
 | 常见错误码 | 含义 / 处理 |
 |---|---|

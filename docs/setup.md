@@ -157,7 +157,7 @@ shell / compose 注入的环境变量  >  apps/api/.env  >  代码默认值
 
 默认不启用。未配置供应商时：`POST /ai/image-generations` 的任务明确进入 `failed`，**不会生成占位图**。
 
-启用后，`POST /ai/image-generations`、`GET /ai/image-provider/status`、素材与配图页都会走真实供应商调用。
+启用后，`POST /ai/image-generations`、`GET /ai/image-provider/status`、素材图库页都会走真实供应商调用。
 
 ### 路径 1：环境变量（推荐给部署）
 
@@ -238,7 +238,7 @@ $job = Invoke-RestMethod -Method Post -Headers $headers `
 Invoke-RestMethod -Headers $headers -Uri "$base/jobs/$($job.jobId)"
 ```
 
-界面验证：打开「素材与配图」页 → 顶部显示「已配置图像生成供应商」→ 填提示词生成 → 任务列表变 `succeeded` → 素材网格出现新图片。任务列表每几秒轮询 `GET /jobs`，断线后凭 `jobId` 也能恢复状态。
+界面验证：打开「素材图库」页 → 顶部显示「已配置图像生成供应商」→ 填提示词生成 → 任务列表变 `succeeded` → 素材网格出现新图片。任务列表每几秒轮询 `GET /jobs`，断线后凭 `jobId` 也能恢复状态。
 
 ### 错误码对照
 

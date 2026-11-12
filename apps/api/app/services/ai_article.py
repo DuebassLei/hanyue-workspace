@@ -228,6 +228,18 @@ def parse_llm_output(raw: str) -> ArticleDraft:
     )
 
 
+def article_from_raw_output(raw: str) -> tuple[str, str]:
+    """把模型原始输出规整成 (标题, 正文)。
+
+    文章类任务按 JSON 契约输出，直接当正文落库会把 title/summary 等字段一起写进正文；
+    能解析出 markdown 时只取正文和标题，解析失败（未按契约输出）时按原文保留。
+    """
+    draft = parse_llm_output(raw)
+    if draft.ok:
+        return draft.title, draft.markdown
+    return "", raw
+
+
 def _resolve_theme(theme_id: str) -> dict:
     """解析主题 tokens；预设主题直接取，不查库。"""
     preset = wechat_layout.theme_by_id(theme_id)

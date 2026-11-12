@@ -261,6 +261,8 @@ class PublishJob(Base, TimestampMixin):
     owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     platform_variant_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 关联创作空间稿件；为空表示手工填写的独立任务
+    content_item_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     connected_account_id: Mapped[str] = mapped_column(String(32), index=True)
     platform: Mapped[str] = mapped_column(String(24), default="")
     # publish：对外发布（需平台发布能力核验）；draft：只推送到平台草稿箱（公众号）
@@ -524,6 +526,74 @@ class CardTemplate(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120))
     subtitle: Mapped[str] = mapped_column(String(200), default="")
     config: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class PromptTemplate(Base, TimestampMixin):
+    """提示词库：用户维护的生图提示词模板，按 owner 隔离。"""
+
+    __tablename__ = "prompt_templates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(120))
+    category: Mapped[str] = mapped_column(String(32), default="通用")
+    content: Mapped[str] = mapped_column(Text)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class HanddrawStyle(Base, TimestampMixin):
+    """手绘风格库（内置只读）：来自 handdraw-style-prompter 的资源快照。"""
+
+    __tablename__ = "handdraw_styles"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    style_number: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    legacy_number: Mapped[str] = mapped_column(String(8), default="", index=True)
+    group_key: Mapped[str] = mapped_column(String(8), default="", index=True)
+    group_name: Mapped[str] = mapped_column(String(120), default="")
+    reference_author: Mapped[str] = mapped_column(String(190), default="")
+    generation_name: Mapped[str] = mapped_column(String(190), default="")
+    traits_raw: Mapped[str] = mapped_column(Text, default="")
+    reference_file: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    reference_kind: Mapped[str] = mapped_column(String(16), default="single")
+    reference_available: Mapped[bool] = mapped_column(Boolean, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, index=True)
+
+
+class HanddrawColor(Base, TimestampMixin):
+    """手绘风格库的主题色（内置只读）。"""
+
+    __tablename__ = "handdraw_colors"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    color_id: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    category: Mapped[str] = mapped_column(String(32), default="")
+    category_zh: Mapped[str] = mapped_column(String(60), default="")
+    category_en: Mapped[str] = mapped_column(String(60), default="")
+    name_zh: Mapped[str] = mapped_column(String(60), default="")
+    name_en: Mapped[str] = mapped_column(String(60), default="")
+    quote_zh: Mapped[str] = mapped_column(String(120), default="")
+    quote_en: Mapped[str] = mapped_column(String(120), default="")
+    prompt_zh: Mapped[str] = mapped_column(Text, default="")
+    prompt_en: Mapped[str] = mapped_column(Text, default="")
+    swatch_file: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class HanddrawLibraryMeta(Base, TimestampMixin):
+    """内置手绘库的导入元信息：资源哈希、数量、缺失参考图。"""
+
+    __tablename__ = "handdraw_library_meta"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    library_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    version: Mapped[str] = mapped_column(String(32), default="")
+    source_hash: Mapped[str] = mapped_column(String(64), default="")
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    style_count: Mapped[int] = mapped_column(Integer, default=0)
+    color_count: Mapped[int] = mapped_column(Integer, default=0)
+    reference_count: Mapped[int] = mapped_column(Integer, default=0)
+    missing_references: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class AppSetting(Base, TimestampMixin):

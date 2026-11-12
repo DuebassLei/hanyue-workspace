@@ -35,7 +35,7 @@ hanyue-workspace/
 │   │   │   ├── main.py           启动入口、lifespan、路由注册
 │   │   │   ├── models.py         SQLAlchemy ORM 模型
 │   │   │   ├── schemas.py        Pydantic 请求/响应 schema
-│   │   │   ├── modules/          路由模块（16个，见下表）
+│   │   │   ├── modules/          路由模块（17个，见下表）
 │   │   │   ├── services/         领域服务（14个，见下表）
 │   │   │   └── core/             基础设施（db/config/deps/logging/pagination/queue/security/ssrf）
 │   │   ├── tests/                pytest 测试（174 passed）
@@ -44,7 +44,7 @@ hanyue-workspace/
 │   │   └── .env.example          环境变量模板
 │   ├── web/              ← Vue 3 前端
 │   │   ├── src/
-│   │   │   ├── views/            8 个页面视图
+│   │   │   ├── views/            9 个页面视图
 │   │   │   ├── features/         功能模块（按页面组织）
 │   │   │   ├── components/       公共组件
 │   │   │   ├── composables/      组合式函数
@@ -80,6 +80,7 @@ hanyue-workspace/
 | `ai_images.py` | `/api/v1/ai/image-generations` | AI 生图任务 |
 | `assets.py` | `/api/v1/assets` | 素材上传、7 种图像处理、分格 |
 | `cards.py` | `/api/v1/cards` | 图文卡片生成（8套模板）、PNG/ZIP 导出 |
+| `prompts.py` | `/api/v1/prompts` | 提示词库 CRUD（生图提示词模板，按用户隔离） |
 | `publishing.py` | `/api/v1/publishing` | 发布队列、平台账号、OAuth 接入 |
 | `wechat_mp.py` | `/api/v1/wechat-mp` | 公众号草稿箱、排版主题、绑定验证 |
 | `platform_auth.py` | `/api/v1/platforms` | Phase 0 核验、OAuth 连接器、维护视图 |
@@ -120,6 +121,7 @@ hanyue-workspace/
 | `CalendarView.vue` | `/calendar` | 内容日历（`/topics` 已重定向到创作空间） |
 | `StudioView.vue` | `/studio` | AI 创作主界面（大纲/正文/润色/配图） |
 | `CardsView.vue` | `/cards` | 图文卡片生成与导出 |
+| `PromptsView.vue` | `/prompts` | 提示词库维护（生图提示词模板） |
 | `AssetsView.vue` | `/assets` | 素材管理、AI 生图任务列表 |
 | `PublishingView.vue` | `/publishing` | 发布中心（含公众号草稿箱入口） |
 | `SettingsView.vue` | `/settings` | 模型连接、平台接入、Agent 策略、偏好 |

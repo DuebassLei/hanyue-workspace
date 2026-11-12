@@ -1,10 +1,11 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, streamGeneration, fetchBlobUrl, apiUrl } from '../api/client'
 import AppModal from '../components/AppModal.vue'
 import StatusTag from '../components/StatusTag.vue'
 import MarkdownEditor from '../components/MarkdownEditor.vue'
+import { articleBodyFromOutput, parseArticleOutput } from '../utils/aiArticle'
 import PublishDrawer from '../features/publish/PublishDrawer.vue'
 
 const route = useRoute()
@@ -25,21 +26,45 @@ const dirty = computed(() => {
   return latest.title !== draftTitle.value || latest.body !== draftBody.value
 })
 
+/** 历史稿件里可能有被重复拼接成 /api/v1/api/v1/ 的素材直链，导致正文配图裂图 */
+function normalizeAssetUrls(text) {
+  return String(text || '').replace(/\/api\/v1\/api\/v1\//g, '/api/v1/')
+}
+
 // 自动保存状态：idle | pending | saving | saved | error
 const autoSaveStatus = ref('idle')
 let autoSaveTimer = null
+// 加载中标记：程序赋值 draftTitle/draftBody 时不触发自动保存
+let loadingDraft = false
+// 串行化保存：保证请求按顺序落库，避免旧内容覆盖新内容
+let saveQueue = Promise.resolve()
+
+function flushAutoSave() {
+  if (autoSaveTimer) {
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = null
+  }
+  if (autoSaveStatus.value !== 'pending') return Promise.resolve()
+  return triggerAutoSave()
+}
 
 async function triggerAutoSave() {
   if (!detail.value) return
+  const itemId = detail.value.item.id
+  const title = draftTitle.value
+  const body = draftBody.value
   autoSaveStatus.value = 'saving'
+  // 串到上一条保存之后，保证服务端写入顺序与用户输入顺序一致
+  const run = () => api.patch(`/content/${itemId}/draft`, { title, body })
+  saveQueue = saveQueue.then(run, run)
   try {
-    await api.patch(`/content/${detail.value.item.id}/draft`, {
-      title: draftTitle.value,
-      body: draftBody.value,
-    })
-    autoSaveStatus.value = 'saved'
+    await saveQueue
+    // 仅当仍是当前稿件且没有更新的输入时才标记为已保存
+    if (detail.value?.item.id === itemId && autoSaveStatus.value === 'saving') {
+      autoSaveStatus.value = 'saved'
+    }
   } catch {
-    autoSaveStatus.value = 'error'
+    if (detail.value?.item.id === itemId) autoSaveStatus.value = 'error'
   }
 }
 
@@ -49,9 +74,9 @@ function scheduleAutoSave() {
   autoSaveTimer = setTimeout(triggerAutoSave, 1500)
 }
 
-// 监听正文/标题变化，触发自动保存
+// 监听正文/标题变化，触发自动保存（程序加载赋值时不触发）
 watch([draftTitle, draftBody], () => {
-  if (!detail.value) return
+  if (loadingDraft || !detail.value) return
   scheduleAutoSave()
 })
 
@@ -85,6 +110,7 @@ const publishDrawerOpen = ref(false)
 
 // 平台版本
 const showVariant = ref(false)
+const variantsCollapsed = ref(false)
 const variantForm = ref({ platform: 'wechat_official', title: '', body: '' })
 
 // 删除稿件
@@ -151,19 +177,45 @@ async function loadList() {
 }
 
 async function openItem(id) {
-  const data = await api.get(`/content/${id}`)
-  detail.value = data
+  if (detail.value?.item.id === id) return
+  // 切换前先把上一篇待保存的草稿落库，避免 debounce 期间的内容丢失
+  await flushAutoSave()
+  let data
+  try {
+    data = await api.get(`/content/${id}`)
+  } catch (err) {
+    error.value = err.message
+    return
+  }
+  // 自动保存的草稿优先于最新版本快照，否则刷新后未提交内容会丢失
   const latest = data.versions[0]
-  draftTitle.value = latest?.title || data.item.title
-  draftBody.value = latest?.body || ''
+  const draft = data.item
+  const hasDraft = draft.draftBody != null || draft.draftTitle != null
+  loadingDraft = true
+  detail.value = data
+  draftTitle.value = hasDraft
+    ? (draft.draftTitle ?? latest?.title ?? data.item.title)
+    : (latest?.title || data.item.title)
+  draftBody.value = normalizeAssetUrls(
+    hasDraft
+      ? (draft.draftBody ?? latest?.body ?? '')
+      : (latest?.body || ''),
+  )
+  await nextTick()
+  loadingDraft = false
+  autoSaveStatus.value = hasDraft && dirty.value ? 'saved' : 'idle'
   notice.value = ''
   if (route.query.id !== id) router.replace({ name: 'studio', query: { id } })
 }
 
 async function createItem() {
-  const created = await api.post('/content', { title: '未命名稿件' })
-  items.value.unshift(created)
-  await openItem(created.id)
+  try {
+    const created = await api.post('/content', { title: '未命名稿件' })
+    items.value.unshift(created)
+    await openItem(created.id)
+  } catch (err) {
+    error.value = err.message
+  }
 }
 
 function askDelete(item) {
@@ -198,17 +250,31 @@ async function confirmDelete() {
 
 async function saveVersion() {
   if (!detail.value) return
+  const itemId = detail.value.item.id
   saving.value = true
   notice.value = ''
+  // 先把待保存草稿落库，保证草稿与版本内容一致
+  if (autoSaveTimer) {
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = null
+  }
   try {
-    const version = await api.post(`/content/${detail.value.item.id}/versions`, {
+    await api.patch(`/content/${itemId}/draft`, {
+      title: draftTitle.value,
+      body: draftBody.value,
+    })
+    const version = await api.post(`/content/${itemId}/versions`, {
       title: draftTitle.value,
       body: draftBody.value,
       sourceType: 'manual',
     })
+    if (detail.value?.item.id !== itemId) return
     detail.value.versions.unshift(version)
     detail.value.item.title = draftTitle.value
     detail.value.item.currentVersionId = version.id
+    detail.value.item.draftTitle = draftTitle.value
+    detail.value.item.draftBody = draftBody.value
+    autoSaveStatus.value = 'idle'
     notice.value = `已保存为 v${version.versionNo}`
   } catch (err) {
     error.value = err.message
@@ -219,38 +285,28 @@ async function saveVersion() {
 
 function restore(version) {
   draftTitle.value = version.title
-  draftBody.value = version.body
+  draftBody.value = normalizeAssetUrls(version.body)
   notice.value = `已载入 v${version.versionNo}，保存后才会覆盖为最新版本`
-}
-
-function parseArticleImagePrompts(rawOutput) {
-  const cleaned = String(rawOutput || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
-  const start = cleaned.indexOf('{')
-  const end = cleaned.lastIndexOf('}')
-  if (start < 0 || end <= start) return null
-  try {
-    const data = JSON.parse(cleaned.slice(start, end + 1))
-    return {
-      coverPrompt: typeof data.coverPrompt === 'string' ? data.coverPrompt.trim() : '',
-      inlinePrompts: Array.isArray(data.inlinePrompts)
-        ? data.inlinePrompts.filter((prompt) => typeof prompt === 'string' && prompt.trim()).map((prompt) => prompt.trim())
-        : [],
-    }
-  } catch {
-    return null
-  }
 }
 
 async function startAutoImageGeneration(rawOutput, contentItemId) {
   if (!contentItemId || detail.value?.item.id !== contentItemId) return
-  const prompts = parseArticleImagePrompts(rawOutput)
+  const prompts = parseArticleOutput(rawOutput)
   if (!prompts || (!prompts.coverPrompt && !prompts.inlinePrompts.length)) {
     notice.value = '文章已生成，但未提取到配图提示词'
     return
   }
   const requests = [
     prompts.coverPrompt ? { prompt: prompts.coverPrompt, purpose: 'cover', label: '封面图' } : null,
-    ...prompts.inlinePrompts.map((prompt, index) => ({ prompt, purpose: 'inline', label: `正文插图 ${index + 1}` })),
+    ...prompts.inlinePrompts.map((prompt, index) => ({
+      prompt,
+      purpose: 'inline',
+      label: `正文插图 ${index + 1}`,
+      inlineIndex: index + 1,
+      inlineTotal: prompts.inlinePrompts.length,
+      // 用于判断用户是否已把这篇 AI 文章应用到编辑区，避免插图落到旧草稿里
+      articleMarkdown: prompts.markdown,
+    })),
   ].filter(Boolean)
   const results = await Promise.allSettled(requests.map(async (request) => {
     const response = await api.post('/ai/image-generations', {
@@ -259,14 +315,24 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
       aspectRatio: request.purpose === 'cover' ? '3:4' : '1:1',
       count: 1,
     })
-    return { id: response.jobId, status: 'queued', prompt: request.prompt, label: request.label, purpose: request.purpose, contentItemId }
+    return {
+      id: response.jobId,
+      status: 'queued',
+      prompt: request.prompt,
+      label: request.label,
+      purpose: request.purpose,
+      inlineIndex: request.inlineIndex,
+      inlineTotal: request.inlineTotal,
+      articleMarkdown: request.articleMarkdown,
+      contentItemId,
+    }
   }))
   for (const result of results) {
     if (result.status === 'fulfilled') imgJobs.value.unshift(result.value)
     else imgError.value = result.reason?.message || '自动配图任务创建失败'
   }
   if (results.some((result) => result.status === 'fulfilled')) {
-    notice.value = `文章已生成，${results.filter((result) => result.status === 'fulfilled').length} 个配图任务已开始`
+    notice.value = `文章已生成，${results.filter((result) => result.status === 'fulfilled').length} 个配图任务已开始，完成后自动插入正文`
     startImgPoll()
   }
 }
@@ -324,13 +390,56 @@ function stopAi() {
   aiRunning.value = false
 }
 
+// AI 生成结果预览：结构化文章只展示正文，不让 JSON 字段糊在预览里
+const aiPreview = computed(() => articleBodyFromOutput(aiOutput.value))
+
 function useAiOutput() {
+  // 文章类任务输出的是 JSON 契约，插入正文的只能是 markdown 正文
+  const output = articleBodyFromOutput(aiOutput.value)
   if (aiInsertMode.value === 'replace') {
-    draftBody.value = aiOutput.value
+    draftBody.value = output
   } else {
-    draftBody.value = draftBody.value ? `${draftBody.value}\n\n${aiOutput.value}` : aiOutput.value
+    draftBody.value = draftBody.value ? `${draftBody.value}\n\n${output}` : output
   }
   aiOutput.value = ''
+  // 配图可能在用户点「使用结果」之前就生成完了，这里补插到占位符
+  applyGeneratedInlineImages()
+}
+
+/** 把已生成、尚未进正文的自动配图补插到当前文章的 {{imageN}} 位置 */
+function applyGeneratedInlineImages() {
+  const pending = imgResults.value
+    .filter((result) => result.inlineIndex && result.rawUrl)
+    .sort((a, b) => a.inlineIndex - b.inlineIndex)
+  for (const result of pending) {
+    autoInsertInlineImage(result, {
+      inlineIndex: result.inlineIndex,
+      inlineTotal: result.inlineTotal,
+    })
+  }
+}
+
+// 用户正在编辑时先挂起自动插图，避免重建文档把光标打断
+let pendingInlineInsertions = []
+
+function editorHasFocus() {
+  return Boolean(document.activeElement?.closest?.('.md-editor'))
+}
+
+/** focusout 早于下一个元素获得焦点，等一帧再判断是否真的离开了编辑器 */
+function scheduleFlushPendingInlineImages() {
+  setTimeout(flushPendingInlineImages, 0)
+}
+
+/** 编辑器失焦后把挂起的自动插图落位 */
+function flushPendingInlineImages() {
+  if (!pendingInlineInsertions.length || editorHasFocus()) return
+  const pending = pendingInlineInsertions
+  pendingInlineInsertions = []
+  for (const { result, job } of pending) {
+    if (job.contentItemId && detail.value?.item.id !== job.contentItemId) continue
+    autoInsertInlineImage(result, job)
+  }
 }
 
 function openVariant() {
@@ -357,15 +466,20 @@ async function saveVariant() {
 watch(
   () => route.query.id,
   (id) => {
-    if (id && id !== detail.value?.item.id) openItem(id)
+    if (id && id !== detail.value?.item.id) {
+      openItem(id).catch((err) => {
+        error.value = err.message
+      })
+    }
   },
 )
 
-// 切换到新稿件时重置状态
+// 切换到新稿件时重置自动保存状态（openItem 里已处理，这里只兜底）
 watch(
   () => detail.value?.item.id,
   () => {
-    autoSaveStatus.value = 'idle'
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = null
   },
 )
 
@@ -572,9 +686,31 @@ function startImgPoll() {
               }
               // 后端下发的签名直链：可直接放进 Markdown，预览与外部发布都能取图
               const rawPath = (data.result?.assetUrls || [])[assetIds.indexOf(assetId)]
-              imgResults.value.unshift({
-                assetId, blobUrl, rawUrl: rawPath ? apiUrl(rawPath) : '', jobId: job.id,
-              })
+              const result = {
+                assetId,
+                blobUrl,
+                rawUrl: rawPath ? apiUrl(rawPath) : '',
+                jobId: job.id,
+                label: job.label,
+                purpose: job.purpose,
+                inlineIndex: job.inlineIndex,
+                inlineTotal: job.inlineTotal || imgJobs.value.filter((j) => j.inlineIndex).length,
+              }
+              imgResults.value.unshift(result)
+              // 自动配图：任务完成后直接落到正文预留的 {{imageN}} 位置；
+              // 已切换稿件时不回填，避免把图片插进别人的正文
+              if (
+                job.inlineIndex
+                && assetId === assetIds[0]
+                && job.contentItemId
+                && detail.value?.item.id === job.contentItemId
+              ) {
+                if (isArticleInEditor(job)) {
+                  autoInsertInlineImage(result, job)
+                } else {
+                  notice.value = `配图 ${job.inlineIndex} 已生成，点击配图卡片即可插入正文`
+                }
+              }
             }
           }
         } else if (data.status === 'failed') {
@@ -589,10 +725,80 @@ function startImgPoll() {
   }, 1500)
 }
 
+/** 当前编辑区里是否是这篇 AI 文章（已点「使用结果」），否则不能自动插图 */
+function isArticleInEditor(job) {
+  const body = draftBody.value || ''
+  if (job.articleMarkdown && body.includes(job.articleMarkdown)) return true
+  // 用户可能改过正文，仍留有图片占位符时也认为文章已在编辑区
+  return /\{\{\s*image\d+/i.test(body)
+}
+
+/**
+ * 自动生成的正文插图落到 AI 预留的 {{imageN}} 位置。
+ * 模型漏写占位符时按小节均分兜底，都没有才追加到文末；同一张图只插一次。
+ * 返回是否真的插入了正文。
+ */
+function autoInsertInlineImage(result, job) {
+  if (!result.rawUrl) return false
+  const body = draftBody.value || ''
+  const index = job.inlineIndex
+  const total = job.inlineTotal
+  if (body.includes(result.rawUrl)) return false
+  if (editorHasFocus()) {
+    if (!pendingInlineInsertions.some((item) => item.result === result)) {
+      pendingInlineInsertions.push({ result, job })
+      notice.value = `配图 ${index} 已生成，退出编辑后自动插入`
+    }
+    return false
+  }
+  const placeholder = new RegExp(
+    `\\{\\{\\s*image\\s*${index}\\s*(?:\\|\\s*([^}]*?)\\s*)?\\}\\}`,
+    'i',
+  )
+  const match = body.match(placeholder)
+  // 占位符里的图注（{{image1|说明}}）保留为图片 alt
+  const alt = (match?.[1] || `配图${index}`).replace(/[[\]]/g, '')
+  const markdown = `![${alt}](${result.rawUrl})`
+  if (match) {
+    draftBody.value = body.replace(placeholder, () => markdown)
+    notice.value = `配图 ${index} 已自动插入正文对应位置`
+    return true
+  }
+  // 没有占位符：按小节位置兜底，避免所有插图都堆到文末
+  const lines = body.split('\n')
+  const headings = []
+  lines.forEach((line, i) => {
+    if (/^##\s+/.test(line.trim())) headings.push(i)
+  })
+  const count = Math.max(1, Number(total) || 1)
+  if (headings.length) {
+    const slot = Math.min(
+      headings.length - 1,
+      Math.floor((index * headings.length) / (count + 1)),
+    )
+    const at = headings[slot]
+    draftBody.value = [...lines.slice(0, at), '', markdown, '', ...lines.slice(at)].join('\n')
+    notice.value = `配图 ${index} 未找到占位符，已插入第 ${slot + 1} 个小节处`
+    return true
+  }
+  draftBody.value = `${body}\n\n${markdown}\n`
+  notice.value = `配图 ${index} 未找到占位符，已插入正文末尾`
+  return true
+}
+
+/** 图片链接是否已经在正文里（自动插图后按钮置灰，避免重复插入） */
+function isImageInBody(result) {
+  return Boolean(result?.rawUrl && (draftBody.value || '').includes(result.rawUrl))
+}
+
 /** 把图片以 Markdown 语法插入正文末尾（用后端返回的签名直链，img 标签才能直接取图） */
 function insertImageToBody(result) {
   if (!result.rawUrl) {
     notice.value = '该素材缺少可用直链，请稍后重试'
+    return
+  }
+  if (isImageInBody(result)) {
+    notice.value = '该图片已在正文中'
     return
   }
   // 走 v-model 已经能同步到编辑器；这里保持原逻辑（追加到末尾）
@@ -611,6 +817,17 @@ async function copyImageUrl(result) {
   }
 }
 
+// 发布抽屉默认素材：封面取自动配图，正文按插图编号排序
+const publishCoverAssetId = computed(
+  () => imgResults.value.find((result) => result.purpose === 'cover')?.assetId || '',
+)
+const publishInlineAssetIds = computed(() =>
+  imgResults.value
+    .filter((result) => result.inlineIndex && result.assetId)
+    .sort((a, b) => a.inlineIndex - b.inlineIndex)
+    .map((result) => result.assetId),
+)
+
 function releaseImgResults() {
   for (const r of imgResults.value) {
     if (r.blobUrl) URL.revokeObjectURL(r.blobUrl)
@@ -624,13 +841,10 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  clearTimeout(autoSaveTimer)
   stopImgPoll()
   releaseImgResults()
   // 组件卸载时若有待保存内容，立即同步
-  if (autoSaveStatus.value === 'pending' && detail.value) {
-    triggerAutoSave()
-  }
+  flushAutoSave()
 })
 </script>
 
@@ -739,6 +953,36 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </section>
+        <section
+          v-if="detail?.variants.length"
+          class="studio-doc-variants"
+          :class="{ 'is-collapsed': variantsCollapsed }"
+          aria-labelledby="studio-variants-title"
+        >
+          <div class="studio-variants-head">
+            <h3 id="studio-variants-title" class="studio-section-label">平台版本</h3>
+            <button
+              class="btn btn-ghost btn-sm"
+              type="button"
+              :aria-expanded="!variantsCollapsed"
+              @click="variantsCollapsed = !variantsCollapsed"
+            >
+              {{ variantsCollapsed ? `展开 ${detail.variants.length}` : '收起' }}
+            </button>
+          </div>
+          <div v-if="!variantsCollapsed" class="list studio-list">
+            <div v-for="variant in detail.variants" :key="variant.id" class="list-row">
+              <div class="list-main">
+                <div class="list-title">{{ variant.title }}</div>
+                <div class="list-meta">
+                  {{ PLATFORMS.find((p) => p.code === variant.platform)?.label || variant.platform }}
+                  · 第 {{ variant.revisionNo }} 版
+                </div>
+              </div>
+              <StatusTag :status="variant.status" />
+            </div>
+          </div>
+        </section>
         </template>
         <template v-else>
           <div class="studio-drafts-rail">
@@ -790,24 +1034,9 @@ onBeforeUnmount(() => {
             placeholder="在这里写正文，选中文字可用 AI 润色/改写..."
             class="studio-doc-editor"
             @editor-ready="(ed) => (editorRef = ed)"
+            @focusout="scheduleFlushPendingInlineImages"
           />
-          <p class="studio-doc-hint">AI 生成结果需手动插入正文，选中段落可直接 inline 润色</p>
-
-          <footer v-if="detail.variants.length" class="studio-doc-variants">
-            <h3 class="studio-section-label">平台版本</h3>
-            <div class="list studio-list">
-              <div v-for="variant in detail.variants" :key="variant.id" class="list-row">
-                <div class="list-main">
-                  <div class="list-title">{{ variant.title }}</div>
-                  <div class="list-meta">
-                    {{ PLATFORMS.find((p) => p.code === variant.platform)?.label || variant.platform }}
-                    · 第 {{ variant.revisionNo }} 版
-                  </div>
-                </div>
-                <StatusTag :status="variant.status" />
-              </div>
-            </div>
-          </footer>
+          <p class="studio-doc-hint">AI 成文结果需点「使用结果」进入正文；配图生成后会自动落到正文对应位置</p>
         </template>
         <div v-else class="empty">
           <span class="empty-title">选择或新建一篇稿件</span>
@@ -931,7 +1160,7 @@ onBeforeUnmount(() => {
               <!-- 渲染 Markdown 预览 -->
               <div class="studio-ai-output-content">
                 <MarkdownEditor
-                  :model-value="aiOutput"
+                  :model-value="aiPreview"
                   :readonly="true"
                   :toolbar="{}"
                 />
@@ -1111,7 +1340,12 @@ onBeforeUnmount(() => {
                     <div v-else class="img-card-placeholder">加载中…</div>
                   </div>
                   <div class="row img-card-actions">
-                    <button class="btn btn-ghost btn-xs" style="flex:1" @click="insertImageToBody(result)">插入正文</button>
+                    <button
+                      class="btn btn-ghost btn-xs"
+                      style="flex:1"
+                      :disabled="isImageInBody(result)"
+                      @click="insertImageToBody(result)"
+                    >{{ isImageInBody(result) ? '已在正文' : '插入正文' }}</button>
                     <button class="btn btn-ghost btn-xs" @click="copyImageUrl(result)" title="复制链接">🔗</button>
                   </div>
                 </div>
@@ -1136,6 +1370,8 @@ onBeforeUnmount(() => {
       :title="draftTitle"
       :body="draftBody"
       :content-id="detail?.item.id || ''"
+      :cover-asset-id="publishCoverAssetId"
+      :inline-asset-ids="publishInlineAssetIds"
       @close="publishDrawerOpen = false"
       @published="notice = '草稿已推送到公众号草稿箱，请到后台预览并群发。'"
     />
@@ -1578,13 +1814,24 @@ onBeforeUnmount(() => {
   font-size: 11px;
 }
 .studio-doc-variants {
-  margin-top: auto;
-  padding: var(--space-4) 28px var(--space-5);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
   border-top: 1px solid var(--color-border);
-  background: var(--color-surface-raised);
 }
-.studio-doc-variants .studio-section-label {
-  margin: 0 0 var(--space-2);
+.studio-doc-variants.is-collapsed {
+  padding-bottom: var(--space-2);
+}
+.studio-variants-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.studio-variants-head .studio-section-label {
+  margin: 0 var(--space-1) var(--space-2);
+}
+.studio-doc-variants .studio-list {
+  margin-top: var(--space-1);
 }
 .studio-doc-variants .studio-list .list-row {
   background: var(--color-surface);
@@ -2115,7 +2362,7 @@ onBeforeUnmount(() => {
     padding: 0 22px var(--space-5);
   }
   .studio-doc-variants {
-    padding: var(--space-4) 20px;
+    margin-top: var(--space-3);
   }
 }
 

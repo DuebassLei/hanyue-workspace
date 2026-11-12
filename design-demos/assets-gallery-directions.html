@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>素材图库 · 三种界面方向</title>
+<style>
+:root {
+  --bg: #f5f6f4;
+  --surface: #ffffff;
+  --surface-raised: #fbfcfa;
+  --text: #202723;
+  --text-secondary: #58645d;
+  --border: #dde3de;
+  --border-strong: #c4cec7;
+  --accent: #527a68;
+  --accent-hover: #416553;
+  --accent-soft: #e8f0ea;
+  --danger: #b93a3a;
+  --success: #2f7d4f;
+  --warning: #b07a1e;
+  --font: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  padding: 32px 24px;
+}
+
+.page-header {
+  max-width: 1440px;
+  margin: 0 auto 32px;
+}
+.page-header h1 {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+.page-header p {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 15px;
+}
+
+/* Direction cards */
+.directions {
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+.dir-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.dir-label {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dir-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.dir-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+.dir-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-left: auto;
+}
+
+/* Shared mockup frame */
+.mockup {
+  padding: 24px;
+  background: var(--bg);
+  min-height: 420px;
+}
+
+/* ====== SHARED ATOMS ====== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: all .15s;
+}
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-ghost { background: transparent; color: var(--text); border-color: var(--border); }
+.btn-ghost:hover { border-color: var(--border-strong); background: var(--surface-raised); }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.tag-accent { background: var(--accent-soft); color: var(--accent); }
+.tag-success { background: #e6f4ec; color: var(--success); }
+.tag-warning { background: #fdf3e0; color: var(--warning); }
+
+.input {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+  transition: border-color .15s;
+}
+.input:focus { border-color: var(--accent); }
+.input-search {
+  padding-left: 32px;
+  width: 220px;
+}
+
+.search-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.asset-thumb {
+  width: 100%;
+  aspect-ratio: 4/3;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--border);
+  display: block;
+}
+
+/* ====== DIRECTION A — Workbench (top toolbar + grid) ====== */
+.a-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.a-toolbar .spacer { flex: 1; }
+.a-count { font-size: 13px; color: var(--text-secondary); }
+
+.a-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 14px;
+}
+.a-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface);
+  transition: border-color .15s, box-shadow .15s;
+  cursor: pointer;
+}
+.a-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.a-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.a-card-body {
+  padding: 10px 12px;
+}
+.a-card-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.a-card-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+}
+.a-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* ====== DIRECTION B — Masonry wall ====== */
+.b-masonry {
+  columns: 4;
+  column-gap: 12px;
+}
+.b-item {
+  break-inside: avoid;
+  margin-bottom: 12px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  transition: transform .15s, box-shadow .15s;
+}
+.b-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0,0,0,.08);
+}
+.b-item img {
+  width: 100%;
+  display: block;
+}
+.b-item-info {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.b-overlay-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+/* ====== DIRECTION C — Sidebar filter + main ====== */
+.c-layout {
+  display: flex;
+  gap: 20px;
+  min-height: 360px;
+}
+.c-sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  padding-right: 20px;
+}
+.c-sidebar h3 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+.c-filter-group {
+  margin-bottom: 20px;
+}
+.c-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .12s;
+}
+.c-filter-item:hover { background: var(--surface-raised); }
+.c-filter-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.c-filter-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.c-main { flex: 1; min-width: 0; }
+.c-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.c-toolbar .spacer { flex: 1; }
+.c-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+.c-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color .15s;
+}
+.c-card:hover { border-color: var(--accent); }
+.c-card-body { padding: 8px 10px; }
+.c-card-name {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.c-card-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Color swatches for placeholder thumbs */
+.swatch-1 { background: linear-gradient(135deg, #a8c5b8, #7ba392); }
+.swatch-2 { background: linear-gradient(135deg, #c5b8a8, #a3927b); }
+.swatch-3 { background: linear-gradient(135deg, #b8a8c5, #927ba3); }
+.swatch-4 { background: linear-gradient(135deg, #b8c5a8, #92a37b); }
+.swatch-5 { background: linear-gradient(135deg, #c5a8a8, #a37b7b); }
+.swatch-6 { background: linear-gradient(135deg, #a8b8c5, #7b92a3); }
+.swatch-7 { background: linear-gradient(135deg, #d4c5a0, #b3a070); }
+.swatch-8 { background: linear-gradient(135deg, #a0c5d4, #70a3b3); }
+
+@media (max-width: 900px) {
+  .b-masonry { columns: 2; }
+  .c-sidebar { display: none; }
+  .a-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+}
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>素材图库 · 三种界面方向</h1>
+  <p>以浏览检索为优先，以下三个骨架方案在布局结构上有本质区别。选择后我将基于所选方向落地到 AssetsView.vue。</p>
+</div>
+
+<div class="directions">
+
+<!-- Direction A -->
+<div class="dir-section">
+  <div class="dir-label">
+    <span class="dir-badge">A</span>
+    <span class="dir-title">工作台工具栏 + 均匀网格</span>
+    <span class="dir-desc">搜索和筛选收进顶部工具栏，图片等比排列，操作紧凑</span>
+  </div>
+  <div class="mockup">
+    <div class="a-toolbar">
+      <div class="search-wrap">
+        <span class="search-icon">&#x2315;</span>
+        <input class="input input-search" placeholder="搜索名称或提示词…" />
+      </div>
+      <button class="btn btn-ghost btn-sm">全部来源 ▾</button>
+      <button class="btn btn-ghost btn-sm">排序：最新 ▾</button>
+      <span class="spacer"></span>
+      <span class="a-count">24 个素材</span>
+      <button class="btn btn-ghost btn-sm">刷新</button>
+      <button class="btn btn-primary btn-sm">上传图片</button>
+    </div>
+    <div class="a-grid">
+      <div class="a-card selected">
+        <div class="asset-thumb swatch-1" style="aspect-ratio:4/3"></div>
+        <div class="a-card-body">
+          <div class="a-card-name">封面-秋日暖阳.png</div>
+          <div class="a-card-meta">1080×810 · 245 KB</div>
+          <div class="a-card-footer"><span class="tag tag-accent">upload</span></div>
+        </div>
+      </div>
+      <div class="a-card">
+        <div class="asset-thumb swatch-2" style="aspect-ratio:1/1"></div>
+        <div class="a-card-body">
+          <div class="a-card-name">产品细节特写.jpg</div>
+          <div class="a-card-meta">1200×1200 · 380 KB</div>
+          <div class="a-card-footer"><span class="tag tag-accent">ai_gen</span></div>
+        </div>
+      </div>
+      <div class="a-card">
+        <div class="asset-thumb swatch-3" style="aspect-ratio:3/4"></div>
+        <div class="a-card-body">
+          <div class="a-card-name">竖版海报草稿.webp</div>
+          <div class="a-card-meta">900×1200 · 198 KB</div>
+          <div class="a-card-footer"><span class="tag tag-accent">derived</span></div>
+        </div>
+      </div>
+      <div class="a-card">
+        <div class="asset-thumb swatch-4" style="aspect-ratio:16/9"></div>
+        <div class="a-card-body">
+          <div class="a-card-name">横幅配图-final.png</div>
+          <div class="a-card-meta">1920×1080 · 512 KB</div>
+          <div class="a-card-footer"><span class="tag tag-accent">upload</span></div>
+        </div>
+      </div>
+      <div class="a-card">
+        <div class="asset-thumb swatch-5" style="aspect-ratio:4/3"></div>
+        <div class="a-card-body">
+          <div class="a-card-name">团队合影-裁剪.jpg</div>
+          <div class="a-card-meta">1600×1200 · 420 KB</div>
+          <div class="a-card-footer"><span class="tag tag-accent">derived</span></div>
+        </div>
+      </div>
+      <div class="a-card">
+        <div class="asset-thumb swatch-6" style="aspect-ratio:3/2"></div>
+        <div class="a-card-body">
+          <div class="a-card-name">背景纹理-蓝.png</div>
+          <div class="a-card-meta">2048×1365 · 310 KB</div>
+          <div class="a-card-footer"><span class="tag tag-accent">ai_gen</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Direction B -->
+<div class="dir-section">
+  <div class="dir-label">
+    <span class="dir-badge">B</span>
+    <span class="dir-title">沉浸式瀑布墙</span>
+    <span class="dir-desc">图片按自然比例瀑布流排列，信息精简到 hover 才显示，最大化视觉浏览面积</span>
+  </div>
+  <div class="mockup">
+    <div class="b-overlay-bar">
+      <div class="search-wrap">
+        <span class="search-icon">&#x2315;</span>
+        <input class="input input-search" placeholder="搜索素材…" style="width:260px" />
+      </div>
+      <button class="btn btn-ghost btn-sm">筛选 ▾</button>
+      <span style="flex:1"></span>
+      <span class="a-count">24 个素材</span>
+      <button class="btn btn-primary btn-sm">上传</button>
+    </div>
+    <div class="b-masonry">
+      <div class="b-item">
+        <div class="swatch-1" style="height:180px"></div>
+        <div class="b-item-info"><span>封面-秋日暖阳.png</span><span class="tag tag-accent">upload</span></div>
+      </div>
+      <div class="b-item">
+        <div class="swatch-3" style="height:240px"></div>
+        <div class="b-item-info"><span>竖版海报草稿.webp</span><span class="tag tag-accent">derived</span></div>
+      </div>
+      <div class="b-item">
+        <div class="swatch-2" style="height:160px"></div>
+        <div class="b-item-info"><span>产品细节特写.jpg</span><span class="tag tag-accent">ai_gen</span></div>
+      </div>
+      <div class="b-item">
+        <div class="swatch-7" style="height:200px"></div>
+        <div class="b-item-info"><span>手绘插图-v2.png</span><span class="tag tag-accent">ai_gen</span></div>
+      </div>
+      <div class="b-item">
+        <div class="swatch-4" style="height:130px"></div>
+        <div class="b-item-info"><span>横幅配图-final.png</span><span class="tag tag-accent">upload</span></div>
+      </div>
+      <div class="b-item">
+        <div class="swatch-8" style="height:220px"></div>
+        <div class="b-item-info"><span>蓝色渐变背景.png</span><span class="tag tag-accent">ai_gen</span></div>
+      </div>
+      <div class="b-item">
+        <div class="swatch-5" style="height:150px"></div>
+        <div class="b-item-info"><span>团队合影-裁剪.jpg</span><span class="tag tag-accent">derived</span></div>
+      </div>
+      <div class="b-item">
+        <div class="swatch-6" style="height:190px"></div>
+        <div class="b-item-info"><span>背景纹理-蓝.png</span><span class="tag tag-accent">ai_gen</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Direction C -->
+<div class="dir-section">
+  <div class="dir-label">
+    <span class="dir-badge">C</span>
+    <span class="dir-title">侧栏筛选 + 主区网格</span>
+    <span class="dir-desc">左侧固定筛选面板（来源、格式、时间），右侧大图网格，适合素材量大的场景</span>
+  </div>
+  <div class="mockup">
+    <div class="c-layout">
+      <div class="c-sidebar">
+        <div class="c-filter-group">
+          <h3>来源</h3>
+          <div class="c-filter-item active"><div class="c-filter-dot" style="background:var(--accent)"></div>全部</div>
+          <div class="c-filter-item"><div class="c-filter-dot" style="background:#7ba392"></div>手动上传</div>
+          <div class="c-filter-item"><div class="c-filter-dot" style="background:#927ba3"></div>AI 生成</div>
+          <div class="c-filter-item"><div class="c-filter-dot" style="background:#a3927b"></div>处理派生</div>
+        </div>
+        <div class="c-filter-group">
+          <h3>格式</h3>
+          <div class="c-filter-item">PNG</div>
+          <div class="c-filter-item">JPEG</div>
+          <div class="c-filter-item">WebP</div>
+        </div>
+        <div class="c-filter-group">
+          <h3>时间</h3>
+          <div class="c-filter-item active">全部</div>
+          <div class="c-filter-item">最近 7 天</div>
+          <div class="c-filter-item">最近 30 天</div>
+        </div>
+      </div>
+      <div class="c-main">
+        <div class="c-toolbar">
+          <div class="search-wrap">
+            <span class="search-icon">&#x2315;</span>
+            <input class="input input-search" placeholder="搜索…" />
+          </div>
+          <span class="spacer"></span>
+          <span class="a-count">24 个</span>
+          <button class="btn btn-primary btn-sm">上传</button>
+        </div>
+        <div class="c-grid">
+          <div class="c-card">
+            <div class="asset-thumb swatch-1" style="aspect-ratio:4/3"></div>
+            <div class="c-card-body">
+              <div class="c-card-name">封面-秋日暖阳.png</div>
+              <div class="c-card-meta">1080×810 · upload</div>
+            </div>
+          </div>
+          <div class="c-card">
+            <div class="asset-thumb swatch-2" style="aspect-ratio:1/1"></div>
+            <div class="c-card-body">
+              <div class="c-card-name">产品细节特写.jpg</div>
+              <div class="c-card-meta">1200×1200 · ai_gen</div>
+            </div>
+          </div>
+          <div class="c-card">
+            <div class="asset-thumb swatch-3" style="aspect-ratio:3/4"></div>
+            <div class="c-card-body">
+              <div class="c-card-name">竖版海报草稿.webp</div>
+              <div class="c-card-meta">900×1200 · derived</div>
+            </div>
+          </div>
+          <div class="c-card">
+            <div class="asset-thumb swatch-4" style="aspect-ratio:16/9"></div>
+            <div class="c-card-body">
+              <div class="c-card-name">横幅配图-final.png</div>
+              <div class="c-card-meta">1920×1080 · upload</div>
+            </div>
+          </div>
+          <div class="c-card">
+            <div class="asset-thumb swatch-5" style="aspect-ratio:4/3"></div>
+            <div class="c-card-body">
+              <div class="c-card-name">团队合影-裁剪.jpg</div>
+              <div class="c-card-meta">1600×1200 · derived</div>
+            </div>
+          </div>
+          <div class="c-card">
+            <div class="asset-thumb swatch-6" style="aspect-ratio:3/2"></div>
+            <div class="c-card-body">
+              <div class="c-card-name">背景纹理-蓝.png</div>
+              <div class="c-card-meta">2048×1365 · ai_gen</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /directions -->
+
+<div style="max-width:1440px;margin:32px auto 0;padding:20px 24px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg)">
+  <h3 style="font-size:15px;font-weight:600;margin-bottom:12px">三方向对比速览</h3>
+  <table style="width:100%;font-size:13px;border-collapse:collapse">
+    <thead>
+      <tr style="text-align:left;border-bottom:1px solid var(--border)">
+        <th style="padding:8px 12px;width:120px">维度</th>
+        <th style="padding:8px 12px">A 工作台工具栏</th>
+        <th style="padding:8px 12px">B 沉浸式瀑布墙</th>
+        <th style="padding:8px 12px">C 侧栏筛选+网格</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td style="padding:8px 12px;color:var(--text-secondary)">视觉重心</td><td>均衡（图+信息）</td><td>图片本身</td><td>筛选逻辑</td></tr>
+      <tr style="background:var(--surface-raised)"><td style="padding:8px 12px;color:var(--text-secondary)">浏览效率</td><td>中（每行约5张）</td><td>高（密集瀑布）</td><td>中高（可组合筛选）</td></tr>
+      <tr><td style="padding:8px 12px;color:var(--text-secondary)">改动幅度</td><td>小（现有结构微调）</td><td>中（新增瀑布布局）</td><td>大（新增侧栏组件）</td></tr>
+      <tr style="background:var(--surface-raised)"><td style="padding:8px 12px;color:var(--text-secondary)">适合场景</td><td>素材量 &lt;100，需快速操作</td><td>素材量大，以视觉挑选为主</td><td>素材量大且需要多维筛选</td></tr>
+      <tr><td style="padding:8px 12px;color:var(--text-secondary)">图像处理入口</td><td>选中后底部展开</td><td>hover 浮层按钮</td><td>选中后右抽屉</td></tr>
+    </tbody>
+  </table>
+</div>
+
+</body>
+</html>

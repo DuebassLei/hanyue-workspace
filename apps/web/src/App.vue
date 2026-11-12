@@ -21,7 +21,9 @@ const navGroups = [
     items: [
       { name: 'studio', label: '创作空间', icon: '✎' },
       { name: 'cards', label: '图文卡片', icon: '▤' },
-      { name: 'assets', label: '素材与配图', icon: '▣' },
+      { name: 'images', label: '图片生成', icon: '✦' },
+      { name: 'prompts', label: '提示词库', icon: '✧' },
+      { name: 'assets', label: '素材图库', icon: '▣' },
     ],
   },
   {
@@ -36,10 +38,15 @@ const mobileNav = [
   { name: 'calendar', label: '日历', icon: '▦' },
   { name: 'studio', label: '创作', icon: '✎' },
   { name: 'cards', label: '卡片', icon: '▤' },
-  { name: 'assets', label: '素材', icon: '▣' },
+  { name: 'images', label: '图片', icon: '✦' },
+  { name: 'prompts', label: '提示词', icon: '✧' },
+  { name: 'assets', label: '图库', icon: '▣' },
   { name: 'publishing', label: '发布', icon: '▲' },
   { name: 'settings', label: '我的', icon: '⚙' },
 ]
+
+const isActive = (name) =>
+  route.name === name || (name === 'prompts' && route.name === 'handdraw')
 
 const themeLabel = computed(() =>
   session.theme === 'system' ? '跟随系统' : session.theme === 'dark' ? '暗色' : '浅色',
@@ -81,7 +88,7 @@ function go(name) {
           :key="item.name"
           :to="{ name: item.name }"
           class="nav-item"
-          :class="{ 'is-active': route.name === item.name }"
+          :class="{ 'is-active': isActive(item.name) }"
           :title="sidebarCollapsed ? item.label : undefined"
         >
           <span class="nav-dot" aria-hidden="true">{{ item.icon }}</span>
@@ -134,7 +141,7 @@ function go(name) {
         v-for="item in mobileNav"
         :key="item.name"
         class="mobile-nav-item"
-        :class="{ 'is-active': route.name === item.name }"
+        :class="{ 'is-active': isActive(item.name) }"
         href="#"
         @click.prevent="go(item.name)"
       >

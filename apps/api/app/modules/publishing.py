@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query, Response
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from .. import models, schemas
@@ -105,7 +105,7 @@ def _promote_due_jobs(db, user_id: str) -> int:
 def platform_capabilities() -> dict:
     report = connectors.evidence_report()
     return {
-        "platforms": [connectors.get_capability(code).to_dict() for code in connectors.PLATFORMS],
+        "platforms": connectors.catalog_payload(),
         "verifiedAt": report["verifiedAt"],
         "verifiedCount": report["verifiedCount"],
         "warnings": report["warnings"],
@@ -240,18 +240,39 @@ def create_job(
         raise ApiError("review_required", "发布前必须完成人工确认", status_code=409)
 
     workspace = default_workspace(db, user)
+
+    # 关联创作空间稿件时，用稿件内容补齐标题与正文，避免用户再次手动输入
+    content_item = None
+    if payload.content_item_id:
+        content_item = db.get(models.ContentItem, payload.content_item_id)
+        if not content_item or content_item.owner_user_id != user.id:
+            raise not_found("稿件")
+
+    title = payload.title
+    body = payload.body
+    if content_item:
+        if not title:
+            title = content_item.draft_title or content_item.title
+        if not body:
+            if content_item.draft_body is not None:
+                body = content_item.draft_body
+            elif content_item.current_version_id:
+                version = db.get(models.ContentVersion, content_item.current_version_id)
+                body = version.body if version else ""
+
     snapshot = {
-        "title": payload.title,
-        "body": payload.body[:2000],
+        "title": title,
+        "body": body[:2000],
         "assetIds": payload.asset_ids,
+        "contentItemId": payload.content_item_id or "",
     }
 
     if payload.mode == "manual":
         # 平台能力未核验时的降级路径：只做排期与结果记录，绝不调用平台接口
         issues = connectors.validate_draft(
             account.platform,
-            title=payload.title,
-            body=payload.body,
+            title=title,
+            body=body,
             asset_count=len(payload.asset_ids),
         )
         blocking = [i["message"] for i in issues if i.get("level") == "error"]
@@ -261,6 +282,7 @@ def create_job(
             owner_user_id=user.id,
             workspace_id=workspace.id,
             platform_variant_id=payload.variant_id,
+            content_item_id=content_item.id if content_item else None,
             connected_account_id=account.id,
             platform=account.platform,
             scheduled_at=payload.scheduled_at,
@@ -290,6 +312,7 @@ def create_job(
         owner_user_id=user.id,
         workspace_id=workspace.id,
         platform_variant_id=payload.variant_id,
+        content_item_id=content_item.id if content_item else None,
         connected_account_id=account.id,
         platform=account.platform,
         scheduled_at=payload.scheduled_at,
@@ -384,6 +407,18 @@ def cancel_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.Publish
     return _job_out(job)
 
 
+@router.delete("/publishing/jobs/{job_id}", status_code=204)
+def delete_job(job_id: str, user: CurrentUser, db: DbSession) -> None:
+    job = db.get(models.PublishJob, job_id)
+    if not job or job.owner_user_id != user.id:
+        raise not_found("发布任务")
+    if job.status not in publish_state.TERMINAL | {publish_state.FAILED, publish_state.NEEDS_ATTENTION}:
+        raise ApiError("job_not_deletable", "进行中的发布任务不能删除，请先取消任务", status_code=409)
+    db.execute(delete(models.PublishRecord).where(models.PublishRecord.publish_job_id == job.id))
+    db.delete(job)
+    db.commit()
+
+
 @router.post("/publishing/jobs/{job_id}/retry", response_model=schemas.PublishJobOut)
 def retry_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.PublishJobOut:
     job = db.get(models.PublishJob, job_id)
@@ -434,6 +469,11 @@ def _job_out(job: models.PublishJob) -> schemas.PublishJobOut:
         id=job.id,
         platform=job.platform,
         platform_label=cap.label,
+        account_id=job.connected_account_id or "",
+        account_name="",
+        content_item_id=job.content_item_id or "",
+        content_title=(job.payload_snapshot or {}).get("title", ""),
+        target=job.target or "publish",
         status=job.status,
         scheduled_at=job.scheduled_at,
         attempt_count=job.attempt_count,

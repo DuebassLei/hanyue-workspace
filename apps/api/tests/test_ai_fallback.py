@@ -146,3 +146,22 @@ def test_article_style_cannot_override_output_contract():
     assert "{{imageN}}" in system_prompt
     assert "轻松口语化" in system_prompt
     assert "多用短句" in system_prompt
+
+
+def test_article_raw_output_only_keeps_markdown_body():
+    """文章契约输出不能整段 JSON 落库成正文。"""
+    from app.services import ai_article
+
+    raw = (
+        '{"title":"测试标题","markdown":"## 小标题\\n\\n正文","summary":"摘要",'
+        '"coverPrompt":"cover prompt","inlinePrompts":["inline prompt"]}'
+    )
+
+    title, body = ai_article.article_from_raw_output(raw)
+
+    assert title == "测试标题"
+    assert body == "## 小标题\n\n正文"
+
+    # 非契约输出（如摘要任务）原样保留，不能丢内容
+    assert ai_article.article_from_raw_output("普通文本") == ("", "普通文本")
+

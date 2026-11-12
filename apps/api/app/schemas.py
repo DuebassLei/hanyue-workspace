@@ -232,6 +232,10 @@ class ImageGenerationIn(CamelModel):
     aspect_ratio: str = "3:4"
     count: int = 1
     model_id: str | None = None
+    # 参考图（图生图）：最多 4 张已上传素材，走供应商 /images/edits
+    reference_asset_ids: list[str] = Field(default_factory=list, max_length=4)
+    # 内置手绘风格编号（FA-001 或旧三位 001）：需要参考图的风格由任务执行器自动附加
+    builtin_reference_style_number: str | None = None
 
 
 class GenerationOut(CamelModel):
@@ -252,6 +256,7 @@ class AssetOut(CamelModel):
     width: int | None
     height: int | None
     source_type: str
+    prompt: str | None = None
     created_at: datetime
     url: str
 
@@ -318,6 +323,8 @@ class PreviewOut(CamelModel):
 class PublishJobIn(CamelModel):
     account_id: str
     idempotency_key: str = Field(min_length=6, max_length=120)
+    # 关联创作空间稿件；传入后未显式给标题/正文时按稿件最新内容自动填充
+    content_item_id: str | None = None
     title: str = ""
     body: str = ""
     asset_ids: list[str] = Field(default_factory=list)
@@ -338,6 +345,11 @@ class PublishJobOut(CamelModel):
     id: str
     platform: str
     platform_label: str
+    account_id: str = ""
+    account_name: str = ""
+    # 关联的创作空间稿件，便于发布队列追溯来源
+    content_item_id: str = ""
+    content_title: str = ""
     status: str
     scheduled_at: datetime | None
     attempt_count: int
@@ -367,6 +379,8 @@ class WeChatBindIn(CamelModel):
 class WeChatDraftIn(CamelModel):
     account_id: str
     idempotency_key: str = Field(min_length=6, max_length=120)
+    # 关联创作空间稿件，便于发布队列追溯来源
+    content_item_id: str | None = None
     title: str = ""
     body: str = ""
     digest: str = ""
@@ -544,6 +558,31 @@ class CardTemplateOut(CamelModel):
     name: str
     subtitle: str
     config: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------- prompts（提示词库） ----------
+class PromptTemplateIn(CamelModel):
+    title: str = Field(min_length=1, max_length=120)
+    category: str = Field(default="通用", max_length=32)
+    content: str = Field(min_length=1)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+
+
+class PromptTemplatePatch(CamelModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    category: str | None = Field(default=None, max_length=32)
+    content: str | None = Field(default=None, min_length=1)
+    tags: list[str] | None = Field(default=None, max_length=12)
+
+
+class PromptTemplateOut(CamelModel):
+    id: str
+    title: str
+    category: str
+    content: str
+    tags: list[str]
     created_at: datetime
     updated_at: datetime
 

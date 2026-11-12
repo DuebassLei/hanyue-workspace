@@ -3,11 +3,11 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, File, Form, Query, Response, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from .. import models, schemas
 from ..core import pagination, queue
@@ -21,6 +21,16 @@ settings = get_settings()
 
 ALLOWED_MIME = set(image_service.ALLOWED_INPUT)
 
+# 前端筛选用的格式别名 -> 存储的 MIME 类型
+_FORMAT_MIME = {
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "jpg": "image/jpeg",
+    "webp": "image/webp",
+    "gif": "image/gif",
+    "bmp": "image/bmp",
+}
+
 
 def _asset_out(asset: models.Asset) -> schemas.AssetOut:
     return schemas.AssetOut(
@@ -31,6 +41,7 @@ def _asset_out(asset: models.Asset) -> schemas.AssetOut:
         width=asset.width,
         height=asset.height,
         source_type=asset.source_type,
+        prompt=asset.prompt,
         created_at=asset.created_at,
         url=asset_raw_url(asset),
     )
@@ -52,8 +63,31 @@ def list_assets(
     response: Response,
     limit: int = Query(default=100, le=200),
     cursor: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=100),
+    source_type: str | None = Query(default=None, alias="sourceType"),
+    fmt: str | None = Query(default=None, alias="format"),
+    days: int | None = Query(default=None, ge=1, le=3650),
 ) -> list[schemas.AssetOut]:
     stmt = select(models.Asset).where(models.Asset.owner_user_id == user.id)
+    keyword = (q or "").strip()
+    if keyword:
+        # 转义 LIKE 通配符，让用户输入的 % / _ 按字面匹配
+        escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        stmt = stmt.where(
+            or_(
+                models.Asset.original_name.ilike(pattern, escape="\\"),
+                models.Asset.prompt.ilike(pattern, escape="\\"),
+            )
+        )
+    if source_type:
+        stmt = stmt.where(models.Asset.source_type == source_type)
+    mime = _FORMAT_MIME.get((fmt or "").lower())
+    if mime:
+        stmt = stmt.where(models.Asset.mime_type == mime)
+    if days:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        stmt = stmt.where(models.Asset.created_at >= since)
     rows, next_cursor = pagination.paginate(
         db, stmt, models.Asset,
         sort_column=models.Asset.created_at, cursor=cursor, limit=limit,
