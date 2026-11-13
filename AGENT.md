@@ -35,16 +35,16 @@ hanyue-workspace/
 │   │   │   ├── main.py           启动入口、lifespan、路由注册
 │   │   │   ├── models.py         SQLAlchemy ORM 模型
 │   │   │   ├── schemas.py        Pydantic 请求/响应 schema
-│   │   │   ├── modules/          路由模块（17个，见下表）
-│   │   │   ├── services/         领域服务（14个，见下表）
+│   │   │   ├── modules/          路由模块（19个，见下表）
+│   │   │   ├── services/         领域服务（18个，见下表）
 │   │   │   └── core/             基础设施（db/config/deps/logging/pagination/queue/security/ssrf）
-│   │   ├── tests/                pytest 测试（174 passed）
+│   │   ├── tests/                pytest 测试（232 项）
 │   │   ├── requirements.txt      锁定版本
 │   │   ├── requirements-prod.txt 含 psycopg[binary] 与 redis
 │   │   └── .env.example          环境变量模板
 │   ├── web/              ← Vue 3 前端
 │   │   ├── src/
-│   │   │   ├── views/            9 个页面视图
+│   │   │   ├── views/            11 个页面视图
 │   │   │   ├── features/         功能模块（按页面组织）
 │   │   │   ├── components/       公共组件
 │   │   │   ├── composables/      组合式函数
@@ -76,11 +76,13 @@ hanyue-workspace/
 | `workspaces.py` | `/api/v1/workspaces` | 工作区 CRUD、多工作区隔离 |
 | `topics.py` | `/api/v1/workspaces/current` | 当前工作区上下文（选题库已下线，仅保留此端点） |
 | `content.py` | `/api/v1/content` | 稿件版本、平台版本 |
-| `ai_content.py` | `/api/v1/ai` | SSE 流式生成、大纲/正文/润色 |
+| `ai_content.py` | `/api/v1/ai` | SSE 流式生成、大纲/正文/润色（`GET /ai/hot-topics` 为创作空间「灵感」面板数据源） |
+| `hot_topics.py` | `/api/v1/hot-topics` | 热点选题：多源采集、事件合并、评分、筛选、一键成稿 |
 | `ai_images.py` | `/api/v1/ai/image-generations` | AI 生图任务 |
 | `assets.py` | `/api/v1/assets` | 素材上传、7 种图像处理、分格 |
 | `cards.py` | `/api/v1/cards` | 图文卡片生成（8套模板）、PNG/ZIP 导出 |
 | `prompts.py` | `/api/v1/prompts` | 提示词库 CRUD（生图提示词模板，按用户隔离） |
+| `handdraw.py` | `/api/v1/handdraw` | 手绘风格提示词库（内置模板 + 用户收藏） |
 | `publishing.py` | `/api/v1/publishing` | 发布队列、平台账号、OAuth 接入 |
 | `wechat_mp.py` | `/api/v1/wechat-mp` | 公众号草稿箱、排版主题、绑定验证 |
 | `platform_auth.py` | `/api/v1/platforms` | Phase 0 核验、OAuth 连接器、维护视图 |
@@ -107,7 +109,9 @@ hanyue-workspace/
 | `publish_state.py` | 发布状态机、幂等提交、排期自动提升 |
 | `wechat_article.py` | 公众号文章三步推送（封面→正文图→draft/add） |
 | `wechat_layout.py` | 公众号排版渲染（内联样式、预设/自定义主题） |
-| `hot_topics.py` | 热点灵感推荐（创作空间「灵感」面板数据源） |
+| `hot_sources.py` | 热点多源采集（7 路，统一走 SSRF；单源失败只记 notes） |
+| `hot_ranking.py` | 纯函数：标题归一、同事件合并、赛道/风险词表、100 分评分 |
+| `hot_topics.py` | 热点选题编排：灌库幂等、聚簇落库、筛选读取、一键成稿；兼作「灵感」面板数据源 |
 | `card_paginator.py` | 图文卡片 `/cards/paginate` 协同模式 |
 | `provider_probe.py` | 模型供应商连通性探测 |
 
@@ -119,9 +123,11 @@ hanyue-workspace/
 |---|---|---|
 | `OverviewView.vue` | `/` | 总览仪表盘 |
 | `CalendarView.vue` | `/calendar` | 内容日历（`/topics` 已重定向到创作空间） |
+| `HotTopicsView.vue` | `/hot-topics` | 热点选题：多平台事件的合并、评分、筛选与一键成稿 |
 | `StudioView.vue` | `/studio` | AI 创作主界面（大纲/正文/润色/配图） |
 | `CardsView.vue` | `/cards` | 图文卡片生成与导出 |
 | `PromptsView.vue` | `/prompts` | 提示词库维护（生图提示词模板） |
+| `HanddrawView.vue` | `/handdraw` | 手绘风格提示词库 |
 | `AssetsView.vue` | `/assets` | 素材管理、AI 生图任务列表 |
 | `PublishingView.vue` | `/publishing` | 发布中心（含公众号草稿箱入口） |
 | `SettingsView.vue` | `/settings` | 模型连接、平台接入、Agent 策略、偏好 |
@@ -169,7 +175,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/auth/login \
 
 ```bash
 cd apps/api
-.venv/Scripts/python.exe -m pytest -q                  # 174 passed
+.venv/Scripts/python.exe -m pytest -q                  # 232 项
 .venv/Scripts/python.exe -m compileall -q app          # 编译检查
 cd ../web && npm run build                             # 前端构建
 ```
@@ -229,6 +235,10 @@ cd ../web && npm run build                             # 前端构建
 | `IMAGE_PROVIDER_BASE_URL/API_KEY/MODEL` | 空 | 三项齐全才启用 AI 生图 |
 | `WECHAT_MP_APPID` / `WECHAT_MP_APPSECRET` | 空 | 同时存在才启用公众号草稿箱 |
 | `PLATFORM_EVIDENCE_FILE` | 空 | Phase 0 核验证据 JSON 路径 |
+| `HOT_TOPICS_PLATFORMS` | 空（全部 7 路） | 热点采集源，逗号分隔，如 `微博,知乎` |
+| `HOT_TOPICS_TIMEOUT` | `12` | 热点单源请求超时（秒） |
+| `HOT_TOPICS_REFRESH_COOLDOWN` | `15` | 热点刷新冷却（秒），0 关闭 |
+| `HOT_TOPICS_API_URL` | 空 | 旧版单源热点接口；仅在库中无评分簇时回落使用 |
 | `ENVIRONMENT` | `development` | 设 `production` 开启安全门禁 |
 | `ALLOW_DEV_LOGIN` | `true` | 生产必须为 `false` |
 
@@ -245,13 +255,14 @@ cd ../web && npm run build                             # 前端构建
 | `docs/plan.md` | 实施计划与里程碑 |
 | `docs/wechat-layout.md` | 公众号排版渲染管线（标签约束、主题参数、语法规范） |
 | `docs/studio-redesign.md` | Studio 创作页重设计说明 |
+| `docs/hot-topics.md` | 热点选题：采集源、合并算法、评分口径、接口与降级显示 |
 | `README.md` | 全量功能说明、部署指南、已实现/未实现能力边界 |
 
 ---
 
 ## 当前能力边界（快速参考）
 
-**已实现**：稿件/日历/复盘、多模型连接与流式生成、AI 生图、7 种图像处理与条漫分格、图文卡片（8套模板）、Agent 受控执行、发布队列与幂等提交、公众号草稿箱（AppSecret 绑定 + 真实三步推送）、真 keyset 分页、SSRF 防护、生产安全门禁。
+**已实现**：稿件/日历/复盘、多模型连接与流式生成、AI 生图、7 种图像处理与条漫分格、图文卡片（8套模板）、**热点选题（7 路采集 + 同事件合并 + 100 分可解释评分 + 一键成稿）**、Agent 受控执行、发布队列与幂等提交、公众号草稿箱（AppSecret 绑定 + 真实三步推送）、真 keyset 分页、SSRF 防护、生产安全门禁。
 
 **明确未实现**：各平台具体发布适配器字段映射、公众号群发、公众号指标采集、OCR/抠图、Agent SDK/MCP 独立 Worker、TanStack Query/Tiptap。
 

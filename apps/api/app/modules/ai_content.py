@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from .. import schemas
-from ..core.deps import ApiError
+from ..core.deps import ApiError, DbSession
 from ..services import hot_topics
 
 router = APIRouter(tags=["ai-content"])
@@ -25,9 +25,10 @@ def hot_topics_status() -> schemas.HotTopicsStatusOut:
 
 
 @router.get("/hot-topics", response_model=list[schemas.HotTopicOut])
-def list_hot_topics(limit: int = 20) -> list[schemas.HotTopicOut]:
+def list_hot_topics(db: DbSession, limit: int = 20) -> list[schemas.HotTopicOut]:
+    # 优先读「热点选题」已经算好分的簇；没有数据时才回落到单源抓取
     try:
-        items = hot_topics.fetch_hot_topics(limit=limit)
+        items = hot_topics.fetch_hot_topics(db, limit=limit)
     except hot_topics.HotTopicsError as exc:
         raise ApiError(exc.code, exc.message, status_code=502) from exc
     return [schemas.HotTopicOut(**item) for item in items]

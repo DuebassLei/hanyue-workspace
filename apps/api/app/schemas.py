@@ -601,3 +601,114 @@ class HotTopicsStatusOut(CamelModel):
     note: str
 
 
+# ---------- hot topics（热点选题） ----------
+# 分数与档位由服务端算好原样返回，前端只排序/筛选，不重算。
+
+
+class HotScoreDetailOut(CamelModel):
+    """评分证据。全部可选：脏数据/旧数据不应该让整个列表 500。"""
+
+    items: int = 0
+    platforms: list[str] = []
+    captured_at: str = ""
+    resonance: int = 0
+    momentum: int = 0
+    best_rank: int | None = None
+    rank_points: int = 0
+    rise_points: int = 0
+    hot_points: int = 0
+    hot_evidence: list[str] = []
+    freshness: int = 0
+    first_seen_at: str = ""
+    fresh_points: int = 0
+    days_points: int = 0
+    days_seen: int = 0
+    track: str = ""
+    track_points: int = 0
+    track_hits: list[str] = []
+    writability: int = 0
+    writability_evidence: list[str] = []
+    representative: str = ""
+    risk_flags: list[str] = []
+    risk_penalty: int = 0
+    total: int = 0
+    evidence: list[str] = []
+
+
+class HotClusterOut(CamelModel):
+    id: str
+    title: str
+    track: str = ""
+    score: int = 0
+    grade: str = ""
+    platforms: list[str] = []
+    platform_count: int = 0
+    item_count: int = 0
+    best_rank: int | None = None
+    days_seen: int = 1
+    first_seen_at: str = ""
+    last_seen_day: str = ""
+    risk_flags: list[str] = []
+    status: str = "new"
+    captured_at: str = ""
+    content_item_id: str | None = None
+    score_detail: HotScoreDetailOut = Field(default_factory=HotScoreDetailOut)
+
+
+class HotClusterItemOut(CamelModel):
+    id: str
+    platform: str
+    rank: int | None = None
+    title: str
+    hot: int | None = None
+    url: str = ""
+    first_seen_at: str = ""
+    last_seen_at: str = ""
+    history: list[dict[str, Any]] = []
+
+
+class HotClusterDetailOut(HotClusterOut):
+    items: list[HotClusterItemOut] = []
+    content_item_title: str = ""
+
+
+class HotRefreshIn(CamelModel):
+    date: str | None = None
+
+
+class HotRefreshOut(CamelModel):
+    day: str
+    captured_at: str
+    items: int
+    clusters: int
+    new_clusters: int
+    matched_clusters: int
+    recommended: int
+    notes: list[str] = []
+
+
+class HotSummaryOut(CamelModel):
+    day: str = ""
+    items: int = 0
+    clusters: int = 0
+    recommended: int = 0
+    generated: int = 0
+    tracks: dict[str, int] = {}
+    captured_at: str = ""
+
+
+class HotDegradedOut(CamelModel):
+    dim: str
+    reason: str
+
+
+class HotStatusIn(CamelModel):
+    status: str
+
+
+class HotSourcesOut(CamelModel):
+    platforms: list[dict[str, str]] = []
+    enabled: list[str] = []
+    fallback_configured: bool = False
+
+

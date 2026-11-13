@@ -63,6 +63,9 @@ _INDEXES: list[tuple[str, str]] = [
     ("ix_accounts_owner_created", "connected_accounts (owner_user_id, created_at, id)"),
     ("ix_connections_owner_created", "model_connections (owner_user_id, created_at, id)"),
     ("ix_skills_owner_created", "skill_registry_entries (owner_user_id, created_at, id)"),
+    # 热点页默认按「最近活跃日 + 分数」取，两个条件都要进索引
+    ("ix_hot_items_day_platform_rank", "hot_items (day, platform, rank)"),
+    ("ix_hot_clusters_day_score", "hot_clusters (last_seen_day, score DESC, id)"),
 ]
 
 

@@ -604,3 +604,77 @@ class AppSetting(Base, TimestampMixin):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict] = mapped_column(JSON, default=dict)
 
+
+# ---------------- 热点选题 ----------------
+#
+# 三个表的关系：hot_items 是「某平台某标题」的条目，hot_clusters 是「同一件事」
+# 的归并结果，hot_rank_history 是名次采样（用于算升降）。
+# 热点是公开数据，不按 owner 隔离；同实例多用户看到同一份榜单。
+
+
+class HotItem(Base, TimestampMixin):
+    """单个平台的一条热榜条目。身份键是 platform + title_norm，不是名次。"""
+
+    __tablename__ = "hot_items"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    item_uid: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    day: Mapped[str] = mapped_column(String(10), index=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str] = mapped_column(String(300))
+    title_norm: Mapped[str] = mapped_column(String(300), index=True)
+    hot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    url: Mapped[str] = mapped_column(String(500), default="")
+    first_seen_at: Mapped[str] = mapped_column(String(16), default="")
+    last_seen_at: Mapped[str] = mapped_column(String(16), default="")
+    first_seen_day: Mapped[str] = mapped_column(String(10), default="")
+    days_json: Mapped[list] = mapped_column(JSON, default=list)
+    seen_count: Mapped[int] = mapped_column(Integer, default=1)
+    prev_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    best_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cluster_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+
+
+class HotRankHistory(Base):
+    """名次采样。同一 (item, captured_at) 只留一条，重跑同一轮不会重复插。"""
+
+    __tablename__ = "hot_rank_history"
+    __table_args__ = (
+        UniqueConstraint("item_id", "captured_at", name="uq_hot_rank_sample"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    item_id: Mapped[str] = mapped_column(String(32), index=True)
+    captured_at: Mapped[str] = mapped_column(String(16), index=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class HotCluster(Base, TimestampMixin):
+    """同一件事的归并结果 + 脚本算好的 100 分制评分。"""
+
+    __tablename__ = "hot_clusters"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 稳定标识：一旦写入不再改，否则历史稿件的来源关联会漂移
+    fingerprint: Mapped[str] = mapped_column(String(120), index=True)
+    title_norm: Mapped[str] = mapped_column(String(300))
+    title: Mapped[str] = mapped_column(String(300))
+    track: Mapped[str] = mapped_column(String(32), default="", index=True)
+    first_seen_day: Mapped[str] = mapped_column(String(10), default="")
+    last_seen_day: Mapped[str] = mapped_column(String(10), default="", index=True)
+    days_seen: Mapped[int] = mapped_column(Integer, default=1)
+    best_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    platform_count: Mapped[int] = mapped_column(Integer, default=0)
+    item_count: Mapped[int] = mapped_column(Integer, default=0)
+    platforms: Mapped[list] = mapped_column(JSON, default=list)
+    score: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    grade: Mapped[str] = mapped_column(String(16), default="")
+    score_detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    risk_flags: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="new", index=True)
+    captured_at: Mapped[str] = mapped_column(String(16), default="")
+    # 从热点直接成稿后回填，用于「已出稿」判断与跳转
+    content_item_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+

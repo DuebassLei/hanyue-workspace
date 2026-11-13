@@ -13,6 +13,7 @@ const navGroups = [
     label: '创作',
     items: [
       { name: 'overview', label: '创作总览', icon: '◈' },
+      { name: 'hot-topics', label: '热点选题', icon: '◉' },
       { name: 'calendar', label: '内容日历', icon: '▦' },
     ],
   },
@@ -35,6 +36,7 @@ const navGroups = [
 
 const mobileNav = [
   { name: 'overview', label: '总览', icon: '◈' },
+  { name: 'hot-topics', label: '热点', icon: '◉' },
   { name: 'calendar', label: '日历', icon: '▦' },
   { name: 'studio', label: '创作', icon: '✎' },
   { name: 'cards', label: '卡片', icon: '▤' },
