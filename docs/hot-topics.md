@@ -107,7 +107,7 @@ hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster   co
 | GET | `/hot-topics/clusters/{id}` | 登录 | 详情：成员条目、名次采样、关联稿件标题 |
 | PATCH | `/hot-topics/clusters/{id}` | 登录 | `{status}`：`new` / `watching` / `ignored`；`generated` 只能由成稿写入 |
 | POST | `/hot-topics/clusters/{id}/draft` | 登录 | 热点 → 稿件（201，返回 `ContentOut`） |
-| GET | `/hot-topics/summary` | 登录 | 概要素材数/事件数/≥70 分数量/已出稿数/赛道分布 |
+| GET | `/hot-topics/summary` | 登录 | 概要素材数/事件数/≥70 分数量/已出稿数/赛道分布/各平台事件数 |
 | GET | `/hot-topics/degraded` | 登录 | 本轮数据不足的维度与原因 |
 
 列表默认按分数降序，不按 id：热点的意义就是最值得写的在最前。`platform` 过滤在 Python 侧完成——JSON 列的 LIKE 在 SQLite/PostgreSQL 行为不一致，当天簇数量有限，多扫一遍比写方言分支便宜。
@@ -128,10 +128,12 @@ hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster   co
 
 ## 5. 页面
 
-`apps/web/src/views/HotTopicsView.vue` + `features/hot/HotClusterCard.vue` + `features/hot/HotScoreBars.vue`
+`apps/web/src/views/HotTopicsView.vue` + `features/hot/HotClusterCard.vue` + `features/hot/HotScoreBars.vue` + `features/hot/HotPlatformTabs.vue`
 
 - 顶部概要：素材 → 事件 → 值得写 → 已出稿，赛道分布条，采集源与数据不足提示。
-- 筛选：日期 / 赛道 / 平台 / 最低分 / 排序（价值、最新、共振）/ 只看未出稿 / 标题搜索（250ms 防抖）。
+- 平台切换条：一行带条数的 chip，条数来自 `summary.platforms`（当天该平台的事件数），点一下只看该渠道，再点一下回到全部；条数为 0 的平台置灰不可点；左右方向键 / Home / End 可移动；窄屏横向滚动、触控目标 44px。选中平台写进 URL（`?platform=微博`），刷新、分享、后退都能还原。
+- 其余筛选：日期 / 赛道 / 最低分 / 排序（价值、最新、共振）/ 只看未出稿 / 标题搜索（250ms 防抖）。
+- 空态区分「当天没有采集到数据」和「筛选挡光了」；选了平台时会说明该平台当天有几个事件，并给「看全部平台 / 清空筛选」两个出口。
 - 事件卡：分数与档位、平台与风险标签、赛道/首见/连续天数/最高名次/原文数、五维分数条（悬浮看证据）。
 - 「展开原文」才请求详情（含各平台原始条目与链接）。
 - 「写这篇」→ `POST .../draft` → 跳转 `/studio?id=<contentItemId>`；已出稿的卡片显示「打开已生成的稿件」。
@@ -139,7 +141,7 @@ hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster   co
 
 ## 6. 测试
 
-`apps/api/tests/test_hot_topics.py`（12 项）：
+`apps/api/tests/test_hot_topics.py`（14 项）：
 
 - 纯函数：标题归一、同事件合并与反义/实体否决、确定性评分（同一 `captured_at` 结果一致）、风险词逐条累计、聚簇分组。
 - 路由：重复刷新幂等、列表筛选、详情、状态流转、成稿幂等与跳转依据、概要、数据不足、全源失败 502、源清单。

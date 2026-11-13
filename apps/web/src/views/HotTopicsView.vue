@@ -1,10 +1,12 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api/client'
 import HotClusterCard from '../features/hot/HotClusterCard.vue'
+import HotPlatformTabs from '../features/hot/HotPlatformTabs.vue'
 
 const router = useRouter()
+const route = useRoute()
 
 const clusters = ref([])
 const summary = ref({})
@@ -22,7 +24,8 @@ const detailLoadingId = ref('')
 const filters = reactive({
   date: '',
   track: '',
-  platform: '',
+  // 平台写进 URL（/hot-topics?platform=微博）：刷新、分享、后退都能回到同一视图
+  platform: String(route.query.platform || ''),
   minScore: 0,
   sort: 'score',
   onlyNew: true,
@@ -40,12 +43,58 @@ function showMore() {
 let searchTimer = null
 
 const trackOptions = computed(() => Object.keys(summary.value.tracks || {}).sort())
-const platformOptions = computed(() => sources.value.enabled || [])
+
+// 平台切换条：条数来自服务端 summary（当天该平台的事件数），
+// 切过去之前就知道会看到多少条，不用点进去撞空列表。
+// 顺序跟随采集源配置固定，不按条数排序——每次刷新都换位置会找不到按钮。
+const platformTabs = computed(() => {
+  const counts = summary.value.platforms || {}
+  const enabled = sources.value.enabled || []
+  const known = enabled.length ? enabled : Object.keys(counts)
+  return known.map((name) => ({ name, count: counts[name] || 0 }))
+})
 
 const visible = computed(() =>
   clusters.value.filter(
     (row) => !filters.onlyNew || (row.status !== 'ignored' && row.status !== 'generated'),
   ),
+)
+
+/** 计数带上前缀，切了平台也能一眼看出「现在这些数字是哪个渠道的」。 */
+const resultHint = computed(() => {
+  const scope = filters.platform ? `${filters.platform} · ` : ''
+  // 列表被 limit 截断时要说清楚「下面还有」，别让人以为全站就这么几个事件
+  const truncated = clusters.value.length >= limit.value && limit.value < 200
+  return truncated
+    ? `${scope}显示 ${visible.value.length} 个事件（已加载前 ${clusters.value.length} 个）`
+    : `${scope}显示 ${visible.value.length} / ${clusters.value.length} 个事件`
+})
+
+/** 平台筛选写进 URL：刷新、分享、浏览器后退都还能回到同一个平台视图。 */
+function syncPlatformToUrl() {
+  const query = { ...route.query }
+  if (filters.platform) query.platform = filters.platform
+  else delete query.platform
+  if (JSON.stringify(query) === JSON.stringify(route.query)) return
+  router.replace({ query })
+}
+
+// 平台是「看哪个渠道」的主维度，单独一条：切平台时立刻请求，不等防抖
+watch(
+  () => filters.platform,
+  () => {
+    syncPlatformToUrl()
+    limit.value = 60
+    loadClusters()
+  },
+)
+
+// 浏览器前进/后退改的是 URL，得让它反过来驱动筛选
+watch(
+  () => route.query.platform,
+  (value) => {
+    filters.platform = String(value || '')
+  },
 )
 
 /** 赛道分布的堆叠条：单一色相的明度阶梯，深色主题自动跟随文字色。 */
@@ -191,7 +240,7 @@ function resetFilters() {
 }
 
 watch(
-  () => [filters.date, filters.track, filters.platform, filters.minScore, filters.sort],
+  () => [filters.date, filters.track, filters.minScore, filters.sort],
   () => loadClusters(),
 )
 
@@ -263,15 +312,27 @@ onMounted(loadAll)
       </p>
     </section>
 
+    <section class="card hot-platform" aria-label="平台切换">
+      <div class="hot-platform-head">
+        <span class="hot-platform-title">看哪个平台</span>
+        <span class="field-hint" :title="'数字是当天该平台的事件数（不受下方赛道/分数/搜索影响）'">
+          {{ filters.platform ? `只看「${filters.platform}」，再点一次回到全部` : '点平台只看该渠道，再点一次取消' }}
+        </span>
+      </div>
+      <HotPlatformTabs
+        :platforms="platformTabs"
+        :model-value="filters.platform"
+        :total="summary.clusters || 0"
+        :loading="loading"
+        @update:model-value="filters.platform = $event"
+      />
+    </section>
+
     <section class="card hot-filters">
       <input v-model="filters.date" class="input hot-date" type="date" aria-label="按日期筛选" />
       <select v-model="filters.track" class="select" aria-label="按赛道筛选">
         <option value="">全部赛道</option>
         <option v-for="track in trackOptions" :key="track" :value="track">{{ track }}</option>
-      </select>
-      <select v-model="filters.platform" class="select" aria-label="按平台筛选">
-        <option value="">全部平台</option>
-        <option v-for="platform in platformOptions" :key="platform" :value="platform">{{ platform }}</option>
       </select>
       <select v-model.number="filters.minScore" class="select" aria-label="按分数筛选">
         <option :value="0">全部分数</option>
@@ -296,7 +357,7 @@ onMounted(loadAll)
         aria-label="搜索事件"
       />
       <div class="spacer" />
-      <span class="field-hint">{{ visible.length }} / {{ clusters.length }} 个事件</span>
+      <span class="field-hint">{{ resultHint }}</span>
       <button class="btn btn-ghost btn-sm" @click="resetFilters">清空</button>
     </section>
 
@@ -304,7 +365,9 @@ onMounted(loadAll)
       <div v-for="i in 3" :key="i" class="skeleton" style="height: 150px" />
     </div>
 
-    <div v-else-if="!clusters.length" class="empty">
+    <!-- 用当天总数判断「有没有数据」，不能用筛选后的列表：搜索/评分把结果挡光时
+         不该显示「还没有热点数据」并催人去采集。 -->
+    <div v-else-if="!summary.clusters" class="empty">
       <span class="empty-title">还没有热点数据</span>
       <span>点右上角「刷新并评分」，会抓取今日头条、百度、抖音、微博、知乎与 AI 资讯，合并同一事件后打分。</span>
       <button class="btn btn-sm" :disabled="refreshing" @click="refreshTopics">
@@ -313,9 +376,22 @@ onMounted(loadAll)
     </div>
 
     <div v-else-if="!visible.length" class="empty">
-      <span class="empty-title">没有符合条件的事件</span>
-      <span>取消「只看未出稿」，或清空筛选再试试。</span>
-      <button class="btn btn-ghost btn-sm" @click="resetFilters">清空筛选</button>
+      <template v-if="filters.platform">
+        <span class="empty-title">「{{ filters.platform }}」下没有符合条件的事件</span>
+        <span v-if="summary.platforms?.[filters.platform]">
+          这个平台今天有 {{ summary.platforms[filters.platform] }} 个事件，可能都被筛选条件挡住了。
+        </span>
+        <span v-else>今天这一路没采到事件（可能采集失败），换一个平台看看。</span>
+        <div class="row row-tight">
+          <button class="btn btn-sm" @click="filters.platform = ''">看全部平台</button>
+          <button class="btn btn-ghost btn-sm" @click="resetFilters">清空筛选</button>
+        </div>
+      </template>
+      <template v-else>
+        <span class="empty-title">没有符合条件的事件</span>
+        <span>取消「只看未出稿」，或清空筛选再试试。</span>
+        <button class="btn btn-ghost btn-sm" @click="resetFilters">清空筛选</button>
+      </template>
     </div>
 
     <div v-else class="hot-list">
@@ -345,6 +421,24 @@ onMounted(loadAll)
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+.hot-platform {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-2);
+}
+.hot-platform-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.hot-platform-title {
+  font-size: var(--font-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  letter-spacing: 0.02em;
 }
 .hot-stat-line {
   display: flex;

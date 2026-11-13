@@ -585,9 +585,14 @@ def summary(db: Session, day: str | None = None) -> dict:
     clusters = db.scalars(cluster_stmt).all()
 
     tracks: dict[str, int] = {}
+    platform_counts: dict[str, int] = {}
     for cluster in clusters:
         name = cluster.track or "其他"
         tracks[name] = tracks.get(name, 0) + 1
+        # 一个事件可以横跨多个平台，所以每个平台各计一次：这里回答的是
+        # 「切到某个平台能看到几个事件」，不是把事件按平台分摊。
+        for platform in cluster.platforms or []:
+            platform_counts[platform] = platform_counts.get(platform, 0) + 1
 
     latest = max((c.captured_at or "" for c in clusters), default="")
     return {
@@ -597,6 +602,7 @@ def summary(db: Session, day: str | None = None) -> dict:
         "recommended": sum(1 for c in clusters if (c.score or 0) >= 70),
         "generated": sum(1 for c in clusters if c.status == "generated"),
         "tracks": tracks,
+        "platforms": platform_counts,
         "capturedAt": latest,
     }
 

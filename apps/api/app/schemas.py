@@ -694,6 +694,9 @@ class HotSummaryOut(CamelModel):
     recommended: int = 0
     generated: int = 0
     tracks: dict[str, int] = {}
+    # 每个平台各有多少个事件（一个事件横跨多平台时各计一次），
+    # 平台切换条上的条数直接用它，前端不再自己统计。
+    platforms: dict[str, int] = {}
     captured_at: str = ""
 
 
