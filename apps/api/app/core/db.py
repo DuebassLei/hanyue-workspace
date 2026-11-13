@@ -67,6 +67,9 @@ _INDEXES: list[tuple[str, str]] = [
     # 热点页默认按「最近活跃日 + 分数」取，两个条件都要进索引
     ("ix_hot_items_day_platform_rank", "hot_items (day, platform, rank)"),
     ("ix_hot_clusters_day_score", "hot_clusters (last_seen_day, score DESC, id)"),
+    # 贴图列表按「最近改动」取；集合内图片按图序读
+    ("ix_sticker_sets_owner_updated", "sticker_sets (owner_user_id, updated_at DESC, id DESC)"),
+    ("ix_sticker_images_set_order", "sticker_images (set_id, sort_order)"),
 ]
 
 

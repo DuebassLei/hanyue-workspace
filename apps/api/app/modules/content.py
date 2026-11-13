@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from .. import models, schemas
 from ..core import pagination
 from ..core.deps import CurrentUser, DbSession, default_workspace, not_found
+from ..services import article_workflow
 
 router = APIRouter(tags=["content"])
 
@@ -119,6 +120,105 @@ def get_content(content_id: str, user: CurrentUser, db: DbSession) -> schemas.Co
             for v in variants
         ],
     )
+
+
+_FLOW_STEP_LABELS = {
+    "create_outline": "列大纲",
+    "generate_article": "生成文章",
+    "review_article": "审稿",
+    "check_ai_tone": "检查 AI 味",
+    "extract_facts": "抽取事实",
+    "plan_images": "规划配图",
+    "retrieve_content": "检索稿件",
+}
+
+
+def _owned_item(content_id: str, user, db: DbSession) -> models.ContentItem:
+    item = db.get(models.ContentItem, content_id)
+    if not item or item.owner_user_id != user.id:
+        raise not_found("稿件")
+    return item
+
+
+def _latest_version(item: models.ContentItem, db: DbSession) -> models.ContentVersion | None:
+    return db.scalar(
+        select(models.ContentVersion)
+        .where(models.ContentVersion.content_item_id == item.id)
+        .order_by(models.ContentVersion.version_no.desc())
+        .limit(1)
+    )
+
+
+def _resolve_flow_skill(user, db: DbSession, skill_key: str | None):
+    key = (skill_key or "article-drafting").strip() or "article-drafting"
+    entry = db.scalar(
+        select(models.SkillRegistryEntry).where(
+            models.SkillRegistryEntry.owner_user_id == user.id,
+            models.SkillRegistryEntry.source == "custom",
+            models.SkillRegistryEntry.skill_key == key,
+        )
+    )
+    if entry is None:
+        entry = db.scalar(
+            select(models.SkillRegistryEntry).where(
+                models.SkillRegistryEntry.owner_user_id.is_(None),
+                models.SkillRegistryEntry.source == "builtin",
+                models.SkillRegistryEntry.skill_key == key,
+            )
+        )
+    if entry is None or not (entry.manifest or {}).get("workflow"):
+        raise not_found("写作流程")
+    return entry
+
+
+@router.get("/content/{content_id}/writing-flow")
+def get_writing_flow(
+    content_id: str, user: CurrentUser, db: DbSession, skillKey: str | None = None
+) -> dict:
+    """当前稿件对应的写作流程步骤，以及基于最新正文的检查结果。
+
+    不调用模型、不改正文。生成类步骤只展示定义；检查类步骤直接跑本地规则。
+    """
+    item = _owned_item(content_id, user, db)
+    entry = _resolve_flow_skill(user, db, skillKey)
+    version = _latest_version(item, db)
+    markdown = version.body if version else ""
+    title = version.title if version else item.title
+    summary = version.summary if version else ""
+    manifest = entry.manifest or {}
+    checks = {
+        "review_article": article_workflow.review_article(
+            {"title": title or "", "markdown": markdown or "", "summary": summary or ""},
+            manifest.get("reviewRules") or [],
+        ),
+        "check_ai_tone": article_workflow.check_ai_tone(markdown or ""),
+        "extract_facts": article_workflow.extract_facts(markdown or ""),
+        "plan_images": article_workflow.plan_images(
+            markdown or "", [], None, manifest.get("imagePolicy")
+        ),
+    }
+    steps = []
+    for index, step in enumerate(manifest.get("workflow") or [], start=1):
+        tool = step.get("tool") if isinstance(step, dict) else None
+        if not isinstance(tool, str):
+            continue
+        steps.append(
+            {
+                "index": index,
+                "tool": tool,
+                "label": _FLOW_STEP_LABELS.get(tool, tool),
+                "kind": "check" if tool in checks else "generate",
+                "result": checks.get(tool),
+            }
+        )
+    return {
+        "skillKey": entry.skill_key,
+        "skillName": entry.display_name,
+        "description": entry.description or "",
+        "versionId": version.id if version else None,
+        "hasBody": bool((markdown or "").strip()),
+        "steps": steps,
+    }
 
 
 @router.patch("/content/{content_id}/draft", response_model=schemas.ContentOut)

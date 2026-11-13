@@ -14,7 +14,7 @@ import {
 import { api } from '../api/client'
 import { toast } from '../ui/feedback'
 import HotClusterCard from '../features/hot/HotClusterCard.vue'
-import HotPlatformTabs from '../features/hot/HotPlatformTabs.vue'
+import HotOverviewDialog from '../features/hot/HotOverviewDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -27,6 +27,7 @@ const loading = ref(true)
 const refreshing = ref(false)
 const error = ref('')
 const busyId = ref('')
+const overviewOpen = ref(false)
 const openId = ref('')
 const detailCache = reactive({})
 const detailLoadingId = ref('')
@@ -134,27 +135,6 @@ watch(
     filters.platform = String(value || '')
   },
 )
-
-/** 赛道分布的堆叠条：单一色相的明度阶梯，深色主题自动跟随文字色。 */
-const trackSegments = computed(() => {
-  const tracks = summary.value.tracks || {}
-  const total = Object.values(tracks).reduce((sum, n) => sum + n, 0) || 1
-  const tones = [92, 70, 52, 38, 28, 20, 14, 10]
-  return Object.entries(tracks)
-    .sort((a, b) => b[1] - a[1])
-    .map(([name, count], index) => ({
-      name,
-      count,
-      pct: (count / total) * 100,
-      color: `color-mix(in srgb, var(--color-text-primary) ${tones[index] || 10}%, transparent)`,
-    }))
-})
-
-const sourceNote = computed(() => {
-  const enabled = sources.value.enabled || []
-  if (!enabled.length) return '未启用任何采集源'
-  return `采集源 ${enabled.length} 路：${enabled.join('、')}`
-})
 
 function queryString() {
   const params = new URLSearchParams()
@@ -303,61 +283,30 @@ onMounted(loadAll)
           今天大家搜什么 → 我该写哪一个。分数由服务端算好，悬停分数条看证据。
         </p>
       </div>
-      <n-button secondary :loading="refreshing" :disabled="loading" @click="refreshTopics">
-        刷新并评分
-      </n-button>
+      <n-space :size="8">
+        <n-button secondary :disabled="loading" @click="overviewOpen = true">
+          今日概览
+          <template v-if="filters.platform"> · {{ filters.platform }}</template>
+        </n-button>
+        <n-button secondary :loading="refreshing" :disabled="loading" @click="refreshTopics">
+          刷新并评分
+        </n-button>
+      </n-space>
     </div>
 
     <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
 
-    <section class="card hot-stat">
-      <div class="hot-stat-line">
-        <span class="hot-stat-item"><b>{{ summary.items || 0 }}</b> 条素材</span>
-        <span class="hot-stat-arrow">→</span>
-        <span class="hot-stat-item"><b>{{ summary.clusters || 0 }}</b> 个事件</span>
-        <span class="hot-stat-arrow">→</span>
-        <span class="hot-stat-item hot-stat-strong"><b>{{ summary.recommended || 0 }}</b> 个值得写</span>
-        <span class="hot-stat-arrow">→</span>
-        <span class="hot-stat-item"><b>{{ summary.generated || 0 }}</b> 个已出稿</span>
-        <div class="spacer" />
-        <span v-if="summary.capturedAt" class="field-hint">最近采集 {{ summary.capturedAt }}</span>
-      </div>
-
-      <div v-if="trackSegments.length" class="hot-track-bar" role="img" aria-label="赛道分布">
-        <span
-          v-for="segment in trackSegments"
-          :key="segment.name"
-          class="hot-track-seg"
-          :style="{ width: segment.pct + '%', background: segment.color }"
-          :title="`${segment.name} ${segment.count} 个`"
-        />
-      </div>
-
-      <p class="hot-stat-note">
-        {{ sourceNote }}
-        <template v-if="degraded.length">
-          · <span :title="degraded.map((x) => x.reason).join('；')">
-            {{ degraded.length }} 个维度数据不足（悬停看原因）
-          </span>
-        </template>
-      </p>
-    </section>
-
-    <section class="card hot-platform" aria-label="平台切换">
-      <div class="hot-platform-head">
-        <span class="hot-platform-title">看哪个平台</span>
-        <span class="field-hint" :title="'数字是当天该平台的事件数（不受下方赛道/分数/搜索影响）'">
-          {{ filters.platform ? `只看「${filters.platform}」，再点一次回到全部` : '点平台只看该渠道，再点一次取消' }}
-        </span>
-      </div>
-      <HotPlatformTabs
-        :platforms="platformTabs"
-        :model-value="filters.platform"
-        :total="summary.clusters || 0"
-        :loading="loading"
-        @update:model-value="filters.platform = $event"
-      />
-    </section>
+    <HotOverviewDialog
+      :show="overviewOpen"
+      :summary="summary"
+      :sources="sources"
+      :degraded="degraded"
+      :platform="filters.platform"
+      :platforms="platformTabs"
+      :loading="loading"
+      @update:show="overviewOpen = $event"
+      @update:platform="filters.platform = $event"
+    />
 
     <section class="card hot-filters">
       <n-date-picker v-model:value="dateTs" type="date" clearable class="hot-date" />
@@ -430,6 +379,7 @@ onMounted(loadAll)
         @write="writeFromCluster"
         @ignore="toggleIgnore"
         @toggle="toggleDetail"
+        @sticker="(c) => router.push(`/stickers?new=1&clusterId=${c.id}`)"
       />
     </div>
 
@@ -440,66 +390,6 @@ onMounted(loadAll)
 </template>
 
 <style scoped>
-.hot-stat {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-.hot-platform {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3) var(--space-1);
-}
-.hot-platform-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-.hot-platform-title {
-  font-size: var(--font-xs);
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  letter-spacing: 0.02em;
-}
-.hot-stat-line {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  font-size: var(--font-sm);
-  color: var(--color-text-secondary);
-}
-.hot-stat-item b {
-  color: var(--color-text-primary);
-  font-size: var(--font-sm);
-  font-variant-numeric: tabular-nums;
-}
-.hot-stat-strong b {
-  color: var(--color-danger);
-}
-.hot-stat-arrow {
-  color: var(--color-text-muted);
-}
-.hot-track-bar {
-  display: flex;
-  height: 8px;
-  width: 100%;
-  max-width: 360px;
-  border-radius: 4px;
-  overflow: hidden;
-  gap: 1px;
-}
-.hot-track-seg {
-  display: block;
-  height: 100%;
-}
-.hot-stat-note {
-  margin: 0;
-  font-size: var(--font-xs);
-  color: var(--color-text-muted);
-}
 .hot-filters {
   display: flex;
   flex-wrap: wrap;

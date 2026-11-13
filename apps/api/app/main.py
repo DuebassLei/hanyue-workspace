@@ -28,6 +28,7 @@ from .modules import (
     prompts,
     publishing,
     skills,
+    stickers,
     topics,
     wechat_mp,
     workspaces,
@@ -93,6 +94,7 @@ for module in (
     dashboard,
     jobs,
     cards,
+    stickers,
 ):
     app.include_router(module.router, prefix=settings.api_prefix)
 

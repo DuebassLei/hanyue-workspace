@@ -35,6 +35,11 @@ const assets = ref([])
 const assetsLoading = ref(true)
 const previewAsset = ref(null)
 const copiedId = ref('')
+// 反推提示词：参考图本地即时反推（uploading），或已入库素材的异步反推（interrogating）
+const interrogating = ref(false)
+const interrogateResult = ref('')
+const interrogateError = ref('')
+const uploading = ref(false)
 let copiedTimer = null
 let pollTimer = null
 let pollRounds = 0
@@ -460,6 +465,11 @@ async function generate() {
     // 参考图先落到素材库，任务里只传 assetId，队列负载保持轻量
     const referenceAssetIds = []
     for (const item of referenceFiles.value) {
+      // 反推时已入库的参考图直接复用 assetId，避免重复上传
+      if (item.id) {
+        referenceAssetIds.push(item.id)
+        continue
+      }
       const session = await api.post('/assets/upload-sessions?maxBytes=15728640')
       const upload = new FormData()
       upload.append('file', item.file)
@@ -501,14 +511,17 @@ async function generate() {
 
 function openPreview(asset) {
   previewAsset.value = asset
+  resetInterrogate()
 }
 
 function openResultPreview(item) {
   previewAsset.value = { ...item }
+  resetInterrogate()
 }
 
 function closePreview() {
   previewAsset.value = null
+  resetInterrogate()
 }
 
 function onPreviewKeydown(event) {
@@ -531,6 +544,61 @@ async function copyPrompt(asset) {
     }, 1600)
   } catch {
     error.value = '复制失败，请打开大图后手动选中提示词复制'
+  }
+}
+
+function resetInterrogate() {
+  interrogateResult.value = ''
+  interrogateError.value = ''
+}
+
+/** 本地参考图即时反推：先落到素材库（后续生图本来也要上传），再对素材做反推 */
+async function interrogateLocalReference(file) {
+  if (uploading.value || interrogating.value) return
+  resetInterrogate()
+  uploading.value = true
+  let created = null
+  try {
+    const session = await api.post('/assets/upload-sessions?maxBytes=15728640')
+    const upload = new FormData()
+    upload.append('file', file)
+    created = await api.upload(`/assets?sessionId=${encodeURIComponent(session.sessionId)}`, upload)
+    uploading.value = false
+    interrogating.value = true
+    const res = await api.post('/ai/image-interrogate', { assetId: created.id, saveToAsset: true })
+    interrogateResult.value = res.prompt || ''
+  } catch (err) {
+    interrogateError.value = err.message || '反推失败，请检查文本模型是否已配置'
+  } finally {
+    uploading.value = false
+    interrogating.value = false
+  }
+  // 素材已入库：把该参考图换成带 id 的形态，提交任务时不再重复上传
+  if (created && !interrogateError.value) {
+    referenceFiles.value = referenceFiles.value.map((item) =>
+      item.file === file ? { ...item, id: created.id } : item,
+    )
+  }
+}
+
+/** 已入库素材（预览弹窗内）反推 */
+async function interrogatePrompt(asset) {
+  if (!asset || interrogating.value) return
+  interrogating.value = true
+  resetInterrogate()
+  try {
+    const res = await api.post('/ai/image-interrogate', { assetId: asset.id, saveToAsset: true })
+    interrogateResult.value = res.prompt || ''
+    asset.prompt = res.prompt || ''
+    if (previewAsset.value?.id === asset.id) {
+      previewAsset.value = { ...previewAsset.value, prompt: res.prompt || '' }
+    }
+    const inList = assets.value.find((item) => item.id === asset.id)
+    if (inList) inList.prompt = res.prompt || ''
+  } catch (err) {
+    interrogateError.value = err.message || '反推失败，请检查文本模型是否已配置'
+  } finally {
+    interrogating.value = false
   }
 }
 
@@ -617,13 +685,13 @@ onBeforeUnmount(() => {
     <div class="gen-head">
       <div class="gen-head-main">
         <h1 class="page-title">图片生成</h1>
-        <span class="gen-head-note">文生图与参考图生图；结果自动存入素材库，可用于封面、正文配图或画布节点。</span>
+        <p class="gen-head-note">文生图与参考图生图。结果自动存入素材库，可用于封面、正文配图或画布节点。</p>
       </div>
-      <div class="row row-tight">
+      <div class="gen-head-actions">
         <span class="tag" :class="provider.available ? 'tag-success' : 'tag-warning'">
           {{ provider.available ? `${providers.length} 个供应商可用` : '供应商未接入' }}
         </span>
-        <n-button quaternary size="small" @click="load">刷新</n-button>
+        <n-button secondary size="small" @click="load">刷新状态</n-button>
       </div>
     </div>
 
@@ -632,25 +700,24 @@ onBeforeUnmount(() => {
     <div class="gen-layout">
       <!-- 创建任务 -->
       <section class="card gen-form">
-        <h2 class="section-title">创建生图任务</h2>
-        <p class="field-hint" style="margin-top: 4px">
-          可附加最多 {{ REFERENCE_LIMIT }} 张参考图做图生图；生成成功后图片自动存入素材库。
-        </p>
+        <header class="gen-section-head">
+          <h2 class="section-title">创建生图任务</h2>
+          <p class="field-hint">最多 {{ REFERENCE_LIMIT }} 张参考图。生成成功后自动存入素材库。</p>
+        </header>
 
-        <label v-if="providers.length" class="field" style="margin-top: var(--space-3)">
+        <label v-if="providers.length" class="field">
           <span class="field-label">供应商</span>
           <n-select v-model:value="selectedModelId" :options="providerOptions" />
+          <span class="field-hint">
+            当前使用 {{ selectedProvider?.label || '默认供应商' }}
+            <template v-if="selectedProvider?.source === 'env'"> · 环境变量配置</template>
+          </span>
         </label>
-        <p v-if="providers.length" class="field-hint" style="margin-top: 4px">
-          当前使用：{{ selectedProvider?.label || '默认供应商' }}
-          <template v-if="selectedProvider?.source === 'env'">（环境变量配置）</template>
-        </p>
 
-        <div class="field gen-prompt-field" style="margin-top: var(--space-3)">
-          <div class="row row-tight" style="gap: var(--space-2)">
+        <div class="gen-block">
+          <div class="gen-block-head">
             <label class="field-label" for="gen-prompt">提示词</label>
-            <div class="spacer" />
-            <n-button quaternary size="small" @click="openPromptPicker">提示词库</n-button>
+            <n-button secondary size="small" @click="openPromptPicker">从提示词库填入</n-button>
           </div>
           <n-input
             id="gen-prompt"
@@ -661,20 +728,16 @@ onBeforeUnmount(() => {
             :autosize="{ minRows: 4, maxRows: 10 }"
             @update:value="appliedPrompt = ''"
           />
+          <p v-if="appliedPrompt" class="field-hint">已套用模板：{{ appliedPrompt }}</p>
+          <p class="field-hint">
+            真实人物写真、性感或身体特写容易被上游安全策略拒绝；插画、水彩、景物或虚构角色更稳定。
+          </p>
         </div>
-        <p v-if="appliedPrompt" class="field-hint" style="margin-top: var(--space-2)">
-          已套用模板：{{ appliedPrompt }}
-        </p>
-        <p class="field-hint" style="margin-top: var(--space-2)">
-          提示：真实人物写真、性感或身体特写类描述容易被上游安全策略拒绝并返回 400；
-          插画、水彩、景物或虚构角色更稳定。
-        </p>
 
-        <div class="field" style="margin-top: var(--space-3)">
-          <div class="row row-tight">
-            <span class="field-label">手绘风格（可选）</span>
-            <div class="spacer" />
-            <n-button quaternary size="small" @click="openStylePicker">选择风格</n-button>
+        <div class="gen-block">
+          <div class="gen-block-head">
+            <span class="field-label">手绘风格</span>
+            <n-button v-if="!handdrawStyle" secondary size="small" @click="openStylePicker">选择风格</n-button>
           </div>
           <div v-if="handdrawStyle" class="handdraw-chip">
             <img v-if="handdrawThumb" :src="handdrawThumb" :alt="handdrawStyle.generationName" />
@@ -687,21 +750,22 @@ onBeforeUnmount(() => {
             </div>
             <n-button quaternary size="small" @click="clearHanddrawStyle">移除</n-button>
           </div>
-          <p v-else class="field-hint">
-            未选择；点「选择风格」按画风合成提示词，不用离开本页。
-          </p>
+          <p v-else class="field-hint">可选。选中后按当前提示词合成画风，不用离开本页。</p>
         </div>
 
-        <div class="field" style="margin-top: var(--space-3)">
-          <span class="field-label">参考图（最多 {{ REFERENCE_LIMIT }} 张，可选）</span>
+        <div class="gen-block">
+          <div class="gen-block-head">
+            <span class="field-label">参考图</span>
+            <span class="field-hint">{{ referenceHint }} · 最多 {{ REFERENCE_LIMIT }} 张</span>
+          </div>
           <div class="row row-tight">
             <n-button
-              quaternary
+              secondary
               size="small"
               :disabled="!canAddReference"
               @click="referenceInput?.click()"
             >
-              选择文件
+              添加参考图
             </n-button>
             <input
               ref="referenceInput"
@@ -712,7 +776,7 @@ onBeforeUnmount(() => {
               :disabled="!canAddReference"
               @change="onReferencePick"
             />
-            <span class="field-hint">{{ referenceHint }}</span>
+            <span class="field-hint">不选走文生图；选了走图生图，需要供应商支持 /images/edits。</span>
           </div>
           <div v-if="referenceFiles.length" class="ref-grid">
             <figure v-for="(item, index) in referenceFiles" :key="item.url" class="ref-item">
@@ -725,14 +789,44 @@ onBeforeUnmount(() => {
               >
                 ✕
               </button>
+              <n-button
+                class="ref-interrogate"
+                secondary
+                size="tiny"
+                :loading="uploading || interrogating"
+                :disabled="uploading || interrogating"
+                @click.stop="interrogateLocalReference(item.file)"
+              >
+                {{ uploading ? '入库中…' : interrogating ? '反推中…' : '反推提示词' }}
+              </n-button>
             </figure>
           </div>
-          <p class="field-hint">
-            不选参考图走文生图；选参考图走图生图，需要供应商支持 /images/edits。
+          <template v-if="interrogateResult">
+            <span class="field-label">反推出的提示词</span>
+            <p class="preview-prompt">{{ interrogateResult }}</p>
+            <div class="row row-tight">
+              <n-button type="primary" size="small" @click="copyPrompt({ id: 'interrogate', prompt: interrogateResult })">
+                {{ copiedId === 'interrogate' ? '已复制' : '复制提示词' }}
+              </n-button>
+              <n-button
+                v-if="!form.prompt.trim()"
+                secondary
+                size="small"
+                @click="form.prompt = interrogateResult; appliedPrompt = ''"
+              >
+                填入提示词
+              </n-button>
+              <n-button v-else secondary size="small" @click="form.prompt += `\n${interrogateResult}`">
+                追加到提示词
+              </n-button>
+            </div>
+          </template>
+          <p v-else-if="interrogateError" class="field-hint" style="margin: var(--space-2) 0 0; color: var(--color-danger, #d03050)">
+            {{ interrogateError }}
           </p>
         </div>
 
-        <div class="row row-tight" style="flex-wrap: wrap; margin-top: var(--space-3)">
+        <div class="gen-submit">
           <label class="field" style="width: 130px">
             <span class="field-label">比例</span>
             <n-select v-model:value="form.aspectRatio" :options="ASPECT_OPTIONS" />
@@ -742,18 +836,17 @@ onBeforeUnmount(() => {
             <n-select v-model:value="form.count" :options="COUNT_OPTIONS" />
           </label>
           <div class="spacer" />
+          <n-button quaternary :disabled="busy" @click="resetForm">清空</n-button>
           <n-button
             type="primary"
-            size="small"
             :disabled="!provider.available || !form.prompt.trim() || busy"
             @click="generate"
           >
             {{ busy ? '提交中…' : '生成图片' }}
           </n-button>
-          <n-button quaternary size="small" :disabled="busy" @click="resetForm">清空</n-button>
         </div>
 
-        <n-alert v-if="!provider.available" type="warning" :bordered="false" style="margin-top: var(--space-3)">
+        <n-alert v-if="!provider.available" type="warning" :bordered="false">
           未配置图像生成供应商时不会生成占位图。可在设置中添加支持 image.generate 能力的模型，
           或设置 IMAGE_PROVIDER_BASE_URL / IMAGE_PROVIDER_API_KEY / IMAGE_PROVIDER_MODEL 后重启服务。
         </n-alert>
@@ -912,7 +1005,30 @@ onBeforeUnmount(() => {
               {{ copiedId === previewAsset.id ? '已复制' : '复制提示词' }}
             </n-button>
           </template>
-          <p v-else class="field-hint" style="margin: 0">该图片没有记录生成提示词。</p>
+          <template v-else>
+            <span class="field-label">生成提示词</span>
+            <template v-if="interrogateResult">
+              <p class="preview-prompt">{{ interrogateResult }}</p>
+              <n-button type="primary" size="small" @click="copyPrompt(previewAsset)">
+                {{ copiedId === previewAsset.id ? '已复制' : '复制提示词' }}
+              </n-button>
+            </template>
+            <template v-else>
+              <p class="field-hint" style="margin: 0 0 8px">该图片没有记录生成提示词，可用 AI 反推。</p>
+              <n-button
+                type="primary"
+                size="small"
+                :loading="interrogating"
+                :disabled="interrogating || !previewAsset.id"
+                @click="interrogatePrompt(previewAsset)"
+              >
+                {{ interrogating ? '反推中…' : '反推提示词' }}
+              </n-button>
+              <p v-if="interrogateError" class="field-hint" style="margin: 6px 0 0; color: var(--color-danger, #d03050)">
+                {{ interrogateError }}
+              </p>
+            </template>
+          </template>
         </div>
       </div>
     </n-modal>
@@ -1177,6 +1293,17 @@ onBeforeUnmount(() => {
   cursor: pointer;
   display: grid;
   place-items: center;
+}
+.ref-interrogate {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.ref-item:hover .ref-interrogate,
+.ref-item:focus-within .ref-interrogate {
+  opacity: 1;
 }
 .btn.is-disabled {
   opacity: 0.5;

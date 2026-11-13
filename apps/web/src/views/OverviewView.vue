@@ -1,6 +1,6 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NSpace } from 'naive-ui'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { NAlert, NButton, NHeatmap, NSpace } from 'naive-ui'
 import { api } from '../api/client'
 import StatusTag from '../components/StatusTag.vue'
 
@@ -20,6 +20,65 @@ const publishLabel = computed(() => {
   return `${progress.published} / ${progress.planned} 已发布`
 })
 
+const HEAT_DAYS = 52 * 7
+const HEAT_COLS = 53
+
+const heatCardEl = ref(null)
+const heatCardWidth = ref(0)
+
+/** 格子按卡片宽度放大，保持正方形，避免一年 52 周挤成一条细带。 */
+const heatRectSize = computed(() => {
+  const width = heatCardWidth.value
+  if (!width) return 14
+  const usable = Math.max(0, width - 56)
+  return Math.max(10, Math.min(18, Math.floor((usable - HEAT_COLS * 3) / HEAT_COLS)))
+})
+
+let heatResizeObserver
+function bindHeatResize(el) {
+  heatCardEl.value = el
+  heatResizeObserver?.disconnect()
+  if (!el || typeof ResizeObserver === 'undefined') return
+  heatResizeObserver = new ResizeObserver((entries) => {
+    heatCardWidth.value = entries[0]?.contentRect.width || 0
+  })
+  heatResizeObserver.observe(el)
+}
+
+/** 近一年按本地日补齐：接口只给有稿的日期，空格子也要画出来。 */
+const heatmapData = computed(() => {
+  const counts = new Map()
+  for (const row of data.value?.activity || []) {
+    if (!row?.date) continue
+    counts.set(row.date, Number(row.value) || 0)
+  }
+  const cells = []
+  const cursor = new Date()
+  cursor.setHours(12, 0, 0, 0)
+  cursor.setDate(cursor.getDate() - (HEAT_DAYS - 1))
+  for (let i = 0; i < HEAT_DAYS; i += 1) {
+    const month = String(cursor.getMonth() + 1).padStart(2, '0')
+    const day = String(cursor.getDate()).padStart(2, '0')
+    const key = `${cursor.getFullYear()}-${month}-${day}`
+    cells.push({ timestamp: cursor.getTime(), value: counts.get(key) || 0, date: key })
+    cursor.setDate(cursor.getDate() + 1)
+  }
+  return cells
+})
+
+const heatmapTotal = computed(() =>
+  heatmapData.value.reduce((sum, cell) => sum + (cell.value || 0), 0),
+)
+
+const activeDays = computed(() => heatmapData.value.filter((cell) => cell.value > 0).length)
+
+function heatTooltip({ timestamp, value }) {
+  const when = new Date(timestamp)
+  const label = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, '0')}-${String(when.getDate()).padStart(2, '0')}`
+  const count = value || 0
+  return `${label} · ${count ? `新建 ${count} 篇` : '没有新建稿件'}`
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -33,6 +92,7 @@ async function load() {
 }
 
 onMounted(load)
+onUnmounted(() => heatResizeObserver?.disconnect())
 
 const fmt = (value) => (value === null || value === undefined ? '—' : value)
 </script>
@@ -90,6 +150,40 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
         </RouterLink>
       </section>
 
+      <section :ref="bindHeatResize" class="card overview-card heat-card" aria-label="近一年创作热力">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">CADENCE</span>
+            <h2 class="card-title">创作热力</h2>
+          </div>
+          <span class="heat-summary">近一年 {{ heatmapTotal }} 篇 · {{ activeDays }} 天有稿</span>
+        </div>
+        <n-heatmap
+          class="heat-chart"
+          :data="heatmapData"
+          color-theme="green"
+          :first-day-of-week="1"
+          fill-calendar-leading
+          size="small"
+          :x-gap="3"
+          :y-gap="3"
+          :style="{
+            '--n-rect-size': `${heatRectSize}px`,
+            '--n-x-gap': '3px',
+            '--n-y-gap': '3px',
+          }"
+          :tooltip="{ placement: 'top' }"
+          :loading="loading"
+        >
+          <template #tooltip="cell">
+            {{ heatTooltip(cell) }}
+          </template>
+          <template #indicator-leading-text>少</template>
+          <template #indicator-trailing-text>多</template>
+        </n-heatmap>
+        <p class="heat-note">每个格子是一天。颜色按当天新建的稿件数，从周一排起。</p>
+      </section>
+
       <div class="overview-grid">
         <section class="card overview-card platform-card">
           <div class="section-heading">
@@ -109,11 +203,11 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
           </div>
           <div v-else class="platform-list">
             <div v-for="item in data.platformStatus" :key="item.platform" class="platform-row">
-              <div class="platform-mark">{{ item.label.slice(0, 1) }}</div>
+              <div class="platform-mark">{{ (item.displayName || item.label).slice(0, 1) }}</div>
               <div class="list-main">
-                <div class="list-title">{{ item.label }}</div>
+                <div class="list-title">{{ item.displayName || item.label }}</div>
                 <div class="list-meta">
-                  自动发布：{{ item.autoPublishEnabled ? '已开启' : '未开启' }} · 最近同步：{{ item.lastSyncedAt ? item.lastSyncedAt.slice(0, 16).replace('T', ' ') : '尚未同步' }}
+                  {{ item.label }} · 自动发布：{{ item.autoPublishEnabled ? '已开启' : '未开启' }} · 最近同步：{{ item.lastSyncedAt ? item.lastSyncedAt.slice(0, 16).replace('T', ' ') : '尚未同步' }}
                 </div>
               </div>
               <StatusTag :status="item.status" />
@@ -261,6 +355,40 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
 .metric-link:hover .metric-arrow,
 .recent-row:hover .row-arrow {
   opacity: 1;
+}
+.heat-card {
+  padding: var(--space-6);
+}
+.heat-chart {
+  display: block;
+  width: 100%;
+}
+.heat-chart :deep(.n-heatmap) {
+  width: 100%;
+  max-width: none;
+}
+.heat-chart :deep(.n-heatmap-calendar-table) {
+  width: 100%;
+  table-layout: fixed;
+}
+.heat-chart :deep(.n-heatmap-day-cell),
+.heat-chart :deep(.n-heatmap-empty-cell) {
+  width: auto;
+  text-align: center;
+}
+.heat-chart :deep(.n-heatmap-rect) {
+  margin-inline: auto;
+}
+.heat-summary {
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.heat-note {
+  margin: var(--space-3) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
 }
 .overview-grid {
   display: grid;

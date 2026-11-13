@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { NAlert, NButton, NInput, NInputNumber, NModal, NSelect } from 'naive-ui'
 import { api, fetchBlobUrl } from '../api/client'
+import { confirm, toast } from '../ui/feedback'
 
 const OPERATIONS = [
   { value: 'thumbnail', label: '生成缩略图', hint: 'maxSize' },
@@ -69,6 +70,9 @@ const jobsLoadedMore = ref(false)
 const jobsLoadingMore = ref(false)
 const previewAsset = ref(null)
 const copiedId = ref('')
+const interrogating = ref(false)
+const interrogateResult = ref('')
+const interrogateError = ref('')
 let copiedTimer = null
 let pollTimer = null
 let pollRounds = 0
@@ -316,6 +320,9 @@ async function onUpload(event) {
     }
     selectedId.value = created.id
     await load()
+    // 上传完成后自动打开预览；提示词反推由用户在弹窗内手动触发，避免每次上传都消耗模型调用
+    const uploaded = assets.value.find((a) => a.id === created.id) || created
+    openPreview(uploaded)
   } catch (err) {
     error.value = err.message
   } finally {
@@ -370,11 +377,18 @@ async function runOperation() {
 }
 
 async function remove(asset) {
+  if (!asset) return
+  const ok = await confirm(
+    `「${asset.originalName}」删除后不可恢复，确定继续吗？`,
+    '删除素材',
+  )
+  if (!ok) return
   error.value = ''
   try {
     await api.del(`/assets/${asset.id}`)
     if (selectedId.value === asset.id) selectedId.value = ''
     if (previewAsset.value?.id === asset.id) previewAsset.value = null
+    toast(`已删除「${asset.originalName}」`)
     await load()
   } catch (err) {
     error.value = err.message
@@ -383,10 +397,14 @@ async function remove(asset) {
 
 function openPreview(asset) {
   previewAsset.value = asset
+  interrogateResult.value = ''
+  interrogateError.value = ''
 }
 
 function closePreview() {
   previewAsset.value = null
+  interrogateResult.value = ''
+  interrogateError.value = ''
 }
 
 function openProcess(asset) {
@@ -425,6 +443,30 @@ async function copyPrompt(asset) {
     }, 1600)
   } catch {
     error.value = '复制失败，请打开大图后手动选中提示词复制'
+  }
+}
+
+async function interrogatePrompt(asset) {
+  if (!asset || interrogating.value) return
+  interrogating.value = true
+  interrogateResult.value = ''
+  interrogateError.value = ''
+  try {
+    const res = await api.post('/ai/image-interrogate', {
+      assetId: asset.id,
+      saveToAsset: true,
+    })
+    interrogateResult.value = res.prompt || ''
+    // Update the asset in-place so the card's "复制提示词" button appears without reload
+    asset.prompt = res.prompt || ''
+    // Also sync the previewAsset ref if it's the same object
+    if (previewAsset.value?.id === asset.id) {
+      previewAsset.value = { ...previewAsset.value, prompt: res.prompt || '' }
+    }
+  } catch (e) {
+    interrogateError.value = e?.message || '反推失败，请检查文本模型是否已配置'
+  } finally {
+    interrogating.value = false
   }
 }
 
@@ -817,9 +859,32 @@ onBeforeUnmount(() => {
               {{ copiedId === previewAsset.id ? '已复制' : '复制提示词' }}
             </n-button>
           </template>
-          <p v-else class="field-hint" style="margin: 0">
-            该素材没有记录生成提示词（手动上传或处理后的派生图）。
-          </p>
+          <template v-else>
+            <span class="field-label">生成提示词</span>
+            <template v-if="interrogateResult">
+              <p class="preview-prompt">{{ interrogateResult }}</p>
+              <n-button type="primary" size="small" @click="copyPrompt(previewAsset)">
+                {{ copiedId === previewAsset.id ? '已复制' : '复制提示词' }}
+              </n-button>
+            </template>
+            <template v-else>
+              <p class="field-hint" style="margin: 0 0 8px">
+                该素材暂无提示词，可用 AI 反推。
+              </p>
+              <n-button
+                type="primary"
+                size="small"
+                :loading="interrogating"
+                :disabled="interrogating"
+                @click="interrogatePrompt(previewAsset)"
+              >
+                {{ interrogating ? '反推中…' : '反推提示词' }}
+              </n-button>
+              <p v-if="interrogateError" class="field-hint" style="margin: 6px 0 0; color: var(--n-error-color)">
+                {{ interrogateError }}
+              </p>
+            </template>
+          </template>
           <div class="spacer" />
           <n-button quaternary size="small" @click="selectFromPreview">选为处理对象</n-button>
         </div>

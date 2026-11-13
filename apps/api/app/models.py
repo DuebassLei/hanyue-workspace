@@ -685,3 +685,49 @@ class HotCluster(Base, TimestampMixin):
     # 从热点直接成稿后回填，用于「已出稿」判断与跳转
     content_item_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+
+# ---------------- 贴图创作 ----------------
+#
+# 贴图集是一等公民：图序、配文、逐张状态、单张重试都要行级记录。
+# hot_cluster_id 是弱关联（无外键）——热点簇会被重算合并，集合不应被它锁死。
+
+
+class StickerSet(Base, TimestampMixin):
+    """一组风格统一的贴图：主题 + 风格 + 叙事线 + 生命周期状态。"""
+
+    __tablename__ = "sticker_sets"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    theme: Mapped[str] = mapped_column(Text, default="")
+    style_id: Mapped[str] = mapped_column(String(40), default="")
+    track: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 弱关联热点簇：仅用于预填与统计，不建外键约束
+    hot_cluster_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # scene|knowledge|parallel|contrast|suspense
+    narrative: Mapped[str] = mapped_column(String(24), default="parallel")
+    # draft|outlined|generating|review|done|deleted
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StickerImage(Base, TimestampMixin):
+    """贴图集里的一张图：画面描述 + 配文 + 最近一次生成任务的状态。"""
+
+    __tablename__ = "sticker_images"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    set_id: Mapped[str] = mapped_column(ForeignKey("sticker_sets.id"), index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    caption: Mapped[str] = mapped_column(Text, default="")
+    frame_prompt: Mapped[str] = mapped_column(Text, default="")
+    # info|pace（信息位/节奏位标注，见配图路线）
+    slot_type: Mapped[str] = mapped_column(String(8), default="info")
+    asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # pending|queued|generating|succeeded|failed
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+

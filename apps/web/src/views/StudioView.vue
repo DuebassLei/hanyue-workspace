@@ -90,6 +90,10 @@ watch([draftTitle, draftBody], () => {
   scheduleAutoSave()
 })
 
+watch(writingStyleKey, () => {
+  if (rightTab.value === 'flow' && detail.value) loadWritingFlow()
+})
+
 // AI 面板
 const aiOpen = ref(true)
 const aiTask = ref('article')
@@ -133,6 +137,9 @@ const deleting = ref(false)
 
 // 右侧面板 Tab：ai | inspiration
 const rightTab = ref('ai')
+const flow = ref(null)
+const flowLoading = ref(false)
+const flowError = ref('')
 const draftsCollapsed = ref(false)
 const hotTopics = ref([])
 const hotStatus = ref({ configured: false, source: '', note: '' })
@@ -152,6 +159,62 @@ const TASKS = [
 const PLATFORMS = [
   { code: 'wechat_official', label: '公众号' },
 ]
+
+async function loadWritingFlow() {
+  const itemId = detail.value?.item.id
+  if (!itemId) {
+    flow.value = null
+    return
+  }
+  flowLoading.value = true
+  flowError.value = ''
+  try {
+    const report = await api.get(
+      `/content/${itemId}/writing-flow?skillKey=${encodeURIComponent(writingStyleKey.value || 'article-drafting')}`,
+    )
+    if (detail.value?.item.id === itemId) flow.value = report
+  } catch (err) {
+    if (detail.value?.item.id === itemId) {
+      flow.value = null
+      flowError.value = err.message
+    }
+  } finally {
+    if (detail.value?.item.id === itemId) flowLoading.value = false
+  }
+}
+
+function flowStepSummary(step) {
+  const result = step.result
+  if (step.kind !== 'check') return '生成时执行，不在这里重跑'
+  if (!flow.value?.hasBody) return '正文为空，写入后再检查'
+  if (!result) return ''
+  if (step.tool === 'review_article') {
+    const count = result.violations?.length || 0
+    return count ? `${count} 处未通过` : '审稿通过'
+  }
+  if (step.tool === 'check_ai_tone') {
+    const count = result.hits?.length || 0
+    return count ? `${count} 处 AI 腔` : '没有明显 AI 腔'
+  }
+  if (step.tool === 'extract_facts') {
+    return `${result.numbers?.length || 0} 个数字 · ${result.quotes?.length || 0} 处引语`
+  }
+  if (step.tool === 'plan_images') {
+    if (result.issue === 'placeholder_mismatch') return '配图占位和提示词对不上'
+    const inline = result.inline?.length || 0
+    return `${result.cover ? '有封面' : '无封面'} · ${inline} 张正文图`
+  }
+  return ''
+}
+
+function flowStepTone(step) {
+  const result = step.result
+  if (step.kind !== 'check' || !flow.value?.hasBody || !result) return ''
+  if (step.tool === 'review_article') return result.ok ? 'is-ok' : 'is-warn'
+  if (step.tool === 'check_ai_tone') return result.hits?.length ? 'is-warn' : 'is-ok'
+  if (step.tool === 'plan_images') return result.issue ? 'is-warn' : 'is-ok'
+  return ''
+}
 
 async function loadWritingStyles() {
   writingStylesLoading.value = true
@@ -492,12 +555,19 @@ watch(
   () => {
     clearTimeout(autoSaveTimer)
     autoSaveTimer = null
+    flow.value = null
+    if (rightTab.value === 'flow') loadWritingFlow()
   },
 )
 
 async function openInspirationTab() {
   rightTab.value = 'inspiration'
   if (!hotStatus.value.checked) await loadHotTopics()
+}
+
+function openFlowTab() {
+  rightTab.value = 'flow'
+  loadWritingFlow()
 }
 
 async function loadHotTopics() {
@@ -1089,6 +1159,15 @@ onBeforeUnmount(() => {
             :aria-selected="rightTab === 'inspiration'"
             @click="openInspirationTab"
           >灵感</button>
+          <button
+            id="studio-tab-flow"
+            class="segmented-item"
+            :class="{ 'is-active': rightTab === 'flow' }"
+            role="tab"
+            aria-controls="studio-panel-flow"
+            :aria-selected="rightTab === 'flow'"
+            @click="openFlowTab"
+          >流程</button>
         </div>
 
         <!-- AI 助手 Tab -->
@@ -1192,6 +1271,52 @@ onBeforeUnmount(() => {
               </n-space>
             </section>
           </div>
+        </section>
+
+        <!-- 写作流程 Tab -->
+        <section
+          v-else-if="rightTab === 'flow'"
+          id="studio-panel-flow"
+          class="studio-tab-panel"
+          role="tabpanel"
+          aria-labelledby="studio-tab-flow"
+        >
+          <div class="row row-tight studio-tool-head">
+            <div>
+              <span class="studio-section-label studio-section-label-flush">写作流程</span>
+              <p class="studio-tool-description">{{ flow?.skillName || '按当前写作风格的步骤检查这篇稿' }}</p>
+            </div>
+            <n-button quaternary size="small" :loading="flowLoading" :disabled="!detail" @click="loadWritingFlow">
+              重新检查
+            </n-button>
+          </div>
+          <n-alert v-if="flowError" type="error" :bordered="false" style="margin-top: var(--space-3)">{{ flowError }}</n-alert>
+          <div v-else-if="!detail" class="empty" style="padding: var(--space-5) var(--space-2)">
+            <span class="empty-title">先打开一篇稿件</span>
+          </div>
+          <div v-else-if="flowLoading && !flow" class="stack" style="margin-top: var(--space-3)">
+            <div v-for="i in 4" :key="i" class="skeleton" style="height: 52px" />
+          </div>
+          <ol v-else-if="flow" class="flow-steps">
+            <li v-for="step in flow.steps" :key="step.tool" class="flow-step" :class="flowStepTone(step)">
+              <span class="flow-index">{{ String(step.index).padStart(2, '0') }}</span>
+              <div class="flow-main">
+                <div class="flow-title">{{ step.label }}</div>
+                <div class="flow-meta">{{ flowStepSummary(step) }}</div>
+                <ul v-if="step.tool === 'review_article' && step.result?.violations?.length" class="flow-list">
+                  <li v-for="item in step.result.violations" :key="item.id">{{ item.message }}</li>
+                </ul>
+                <ul v-else-if="step.tool === 'check_ai_tone' && step.result?.hits?.length" class="flow-list">
+                  <li v-for="(hit, index) in step.result.hits.slice(0, 6)" :key="`${hit.offset}-${index}`">
+                    「{{ hit.excerpt }}」
+                  </li>
+                </ul>
+                <p v-else-if="step.tool === 'extract_facts' && step.result?.numbers?.length" class="flow-meta">
+                  {{ step.result.numbers.slice(0, 6).join('、') }}
+                </p>
+              </div>
+            </li>
+          </ol>
         </section>
 
         <!-- 灵感 Tab -->
@@ -1674,6 +1799,48 @@ onBeforeUnmount(() => {
 }
 .studio-section-label-flush {
   margin: 0;
+}
+.flow-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.flow-step {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.flow-step.is-ok {
+  border-color: color-mix(in srgb, var(--color-success) 45%, var(--color-border));
+}
+.flow-step.is-warn {
+  border-color: color-mix(in srgb, var(--color-warning, var(--color-danger)) 45%, var(--color-border));
+}
+.flow-index {
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+.flow-main {
+  min-width: 0;
+}
+.flow-title {
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+.flow-meta,
+.flow-list {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
+}
+.flow-list {
+  padding-left: 1.1em;
 }
 
 /* 折叠态：窄轨道，仅保留把手与计数 */

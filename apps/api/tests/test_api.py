@@ -348,10 +348,11 @@ def test_agent_requires_enabled_skill(client):
         json={"goal": "写一篇关于时间管理的稿子", "skillIds": [skill["id"]]},
         headers=headers,
     ).json()
-    # Skill 未启用 → 没有工具可用，运行不应产生草稿
+    # Skill 未启用 → workflow 授权校验整次中止（workflow_unauthorized），不执行任何步骤、不产出草稿
     events = client.get(f"/api/v1/agent/runs/{run['id']}/events", headers=headers).json()
     joined = str(events)
-    assert "create_outline" not in joined
+    assert "workflow_unauthorized" in joined
+    assert not any(event.get("type") == "step.started" for event in events)
 
 
 def test_agent_run_with_enabled_skill_creates_draft(client):
@@ -727,19 +728,21 @@ def test_dashboard_shape(client):
     for key in ("publishProgress", "pendingReview", "failedJobs", "platformStatus", "recentContent"):
         assert key in data
     assert "topicBacklog" not in data, "选题库已下线，总览不应再返回选题库存"
+    assert isinstance(data["activity"], list)
 
 
-def test_platform_capabilities_returns_wechat_official_only(client):
-    """平台收敛后能力接口只返回微信公众号。"""
+def test_platform_capabilities_lists_catalog_with_wechat_only(client):
+    """渠道目录含占位平台，但只有微信公众号 available=True。"""
     headers = login(client)
     res = client.get("/api/v1/platforms/capabilities", headers=headers)
     assert res.status_code == 200, res.text
     body = res.json()
-    assert len(body["platforms"]) == 1
+    assert len(body["platforms"]) >= 1
     first = body["platforms"][0]
     assert first["platform"] == "wechat_official"
     for key in ("platform", "label", "confirmed", "publish"):
         assert key in first
+    assert [p for p in body["platforms"] if p.get("available")] == [first]
 
 
 def test_manual_publish_mode_schedules_without_platform_call(client):

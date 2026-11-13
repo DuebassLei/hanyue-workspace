@@ -304,6 +304,16 @@ def _builtin_reference(number: str | None, model_code: str | None, room: int) ->
 
 def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
     payload = job.payload or {}
+    prompt = payload.get("prompt") or ""
+    # 贴图创作：风格句只在执行器里拼一次，模块层不再重复拼接。非贴纸任务无此键，行为零变化。
+    sticker_style_id = payload.get("stickerStyleId")
+    if sticker_style_id is not None:
+        from . import sticker_styles as _sticker_styles
+
+        style = _sticker_styles.STYLES.get(sticker_style_id)
+        if style is None:
+            raise JobFailure("sticker_style_unknown", f"未知贴图风格：{sticker_style_id}")
+        prompt = f"{prompt} {style['prompt_suffix']}".strip()
     user = db.get(models.User, job.owner_user_id)
     workspace = default_workspace(db, user)
     references = _load_reference_images(db, job, payload)
@@ -320,7 +330,7 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
         images = image_provider.generate_images(
             db,
             job.owner_user_id,
-            prompt=payload.get("prompt") or "",
+            prompt=prompt,
             aspect_ratio=payload.get("aspectRatio") or "3:4",
             count=int(payload.get("count") or 1),
             model_id=payload.get("modelId"),
@@ -338,17 +348,63 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             mime,
             f"ai-{index}-{uuid.uuid4().hex[:6]}",
             source_type="generated",
-            prompt=payload.get("prompt") or "",
+            prompt=prompt,
             license_note="AI 生成，发布前请确认平台内容规范与商用授权",
         )
         asset_ids.append(asset.id)
     db.commit()
+    # 贴图创作：把首张 asset 幂等回写到对应图行，并按集合终态推进集合状态。
+    if payload.get("stickerImageId"):
+        _apply_sticker_success(db, job, asset_ids)
     return {
         "assetIds": asset_ids,
         "count": len(asset_ids),
         # 前端要把结果直接写进正文，这里顺带给出可匿名访问的签名直链
         "assetUrls": [_signed_asset_url(aid) for aid in asset_ids],
     }
+
+
+def _apply_sticker_success(db, job: models.BackgroundJob, asset_ids: list[str]) -> None:
+    """生图成功后回写贴图集：图行 → succeeded + asset；全成功则集合 → review。
+
+    用 `StickerImage.job_id == job.id` 条件更新保证幂等（重试/恢复不重复改）。
+    有 failed 行时集合保持 generating，让单张 retry 按钮可用。
+    """
+    image = db.scalar(
+        select(models.StickerImage).where(models.StickerImage.job_id == job.id)
+    )
+    if image is None:
+        return
+    new_asset_id = asset_ids[0] if asset_ids else image.asset_id
+    db.execute(
+        update(models.StickerImage)
+        .where(models.StickerImage.id == image.id)
+        .values(
+            asset_id=new_asset_id,
+            status="succeeded",
+            error_code=None,
+        )
+    )
+    # done 集合的单张重抽：finalize 不会再跑，新 asset 必须当场补盖 sticker 标记，
+    # 否则素材库会把它归到「AI 生成」破坏归档不变量。
+    sticker_set = db.get(models.StickerSet, image.set_id)
+    if sticker_set is not None and sticker_set.status == "done" and asset_ids:
+        asset = db.get(models.Asset, new_asset_id)
+        if asset is not None and asset.owner_user_id == job.owner_user_id:
+            asset.source_type = "sticker"
+    siblings = db.scalars(
+        select(models.StickerImage).where(models.StickerImage.set_id == image.set_id)
+    ).all()
+    if siblings and all(row.status == "succeeded" for row in siblings):
+        db.execute(
+            update(models.StickerSet)
+            .where(
+                models.StickerSet.id == image.set_id,
+                models.StickerSet.status != "done",
+            )
+            .values(status="review")
+        )
+    db.commit()
 
 
 def _signed_asset_url(asset_id: str) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
 from sqlalchemy import func, select
@@ -69,6 +70,32 @@ def dashboard(user: CurrentUser, db: DbSession) -> schemas.DashboardOut:
         .limit(5)
     ).all()
 
+    # 热力图按本地日切，和日历页「哪一天」对齐；库里存的是 UTC。
+    # 窗口固定 53 周，缺的日子前端补 0，这里只返回有稿的日期。
+    local_tz = timezone(timedelta(hours=8))
+    try:
+        local_tz = ZoneInfo(user.timezone or "Asia/Shanghai")
+    except Exception:
+        local_tz = timezone(timedelta(hours=8))
+    today_local = now.astimezone(local_tz).date()
+    window_start = datetime.combine(
+        today_local - timedelta(days=52 * 7), datetime.min.time(), tzinfo=local_tz
+    )
+    created_rows = db.scalars(
+        select(models.ContentItem.created_at).where(
+            models.ContentItem.workspace_id == workspace.id,
+            models.ContentItem.created_at >= window_start,
+        )
+    ).all()
+    by_day: dict[str, int] = {}
+    for created_at in created_rows:
+        if created_at is None:
+            continue
+        stamp = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+        key = stamp.astimezone(local_tz).date().isoformat()
+        by_day[key] = by_day.get(key, 0) + 1
+    activity = [{"date": day, "value": count} for day, count in sorted(by_day.items())]
+
     return schemas.DashboardOut(
         publish_progress={
             "planned": planned,
@@ -82,6 +109,7 @@ def dashboard(user: CurrentUser, db: DbSession) -> schemas.DashboardOut:
             {
                 "platform": a.platform,
                 "label": connectors.get_capability(a.platform).label,
+                "displayName": a.display_name or connectors.get_capability(a.platform).label,
                 "status": a.status,
                 "autoPublishEnabled": a.auto_publish_enabled,
                 "lastSyncedAt": a.last_synced_at.isoformat() if a.last_synced_at else None,
@@ -106,4 +134,5 @@ def dashboard(user: CurrentUser, db: DbSession) -> schemas.DashboardOut:
             or 0,
             "note": "未配置供应商凭据时生成请求会明确返回 provider_unavailable，不产生占位内容",
         },
+        activity=activity,
     )

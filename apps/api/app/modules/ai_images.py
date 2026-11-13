@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Query
 
 from .. import models, schemas
 from ..core import queue
+from ..core.config import get_settings
 from ..core.deps import ApiError, CurrentUser, DbSession, not_found
 from ..core.security import create_upload_session as sign_upload_session
 from ..services import image_provider
@@ -67,6 +70,44 @@ def cancel_generation(
     generation.status = "cancelled"
     db.commit()
     return {"id": generation.id, "status": generation.status}
+
+
+@router.post("/ai/image-interrogate")
+def interrogate_image(payload: schemas.ImageInterrogateIn, user: CurrentUser, db: DbSession) -> dict:
+    """反推提示词：给定素材图片，调用视觉语言模型生成描述该图的提示词。
+
+    若 saveToAsset=true 则同时更新素材的 prompt 字段。
+    """
+    asset = db.get(models.Asset, payload.asset_id)
+    if not asset or asset.owner_user_id != user.id:
+        raise not_found("素材")
+
+    settings = get_settings()
+    from ..services.image_service import storage_path
+
+    path: Path = storage_path(settings.storage_dir, asset.storage_key)
+    if not path.is_file():
+        raise ApiError("asset_file_missing", f"素材文件缺失：{asset.original_name}")
+
+    image_bytes = path.read_bytes()
+    mime = asset.mime_type or "image/jpeg"
+
+    try:
+        prompt_text = image_provider.interrogate_image(
+            db,
+            user.id,
+            image_bytes=image_bytes,
+            mime_type=mime,
+            model_id=payload.model_id,
+        )
+    except image_provider.ImageProviderUnavailable as exc:
+        raise ApiError(exc.code, exc.message) from exc
+
+    if payload.save_to_asset:
+        asset.prompt = prompt_text
+        db.commit()
+
+    return {"prompt": prompt_text, "assetId": asset.id}
 
 
 @router.post("/assets/upload-sessions")

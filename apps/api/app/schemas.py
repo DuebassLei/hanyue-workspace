@@ -249,6 +249,15 @@ class ImageGenerationIn(CamelModel):
     builtin_reference_style_number: str | None = None
 
 
+class ImageInterrogateIn(CamelModel):
+    """反推提示词：给定素材图片，用视觉语言模型生成描述该图的提示词。"""
+    asset_id: str
+    # 可选：指定文本/视觉模型 catalog id；留空时走 resolve_connection 取第一个可用模型
+    model_id: str | None = None
+    # 是否将生成的提示词回写到素材的 prompt 字段
+    save_to_asset: bool = False
+
+
 class GenerationOut(CamelModel):
     id: str
     task_type: str
@@ -574,6 +583,8 @@ class DashboardOut(CamelModel):
     platform_status: list[dict]
     recent_content: list[dict]
     ai_status: dict[str, Any]
+    # 近一年按本地日聚合的新建稿件数；没有稿的日期不出现，前端补 0
+    activity: list[dict] = Field(default_factory=list)
 
 
 ContentDetail.model_rebuild()
@@ -764,5 +775,74 @@ class HotSourcesOut(CamelModel):
     platforms: list[dict[str, str]] = []
     enabled: list[str] = []
     fallback_configured: bool = False
+
+
+# ---------- stickers（贴图创作） ----------
+
+STICKER_NARRATIVES = {"scene", "knowledge", "parallel", "contrast", "suspense"}
+
+
+class StickerSetCreateIn(CamelModel):
+    theme: str = Field(min_length=1, max_length=2000)
+    title: str = Field(default="", max_length=200)
+    style_id: str = Field(min_length=1, max_length=40)
+    track: str | None = Field(default=None, max_length=32)
+    hot_cluster_id: str | None = Field(default=None, max_length=32)
+    narrative: str = Field(default="parallel")
+
+
+class StickerSetUpdateIn(CamelModel):
+    title: str | None = Field(default=None, max_length=200)
+    theme: str | None = Field(default=None, max_length=2000)
+    style_id: str | None = Field(default=None, max_length=40)
+    narrative: str | None = None
+
+
+class StickerOutlineItemIn(CamelModel):
+    caption: str = Field(default="", max_length=500)
+    frame_prompt: str = Field(min_length=1, max_length=2000)
+    slot_type: str = Field(default="info")
+
+
+class StickerOutlineIn(CamelModel):
+    # 张数上下界在模块层校验（2~9），这里放宽以免边界错误变成 422 而不是业务码
+    items: list[StickerOutlineItemIn] = Field(min_length=1, max_length=20)
+
+
+class StickerImageOut(CamelModel):
+    id: str
+    sort_order: int
+    caption: str
+    frame_prompt: str
+    slot_type: str
+    status: str
+    asset_id: str | None = None
+    url: str | None = None
+    job_id: str | None = None
+    error_code: str | None = None
+
+
+class StickerSetOut(CamelModel):
+    id: str
+    title: str
+    theme: str
+    style_id: str
+    track: str | None = None
+    hot_cluster_id: str | None = None
+    narrative: str
+    status: str
+    total: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    cover_url: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    images: list[StickerImageOut] = []
+
+
+class StickerStylesOut(CamelModel):
+    styles: list[dict] = []
+    track_defaults: dict[str, str] = {}
+    narratives: list[dict] = []
 
 

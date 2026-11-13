@@ -12,7 +12,7 @@ const props = defineProps({
   expanded: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['write', 'ignore', 'toggle'])
+const emit = defineEmits(['write', 'ignore', 'toggle', 'sticker'])
 
 const GRADE_COLOR = {
   强烈推荐: 'var(--color-danger)',
@@ -112,6 +112,9 @@ const score = computed(() => Number(props.cluster.score) || 0)
             </n-button>
             <n-button secondary size="small" :loading="detailLoading" @click="emit('toggle', cluster)">
               {{ expanded ? '收起原文' : '展开原文' }}
+            </n-button>
+            <n-button secondary size="small" title="基于这条热点做一组贴图" @click="emit('sticker', cluster)">
+              做贴图
             </n-button>
             <a
               v-if="cluster.contentItemId"

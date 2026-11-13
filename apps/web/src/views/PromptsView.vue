@@ -51,6 +51,8 @@ const filtered = computed(() => {
 
 const editorTitle = computed(() => (editingId.value ? '编辑提示词' : '新建提示词'))
 
+const contentCount = computed(() => form.content.length)
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -264,39 +266,43 @@ onBeforeUnmount(() => {
       v-model:show="showEditor"
       preset="card"
       :title="editorTitle"
-      style="width: min(560px, calc(100vw - 32px))"
+      class="prompt-editor"
+      style="width: min(720px, calc(100vw - 32px))"
       :mask-closable="!saving"
     >
-      <n-form label-placement="top">
+      <n-form label-placement="top" class="prompt-editor-form">
         <n-form-item label="名称">
           <n-input
             v-model:value="form.title"
             maxlength="120"
+            show-count
             placeholder="例如：水彩窗台橘猫"
           />
         </n-form-item>
-        <n-form-item label="分类">
-          <n-input
-            v-model:value="form.category"
-            list="prompt-categories"
-            maxlength="32"
-            placeholder="选择已有分类或直接输入"
-          />
-          <datalist id="prompt-categories">
-            <option v-for="item in categories" :key="item" :value="item" />
-          </datalist>
-        </n-form-item>
-        <n-form-item label="标签（可选）">
-          <n-input v-model:value="form.tags" placeholder="用逗号分隔，例如：水彩, 治愈, 封面" />
-        </n-form-item>
-        <n-form-item label="提示词内容">
+        <div class="prompt-editor-row">
+          <n-form-item label="分类">
+            <n-input
+              v-model:value="form.category"
+              list="prompt-categories"
+              maxlength="32"
+              placeholder="选择已有分类或直接输入"
+            />
+            <datalist id="prompt-categories">
+              <option v-for="item in categories" :key="item" :value="item" />
+            </datalist>
+          </n-form-item>
+          <n-form-item label="标签（可选）">
+            <n-input v-model:value="form.tags" placeholder="用逗号分隔，例如：水彩, 治愈, 封面" />
+          </n-form-item>
+        </div>
+        <n-form-item label="提示词内容" class="prompt-editor-body">
           <n-input
             v-model:value="form.content"
             type="textarea"
-            :autosize="{ minRows: 6 }"
             placeholder="例如：一只橘猫坐在木质窗台上晒太阳，水彩插画风格，柔和光线，干净背景"
+            :input-props="{ spellcheck: false }"
           />
-          <span class="field-hint">在图片生成页可从提示词库直接套用或追加这段内容。</span>
+          <span class="field-hint">{{ contentCount }} 字 · 在图片生成页可直接套用或追加</span>
         </n-form-item>
       </n-form>
       <template #footer>
@@ -385,5 +391,47 @@ onBeforeUnmount(() => {
     max-width: none;
     width: 100%;
   }
+  .prompt-editor-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 弹窗内容区限高，正文自己滚，保存按钮始终贴在视口里 */
+.prompt-editor-form {
+  display: flex;
+  flex-direction: column;
+  max-height: min(68vh, 640px);
+  min-height: 0;
+}
+.prompt-editor-row {
+  display: grid;
+  grid-template-columns: minmax(0, 160px) minmax(0, 1fr);
+  gap: var(--space-3);
+}
+.prompt-editor-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.prompt-editor-body :deep(.n-form-item-blank) {
+  flex: 1 1 auto;
+  min-height: 180px;
+  align-items: stretch;
+}
+.prompt-editor-body :deep(.n-input) {
+  height: 100%;
+}
+.prompt-editor-body :deep(.n-input-wrapper) {
+  height: 100%;
+  align-items: stretch;
+}
+.prompt-editor-body :deep(textarea) {
+  height: 100% !important;
+  max-height: none;
+  resize: none;
+  line-height: 1.7;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: var(--font-sm);
 }
 </style>
