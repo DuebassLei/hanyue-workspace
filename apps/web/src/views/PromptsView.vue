@@ -1,7 +1,9 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { NAlert, NButton, NEmpty, NForm, NFormItem, NInput, NModal, NSelect, NSpace } from 'naive-ui'
 import { api } from '../api/client'
 import { useRouter } from 'vue-router'
+import { toast } from '../ui/feedback'
 
 const router = useRouter()
 const DEFAULT_CATEGORY = '通用'
@@ -9,9 +11,8 @@ const DEFAULT_CATEGORY = '通用'
 const prompts = ref([])
 const loading = ref(true)
 const error = ref('')
-const notice = ref('')
 const keyword = ref('')
-const activeCategory = ref('')
+const activeCategory = ref(null)
 
 const showEditor = ref(false)
 const editingId = ref('')
@@ -30,6 +31,11 @@ const categories = computed(() => {
   }
   return [...set]
 })
+
+const categoryOptions = computed(() => [
+  { label: '全部分类', value: null },
+  ...categories.value.map((item) => ({ label: item, value: item })),
+])
 
 const filtered = computed(() => {
   const q = keyword.value.trim().toLowerCase()
@@ -59,7 +65,7 @@ async function load() {
 
 function resetFilter() {
   keyword.value = ''
-  activeCategory.value = ''
+  activeCategory.value = null
 }
 
 function goHanddraw() {
@@ -95,7 +101,6 @@ function parseTags(value) {
 
 async function save() {
   error.value = ''
-  notice.value = ''
   if (!form.title.trim()) {
     error.value = '请填写提示词名称'
     return
@@ -115,11 +120,11 @@ async function save() {
     if (editingId.value) {
       const updated = await api.patch(`/prompts/${editingId.value}`, payload)
       prompts.value = [updated, ...prompts.value.filter((item) => item.id !== updated.id)]
-      notice.value = `已更新「${updated.title}」`
+      toast(`已更新「${updated.title}」`)
     } else {
       const created = await api.post('/prompts', payload)
       prompts.value = [created, ...prompts.value]
-      notice.value = `已新建「${created.title}」，可在图片生成页直接套用`
+      toast(`已新建「${created.title}」，可在图片生成页直接套用`)
     }
     showEditor.value = false
   } catch (err) {
@@ -146,7 +151,7 @@ async function remove(item) {
   try {
     await api.del(`/prompts/${item.id}`)
     prompts.value = prompts.value.filter((row) => row.id !== item.id)
-    notice.value = `已删除「${item.title}」`
+    toast(`已删除「${item.title}」`)
   } catch (err) {
     error.value = err.message
   }
@@ -181,53 +186,55 @@ onBeforeUnmount(() => {
         <h1 class="page-title">提示词库</h1>
         <p class="page-sub">维护常用生图提示词模板，在图片生成页一键套用或追加。</p>
       </div>
-      <button class="btn" @click="openCreate">新建提示词</button>
+      <n-button type="primary" @click="openCreate">新建提示词</n-button>
     </div>
 
-    <div class="segmented prompt-tabs" role="tablist" aria-label="提示词库视图">
-      <button
-        class="segmented-item is-active"
-        role="tab"
-        aria-selected="true"
-        :disabled="true"
-      >
+    <n-space class="prompt-tabs" role="tablist" aria-label="提示词库视图" :size="8">
+      <n-button type="primary" size="small" role="tab" aria-selected="true" disabled>
         我的提示词
-      </button>
-      <button class="segmented-item" role="tab" aria-selected="false" @click="goHanddraw">
+      </n-button>
+      <n-button secondary size="small" role="tab" aria-selected="false" @click="goHanddraw">
         手绘风格
-      </button>
-    </div>
+      </n-button>
+    </n-space>
 
-    <div v-if="error" class="banner banner-danger" role="alert">{{ error }}</div>
-    <div v-if="notice" class="banner banner-info" role="status">{{ notice }}</div>
+    <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
 
     <section class="card">
       <div class="row prompt-toolbar">
-        <input
-          v-model="keyword"
-          class="input prompt-search"
-          type="search"
+        <n-input
+          v-model:value="keyword"
+          class="prompt-search"
+          type="text"
+          clearable
           placeholder="搜索名称、内容或标签"
           aria-label="搜索提示词"
         />
-        <select v-model="activeCategory" class="select prompt-filter" aria-label="按分类筛选">
-          <option value="">全部分类</option>
-          <option v-for="item in categories" :key="item" :value="item">{{ item }}</option>
-        </select>
+        <n-select
+          v-model:value="activeCategory"
+          class="prompt-filter"
+          :options="categoryOptions"
+          placeholder="全部分类"
+          aria-label="按分类筛选"
+        />
         <div class="spacer" />
         <span class="field-hint">{{ filtered.length }} / {{ prompts.length }} 条</span>
       </div>
 
       <div v-if="loading" class="skeleton" style="height: 120px; margin-top: var(--space-3)" />
       <div v-else-if="!prompts.length" class="empty">
-        <span class="empty-title">还没有提示词</span>
-        <span>把常用的生图描述存成模板，下次生成时可直接套用、追加或微调。</span>
-        <button class="btn btn-sm" @click="openCreate">新建第一条提示词</button>
+        <n-empty description="把常用的生图描述存成模板，下次生成时可直接套用、追加或微调。">
+          <template #extra>
+            <n-button type="primary" size="small" @click="openCreate">新建第一条提示词</n-button>
+          </template>
+        </n-empty>
       </div>
       <div v-else-if="!filtered.length" class="empty">
-        <span class="empty-title">没有匹配的提示词</span>
-        <span>换个关键词，或清空分类筛选再试试。</span>
-        <button class="btn btn-ghost btn-sm" @click="resetFilter">清空筛选</button>
+        <n-empty description="换个关键词，或清空分类筛选再试试。">
+          <template #extra>
+            <n-button secondary size="small" @click="resetFilter">清空筛选</n-button>
+          </template>
+        </n-empty>
       </div>
       <div v-else class="prompt-grid">
         <article v-for="item in filtered" :key="item.id" class="prompt-card">
@@ -240,75 +247,65 @@ onBeforeUnmount(() => {
             <span v-for="tag in item.tags" :key="tag" class="tag">{{ tag }}</span>
           </div>
           <footer class="prompt-actions">
-            <button class="btn btn-ghost btn-sm" @click="copyPrompt(item)">
+            <n-button quaternary size="small" @click="copyPrompt(item)">
               {{ copiedId === item.id ? '已复制' : '复制' }}
-            </button>
+            </n-button>
             <div class="spacer" />
-            <button class="btn btn-ghost btn-sm" @click="openEdit(item)">编辑</button>
-            <button class="btn btn-danger btn-sm" @click="remove(item)">
+            <n-button quaternary size="small" @click="openEdit(item)">编辑</n-button>
+            <n-button type="error" size="small" @click="remove(item)">
               {{ confirmingId === item.id ? '确认删除' : '删除' }}
-            </button>
+            </n-button>
           </footer>
         </article>
       </div>
     </section>
 
-    <Teleport to="body">
-      <div v-if="showEditor" class="modal-backdrop" @click.self="showEditor = false">
-        <div class="modal" role="dialog" aria-modal="true" :aria-label="editorTitle">
-          <div class="row">
-            <h2 class="modal-title" style="margin: 0">{{ editorTitle }}</h2>
-            <div class="spacer" />
-            <button class="icon-btn" aria-label="关闭" @click="showEditor = false">✕</button>
-          </div>
-          <div class="stack" style="margin-top: var(--space-3)">
-            <label class="field">
-              <span class="field-label">名称</span>
-              <input
-                v-model="form.title"
-                class="input"
-                maxlength="120"
-                placeholder="例如：水彩窗台橘猫"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">分类</span>
-              <input
-                v-model="form.category"
-                class="input"
-                list="prompt-categories"
-                maxlength="32"
-                placeholder="选择已有分类或直接输入"
-              />
-              <datalist id="prompt-categories">
-                <option v-for="item in categories" :key="item" :value="item" />
-              </datalist>
-            </label>
-            <label class="field">
-              <span class="field-label">标签（可选）</span>
-              <input v-model="form.tags" class="input" placeholder="用逗号分隔，例如：水彩, 治愈, 封面" />
-            </label>
-            <label class="field">
-              <span class="field-label">提示词内容</span>
-              <textarea
-                v-model="form.content"
-                class="textarea"
-                style="min-height: 140px"
-                placeholder="例如：一只橘猫坐在木质窗台上晒太阳，水彩插画风格，柔和光线，干净背景"
-              />
-              <span class="field-hint">在图片生成页可从提示词库直接套用或追加这段内容。</span>
-            </label>
-            <div class="row">
-              <div class="spacer" />
-              <button class="btn btn-ghost" @click="showEditor = false">取消</button>
-              <button class="btn" :disabled="saving" @click="save">
-                {{ saving ? '保存中…' : '保存' }}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <n-modal
+      v-model:show="showEditor"
+      preset="card"
+      :title="editorTitle"
+      style="width: min(560px, calc(100vw - 32px))"
+      :mask-closable="!saving"
+    >
+      <n-form label-placement="top">
+        <n-form-item label="名称">
+          <n-input
+            v-model:value="form.title"
+            maxlength="120"
+            placeholder="例如：水彩窗台橘猫"
+          />
+        </n-form-item>
+        <n-form-item label="分类">
+          <n-input
+            v-model:value="form.category"
+            list="prompt-categories"
+            maxlength="32"
+            placeholder="选择已有分类或直接输入"
+          />
+          <datalist id="prompt-categories">
+            <option v-for="item in categories" :key="item" :value="item" />
+          </datalist>
+        </n-form-item>
+        <n-form-item label="标签（可选）">
+          <n-input v-model:value="form.tags" placeholder="用逗号分隔，例如：水彩, 治愈, 封面" />
+        </n-form-item>
+        <n-form-item label="提示词内容">
+          <n-input
+            v-model:value="form.content"
+            type="textarea"
+            :autosize="{ minRows: 6 }"
+            placeholder="例如：一只橘猫坐在木质窗台上晒太阳，水彩插画风格，柔和光线，干净背景"
+          />
+          <span class="field-hint">在图片生成页可从提示词库直接套用或追加这段内容。</span>
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary :disabled="saving" @click="showEditor = false">取消</n-button>
+          <n-button type="primary" :loading="saving" @click="save">保存</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 

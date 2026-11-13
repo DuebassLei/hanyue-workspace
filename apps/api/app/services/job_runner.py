@@ -176,7 +176,41 @@ def _on_failure(db, job: models.BackgroundJob) -> None:
         if publish_job:
             publish_job.error_code = job.error_code
             publish_job.error_message = job.error_message
+            _advance_publish_job_on_failure(db, publish_job, job.error_code or "")
             db.commit()
+
+
+def _advance_publish_job_on_failure(db, publish_job: models.PublishJob, error_code: str) -> None:
+    """后台任务彻底失败（重试耗尽）后，把发布任务推进到可解释的终态。
+
+    此前失败只写错误字段、状态悬在 publishing/queued，用户永远看不到失败。
+    映射原则（对齐 AGENT.md）：
+    - 远端已产生内容 → succeeded（绝不再重发）
+    - 明确的致命错误（授权失效/内容被拒）→ failed
+    - 超时/网络/限流等结果未知 → needs_attention，等用户核实后回填或重试
+    """
+    if publish_job.status in publish_state.TERMINAL:
+        return
+    code = (error_code or "").lower()
+    if publish_job.remote_content_id:
+        target = publish_state.SUCCEEDED
+        note = f"后台执行失败但远端已有内容，视为成功（{code}）"
+    elif code in {"auth_expired", "forbidden", "validation_failed", "content_rejected"}:
+        target = publish_state.FAILED
+        note = f"执行失败：{code}"
+    else:
+        target = publish_state.NEEDS_ATTENTION
+        note = f"执行结果未知（{code}），请核实后回填或重试"
+    if target == publish_job.status:
+        publish_state.record_history(publish_job, target, actor="system", note=note)
+        return
+    try:
+        publish_state.apply_transition(publish_job, target, actor="system", note=note)
+    except publish_state.TransitionError:
+        # 兜底：映射结果与状态机冲突时不吞错误，直接标记需人工核实
+        publish_state.apply_transition(
+            publish_job, publish_state.NEEDS_ATTENTION, actor="system", note=f"异常流转兜底：{note}"
+        )
 
 
 def _execute(db, job: models.BackgroundJob) -> dict:
@@ -441,6 +475,10 @@ def _handle_platform_publish(db, job: models.BackgroundJob) -> dict:
     connector = registry.get_connector(account.platform, db)
     access_token = decrypt_secret(account.access_token_ciphertext)
     try:
+        publish_state.apply_transition(
+            publish_job, publish_state.PUBLISHING, actor="system", note="开始提交平台发布"
+        )
+        db.commit()
         result = connector.publish(
             access_token=access_token, payload=publish_job.payload_snapshot or {}
         )
@@ -450,7 +488,9 @@ def _handle_platform_publish(db, job: models.BackgroundJob) -> dict:
     if not remote_id:
         raise JobFailure("invalid_platform_response", "平台未返回内容 ID，需人工核实是否已发布")
     publish_job.remote_content_id = remote_id
-    publish_job.status = publish_state.SUCCEEDED
+    publish_state.apply_transition(
+        publish_job, publish_state.SUCCEEDED, actor="system", note="平台发布成功"
+    )
     db.commit()
     return {"remoteContentId": remote_id}
 
@@ -494,7 +534,9 @@ def _handle_wechat_draft(
     if not assets:
         raise JobFailure("thumb_required", "微信草稿必须有封面图（第一张素材作为 thumb_media_id）")
 
-    publish_job.status = publish_state.PUBLISHING
+    publish_state.apply_transition(
+        publish_job, publish_state.PUBLISHING, actor="system", note="开始推送公众号草稿箱"
+    )
     db.commit()
 
     try:
@@ -533,7 +575,9 @@ def _handle_wechat_draft(
 
     pushed_at = _utcnow()
     publish_job.remote_content_id = media_id
-    publish_job.status = publish_state.SUCCEEDED
+    publish_state.apply_transition(
+        publish_job, publish_state.SUCCEEDED, actor="system", note="草稿推送成功"
+    )
     publish_job.payload_snapshot = {
         **snapshot,
         "draftMediaId": media_id,

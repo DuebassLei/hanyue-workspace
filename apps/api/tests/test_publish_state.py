@@ -69,3 +69,56 @@ def test_auto_publish_gates(kwargs, expected_ok):
     assert ok is expected_ok
     if not ok:
         assert reason
+
+
+# ---------------- 状态流转历史（发布中心重构 P1）----------------
+
+
+def test_promote_and_worker_transitions_are_legal():
+    """排期到点提升（queued→approved）与 Worker 领取（approved→publishing）是真实发生的流转。"""
+    assert ps.can_transition(ps.QUEUED, ps.APPROVED)
+    assert ps.can_transition(ps.APPROVED, ps.PUBLISHING)
+
+
+def test_history_entry_shape():
+    entry = ps.history_entry(ps.QUEUED, actor="user", note="创建")
+    assert entry["status"] == ps.QUEUED
+    assert entry["actor"] == "user"
+    assert entry["note"] == "创建"
+    assert entry["at"]  # ISO 时间戳
+    assert ps.initial_history(ps.APPROVED, actor="user")[0]["status"] == ps.APPROVED
+
+
+class _FakeJob:
+    """最小 duck-type：apply_transition/record_history 只依赖 status/status_history。"""
+
+    def __init__(self, status):
+        self.status = status
+        self.status_history = []
+
+
+def test_apply_transition_writes_status_and_history():
+    job = _FakeJob(ps.PENDING_REVIEW)
+    assert ps.apply_transition(job, ps.APPROVED, actor="user", note="审核通过") == ps.APPROVED
+    assert job.status == ps.APPROVED
+    assert len(job.status_history) == 1
+    assert job.status_history[0]["status"] == ps.APPROVED
+    assert job.status_history[0]["actor"] == "user"
+
+
+def test_apply_transition_rejects_illegal_without_history():
+    import pytest
+
+    job = _FakeJob(ps.SUCCEEDED)
+    with pytest.raises(ps.TransitionError):
+        ps.apply_transition(job, ps.QUEUED, actor="user")
+    assert job.status == ps.SUCCEEDED
+    assert job.status_history == []
+
+
+def test_record_history_appends_without_validation():
+    """手动回填等策略路径允许直接写终态，但必须留痕。"""
+    job = _FakeJob(ps.FAILED)
+    ps.record_history(job, ps.SUCCEEDED, actor="user", note="手动回填")
+    assert job.status == ps.FAILED  # 只记历史，不改状态
+    assert job.status_history[0]["note"] == "手动回填"

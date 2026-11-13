@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { NAlert, NButton, NInput, NInputNumber, NModal, NSelect } from 'naive-ui'
 import { api, fetchBlobUrl } from '../api/client'
 
 const OPERATIONS = [
@@ -11,6 +12,7 @@ const OPERATIONS = [
   { value: 'watermark', label: '添加水印', hint: 'text' },
   { value: 'split_panels', label: '条漫分格', hint: 'panels' },
 ]
+const operationOptions = OPERATIONS.map((op) => ({ label: op.label, value: op.value }))
 
 const SOURCE_OPTIONS = [
   { value: 'upload', label: '手动上传' },
@@ -35,6 +37,17 @@ const assets = ref([])
 const loading = ref(true)
 const error = ref('')
 const uploading = ref(false)
+const uploadInput = ref(null)
+const FORMAT_SELECT_OPTIONS = [
+  { label: 'WebP', value: 'webp' },
+  { label: 'JPEG', value: 'jpeg' },
+  { label: 'PNG', value: 'png' },
+]
+const PANEL_FORMAT_OPTIONS = [
+  { label: 'JPEG', value: 'jpeg' },
+  { label: 'WebP', value: 'webp' },
+  { label: 'PNG', value: 'png' },
+]
 const selectedId = ref('')
 const operation = ref('thumbnail')
 const options = reactive({
@@ -462,18 +475,15 @@ onBeforeUnmount(() => {
         <p class="page-sub">集中浏览、搜索和管理创作素材。原图始终保留，图像处理会另存为派生素材。</p>
       </div>
       <div class="row row-tight">
-        <label class="btn btn-sm" style="cursor: pointer">
+        <n-button type="primary" size="small" :disabled="uploading" @click="uploadInput?.click()">
           {{ uploading ? '上传中…' : '上传图片' }}
-          <input type="file" accept="image/*" hidden :disabled="uploading" @change="onUpload" />
-        </label>
-        <button class="btn btn-ghost btn-sm" :disabled="loading" @click="load">刷新</button>
+        </n-button>
+        <input ref="uploadInput" type="file" accept="image/*" hidden :disabled="uploading" @change="onUpload" />
+        <n-button quaternary size="small" :disabled="loading" @click="load">刷新</n-button>
       </div>
     </div>
 
-    <div v-if="error" class="banner banner-danger" role="alert">
-      {{ error }}
-      <button class="btn btn-ghost btn-sm" @click="error = ''">知道了</button>
-    </div>
+    <n-alert v-if="error" type="error" closable @close="error = ''">{{ error }}</n-alert>
 
     <div class="gallery-shell">
       <!-- 筛选侧栏 -->
@@ -538,43 +548,27 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <button
-          v-if="hasFilters"
-          class="btn btn-ghost btn-sm filter-reset"
-          type="button"
-          @click="resetFilters"
-        >
+        <n-button v-if="hasFilters" quaternary size="small" class="filter-reset" @click="resetFilters">
           清除全部筛选
-        </button>
+        </n-button>
       </aside>
       <div v-if="filterOpen" class="filter-scrim" @click="filterOpen = false" />
 
       <!-- 主区 -->
       <section class="gallery-main">
         <div class="gallery-toolbar">
-          <label class="gallery-search">
-            <input
-              v-model="keyword"
-              class="input gallery-search-input"
-              type="text"
-              placeholder="搜索名称或提示词"
-              aria-label="按关键字搜索素材"
-              @input="onKeywordInput"
-              @keydown.enter.prevent="searchNow"
-            />
-            <button
-              v-if="keyword"
-              class="gallery-search-clear"
-              type="button"
-              aria-label="清空搜索"
-              @click="resetFilters"
-            >
-              ✕
-            </button>
-          </label>
-          <button class="btn btn-ghost btn-sm filter-toggle" type="button" @click="filterOpen = true">
+          <n-input
+            v-model:value="keyword"
+            class="gallery-search-input"
+            clearable
+            placeholder="搜索名称或提示词"
+            aria-label="按关键字搜索素材"
+            @update:value="onKeywordInput"
+            @keydown.enter.prevent="searchNow"
+          />
+          <n-button quaternary size="small" class="filter-toggle" @click="filterOpen = true">
             筛选<span v-if="activeFilterCount"> {{ activeFilterCount }}</span>
-          </button>
+          </n-button>
           <div class="spacer" />
           <span v-if="searching" class="field-hint">搜索中…</span>
           <span v-else class="field-hint">
@@ -589,9 +583,9 @@ onBeforeUnmount(() => {
         <div v-else-if="!assets.length && hasFilters" class="empty-state gallery-empty">
           <span class="empty-title">没有匹配的素材</span>
           <span>换个关键字或放宽筛选条件试试。</span>
-          <button class="btn btn-ghost btn-sm" style="align-self: flex-start" @click="resetFilters">
+          <n-button quaternary size="small" style="align-self: flex-start" @click="resetFilters">
             清除筛选
-          </button>
+          </n-button>
         </div>
 
         <div v-else-if="!assets.length" class="empty-state gallery-empty">
@@ -698,65 +692,55 @@ onBeforeUnmount(() => {
 
           <label class="field">
             <span class="field-label">操作</span>
-            <select v-model="operation" class="select">
-              <option v-for="op in OPERATIONS" :key="op.value" :value="op.value">{{ op.label }}</option>
-            </select>
+            <n-select v-model:value="operation" :options="operationOptions" />
           </label>
 
           <label v-if="optionHint === 'maxSize'" class="field">
             <span class="field-label">最大边长</span>
-            <input v-model.number="options.maxSize" class="input" type="number" min="16" max="4096" />
+            <n-input-number v-model:value="options.maxSize" :min="16" :max="4096" style="width: 100%" />
           </label>
           <div v-if="optionHint === 'size'" class="field-row">
             <label class="field">
               <span class="field-label">宽</span>
-              <input v-model.number="options.width" class="input" type="number" min="1" max="8000" />
+              <n-input-number v-model:value="options.width" :min="1" :max="8000" style="width: 100%" />
             </label>
             <label class="field">
               <span class="field-label">高</span>
-              <input v-model.number="options.height" class="input" type="number" min="1" max="8000" />
+              <n-input-number v-model:value="options.height" :min="1" :max="8000" style="width: 100%" />
             </label>
           </div>
           <label v-if="optionHint === 'ratio'" class="field">
             <span class="field-label">比例 W:H</span>
-            <input v-model="options.aspectRatio" class="input" placeholder="3:4" />
+            <n-input v-model:value="options.aspectRatio" placeholder="3:4" />
           </label>
           <div v-if="optionHint === 'quality' || optionHint === 'format'" class="field-row">
             <label class="field">
               <span class="field-label">输出格式</span>
-              <select v-model="options.format" class="select">
-                <option value="webp">WebP</option>
-                <option value="jpeg">JPEG</option>
-                <option value="png">PNG</option>
-              </select>
+              <n-select v-model:value="options.format" :options="FORMAT_SELECT_OPTIONS" />
             </label>
             <label class="field">
               <span class="field-label">质量</span>
-              <input v-model.number="options.quality" class="input" type="number" min="10" max="100" />
+              <n-input-number v-model:value="options.quality" :min="10" :max="100" style="width: 100%" />
             </label>
           </div>
           <label v-if="optionHint === 'text'" class="field">
             <span class="field-label">水印文字</span>
-            <input v-model="options.text" class="input" placeholder="例如：@瀚月" />
+            <n-input v-model:value="options.text" placeholder="例如：@瀚月" />
           </label>
           <template v-if="optionHint === 'panels'">
             <div class="field-row">
               <label class="field">
                 <span class="field-label">最小间隔(px)</span>
-                <input v-model.number="options.minGap" class="input" type="number" min="2" max="200" />
+                <n-input-number v-model:value="options.minGap" :min="2" :max="200" style="width: 100%" />
               </label>
               <label class="field">
                 <span class="field-label">最多分格</span>
-                <input v-model.number="options.maxPanels" class="input" type="number" min="1" max="30" />
+                <n-input-number v-model:value="options.maxPanels" :min="1" :max="30" style="width: 100%" />
               </label>
             </div>
             <label class="field">
               <span class="field-label">输出格式</span>
-              <select v-model="options.format" class="select">
-                <option value="jpeg">JPEG</option>
-                <option value="webp">WebP</option>
-                <option value="png">PNG</option>
-              </select>
+              <n-select v-model:value="options.format" :options="PANEL_FORMAT_OPTIONS" />
             </label>
           </template>
 
@@ -783,76 +767,64 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div v-if="jobs.length" class="drawer-jobs-more">
-            <button
+            <n-button
               v-if="jobsHasMore"
-              class="btn btn-ghost btn-sm"
+              quaternary
+              size="small"
               :disabled="jobsLoadingMore"
               @click="loadMoreJobs"
             >
               {{ jobsLoadingMore ? '加载中…' : '加载更多任务' }}
-            </button>
+            </n-button>
             <span v-else class="field-hint">已加载全部 {{ jobs.length }} 条任务</span>
           </div>
         </div>
 
         <div class="drawer-foot">
-          <button class="btn btn-ghost btn-sm" :disabled="!selected" @click="remove(selected)">
-            删除素材
-          </button>
+          <n-button quaternary size="small" :disabled="!selected" @click="remove(selected)">删除素材</n-button>
           <div class="spacer" />
-          <button class="btn btn-sm" :disabled="!selected" @click="runOperation">执行处理</button>
+          <n-button type="primary" size="small" :disabled="!selected" @click="runOperation">执行处理</n-button>
         </div>
       </aside>
     </div>
 
-    <!-- 素材大图预览 -->
-    <div v-if="previewAsset" class="modal-backdrop" role="presentation" @click.self="closePreview">
-      <div
-        class="modal preview-modal"
-        role="dialog"
-        aria-modal="true"
-        :aria-label="`素材预览：${previewAsset.originalName}`"
-      >
-        <div class="row" style="margin-bottom: var(--space-3)">
-          <h2 class="modal-title" style="margin: 0; overflow: hidden; text-overflow: ellipsis">
-            {{ previewAsset.originalName }}
-          </h2>
-          <div class="spacer" />
-          <button class="icon-btn" aria-label="关闭" @click="closePreview">✕</button>
+    <n-modal
+      :show="!!previewAsset"
+      preset="card"
+      :title="previewAsset?.originalName || '素材预览'"
+      style="width: min(880px, calc(100vw - 32px))"
+      @update:show="(value) => { if (!value) closePreview() }"
+    >
+      <div class="preview-body">
+        <div class="preview-figure">
+          <img
+            v-if="previewAsset && (thumbs[previewAsset.id] || previewAsset.url)"
+            :src="thumbs[previewAsset.id] || previewAsset.url"
+            :alt="previewAsset.originalName"
+            class="preview-image"
+          />
+          <div v-else class="gallery-placeholder" style="height: 240px">▣</div>
         </div>
-        <div class="preview-body">
-          <div class="preview-figure">
-            <img
-              v-if="thumbs[previewAsset.id] || previewAsset.url"
-              :src="thumbs[previewAsset.id] || previewAsset.url"
-              :alt="previewAsset.originalName"
-              class="preview-image"
-            />
-            <div v-else class="gallery-placeholder" style="height: 240px">▣</div>
-          </div>
-          <div class="preview-side">
-            <p class="field-hint" style="margin: 0">
-              {{ dimensionLabel(previewAsset) }} · {{ sizeLabel(previewAsset.sizeBytes) }} ·
-              {{ sourceLabel(previewAsset.sourceType) }}
-            </p>
-            <template v-if="previewAsset.prompt">
-              <span class="field-label">生成提示词</span>
-              <p class="preview-prompt">{{ previewAsset.prompt }}</p>
-              <button class="btn btn-sm" type="button" @click="copyPrompt(previewAsset)">
-                {{ copiedId === previewAsset.id ? '已复制' : '复制提示词' }}
-              </button>
-            </template>
-            <p v-else class="field-hint" style="margin: 0">
-              该素材没有记录生成提示词（手动上传或处理后的派生图）。
-            </p>
-            <div class="spacer" />
-            <button class="btn btn-ghost btn-sm" type="button" @click="selectFromPreview">
-              选为处理对象
-            </button>
-          </div>
+        <div v-if="previewAsset" class="preview-side">
+          <p class="field-hint" style="margin: 0">
+            {{ dimensionLabel(previewAsset) }} · {{ sizeLabel(previewAsset.sizeBytes) }} ·
+            {{ sourceLabel(previewAsset.sourceType) }}
+          </p>
+          <template v-if="previewAsset.prompt">
+            <span class="field-label">生成提示词</span>
+            <p class="preview-prompt">{{ previewAsset.prompt }}</p>
+            <n-button type="primary" size="small" @click="copyPrompt(previewAsset)">
+              {{ copiedId === previewAsset.id ? '已复制' : '复制提示词' }}
+            </n-button>
+          </template>
+          <p v-else class="field-hint" style="margin: 0">
+            该素材没有记录生成提示词（手动上传或处理后的派生图）。
+          </p>
+          <div class="spacer" />
+          <n-button quaternary size="small" @click="selectFromPreview">选为处理对象</n-button>
         </div>
       </div>
-    </div>
+    </n-modal>
   </div>
 </template>
 
@@ -980,37 +952,9 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   flex-wrap: wrap;
 }
-.gallery-search {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
+.gallery-search-input {
   width: 260px;
   max-width: 100%;
-}
-.gallery-search-input {
-  width: 100%;
-  height: 34px;
-  padding-right: 28px;
-}
-.gallery-search-clear {
-  position: absolute;
-  right: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-size: var(--font-xs);
-  cursor: pointer;
-}
-.gallery-search-clear:hover {
-  background: var(--color-bg);
-  color: var(--color-text-primary);
 }
 
 /* ---------- 网格 ---------- */
@@ -1380,7 +1324,7 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 767px) {
-  .gallery-search {
+  .gallery-search-input {
     width: 100%;
   }
   .gallery-grid {

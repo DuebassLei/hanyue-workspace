@@ -17,12 +17,12 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 
 from .. import models
 from ..core.config import BASE_DIR, get_settings
 from ..core.deps import default_workspace
-from . import ai_gateway
+from . import ai_gateway, skill_registry
 
 ACTIVE_RUN_STATUSES = ("queued", "running", "paused", "awaiting_approval")
 
@@ -123,7 +123,7 @@ def _last_run(db, user: models.User) -> dict | None:
     }
 
 
-def _paths(workspace: models.Workspace, skill_total: int) -> list[dict]:
+def _paths(workspace: models.Workspace, skill_total: int, builtin_total: int) -> list[dict]:
     settings = get_settings()
     items: list[dict] = []
 
@@ -180,11 +180,11 @@ def _paths(workspace: models.Workspace, skill_total: int) -> list[dict]:
 
     items.append(
         {
-            "label": "内置 Skill 注册表",
-            "value": str(BASE_DIR / "app" / "modules" / "agent.py"),
-            "exists": (BASE_DIR / "app" / "modules" / "agent.py").exists(),
+            "label": "内置 Skill 定义",
+            "value": str(skill_registry.BUILTIN_RESOURCE),
+            "exists": skill_registry.BUILTIN_RESOURCE.exists(),
             "writable": False,
-            "detail": f"共 {skill_total} 个 Skill，随服务端代码发布",
+            "detail": f"{builtin_total} 个内置定义，随服务端资源同步；当前账号可见 {skill_total} 个",
             "kind": "skills",
         }
     )
@@ -198,7 +198,24 @@ def status_snapshot(db, user: models.User) -> dict:
     connection, model_code = ai_gateway.resolve_connection(db, user.id)
     mode = _mode_of(connection)
 
-    skill_total = db.scalar(select(func.count()).select_from(models.SkillRegistryEntry)) or 0
+    # 只统计当前账号可见的 Skill：内置 + 本人自定义；别人创建的不计入
+    skill_total = (
+        db.scalar(
+            select(func.count())
+            .select_from(models.SkillRegistryEntry)
+            .where(
+                or_(
+                    and_(
+                        models.SkillRegistryEntry.owner_user_id.is_(None),
+                        models.SkillRegistryEntry.source == "builtin",
+                    ),
+                    models.SkillRegistryEntry.owner_user_id == user.id,
+                )
+            )
+        )
+        or 0
+    )
+    builtin_total = len(skill_registry.get_builtin_specs())
     skill_enabled = (
         db.scalar(
             select(func.count())
@@ -256,7 +273,7 @@ def status_snapshot(db, user: models.User) -> dict:
             "pendingApprovals": pending_approvals,
             "last": _last_run(db, user),
         },
-        "paths": _paths(workspace, skill_total),
+        "paths": _paths(workspace, skill_total, builtin_total),
         "storageDir": str(settings.storage_dir),
         "checkedAt": datetime.now(UTC).isoformat(),
     }

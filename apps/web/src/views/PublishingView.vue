@@ -1,8 +1,25 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import {
+  NAlert,
+  NButton,
+  NCheckbox,
+  NDatePicker,
+  NForm,
+  NFormItem,
+  NInput,
+  NModal,
+  NSelect,
+  NSpace,
+  NEmpty,
+  NTab,
+  NTabs,
+  NTag,
+} from 'naive-ui'
 import { api } from '../api/client'
-import AppModal from '../components/AppModal.vue'
 import StatusTag from '../components/StatusTag.vue'
+import PlatformCard from '../features/publish/accounts/PlatformCard.vue'
+import { confirm, toast } from '../ui/feedback'
 
 const capabilities = ref([])
 const accounts = ref([])
@@ -11,7 +28,6 @@ const connectorStatuses = ref({})
 const loading = ref(true)
 const queueRefreshing = ref(false)
 const error = ref('')
-const notice = ref('')
 const queueStatus = ref('all')
 const queuePlatform = ref('all')
 const queueAccount = ref('all')
@@ -30,16 +46,36 @@ const queuePlatformOptions = computed(() => {
   // 只列出任务中真实出现过的平台，避免多平台目录制造无效筛选
   const present = new Map()
   jobs.value.forEach((job) => present.set(job.platform, job.platformLabel))
-  return [
-    { value: 'all', label: '全部平台' },
-    ...Array.from(present, ([value, label]) => ({ value, label })),
-  ]
+  return Array.from(present, ([value, label]) => ({ value, label }))
 })
 
-const queueAccountOptions = computed(() => [
-  { value: 'all', label: '全部账号' },
-  ...accounts.value.map((account) => ({ value: account.id, label: account.displayName })),
-])
+const queueAccountOptions = computed(() =>
+  accounts.value.map((account) => ({ value: account.id, label: account.displayName })),
+)
+
+const queuePlatformModel = computed({
+  get: () => (queuePlatform.value === 'all' ? null : queuePlatform.value),
+  set: (value) => {
+    queuePlatform.value = value || 'all'
+  },
+})
+
+const queueAccountModel = computed({
+  get: () => (queueAccount.value === 'all' ? null : queueAccount.value),
+  set: (value) => {
+    queueAccount.value = value || 'all'
+  },
+})
+
+const accountSelectOptions = computed(() =>
+  accounts.value
+    .filter((account) => account.status === 'connected')
+    .map((account) => ({ value: account.id, label: `${account.platformLabel} · ${account.displayName}` })),
+)
+
+const contentSelectOptions = computed(() =>
+  contents.value.map((item) => ({ value: item.id, label: item.title })),
+)
 
 const filteredJobs = computed(() => {
   const keyword = queueSearch.value.trim().toLowerCase()
@@ -71,8 +107,8 @@ const activeTab = ref('queue')
 
 const showPublish = ref(false)
 const publishForm = reactive({
-  accountId: '',
-  contentId: '',
+  accountId: null,
+  contentId: null,
   title: '',
   body: '',
   scheduledAt: '',
@@ -87,9 +123,19 @@ const idempotencyKey = ref('')
 const previewResult = ref(null)
 const publishError = ref('')
 
-const accountOptions = computed(() =>
-  accounts.value.filter((a) => a.status === 'connected').map((a) => ({ id: a.id, label: `${a.platformLabel} · ${a.displayName}` })),
-)
+const accountOptions = accountSelectOptions
+
+// n-date-picker 用时间戳；提交时再转回 ISO，和原来 datetime-local 的契约一致
+const scheduledAtTs = computed({
+  get: () => {
+    if (!publishForm.scheduledAt) return null
+    const ts = new Date(publishForm.scheduledAt).getTime()
+    return Number.isNaN(ts) ? null : ts
+  },
+  set: (value) => {
+    publishForm.scheduledAt = value ? new Date(value).toISOString() : ''
+  },
+})
 
 async function load(options = {}) {
   const queueOnly = options.queueOnly === true
@@ -105,6 +151,9 @@ async function load(options = {}) {
       api.get('/content'),
     ])
     capabilities.value = caps.platforms
+    if (!activePlatform.value || !caps.platforms.some((platform) => platform.platform === activePlatform.value)) {
+      activePlatform.value = caps.platforms[0]?.platform || ''
+    }
     accounts.value = accs
     jobs.value = jobList
     connectorStatuses.value = Object.fromEntries(conns.platforms.map((s) => [s.platform, s]))
@@ -119,7 +168,7 @@ async function load(options = {}) {
 
 async function refreshQueue() {
   await load({ queueOnly: true })
-  if (!error.value) notice.value = '发布队列已刷新'
+  if (!error.value) toast('发布队列已刷新')
 }
 
 function connectorModeLabel(platform) {
@@ -169,7 +218,7 @@ async function verifyAuth(account) {
   error.value = ''
   try {
     const res = await api.post(`/platform-accounts/${account.id}/test`)
-    notice.value = res.note || (res.verified ? '官方授权验证通过。' : res.message)
+    toast(res.note || (res.verified ? '官方授权验证通过。' : res.message))
     await load()
   } catch (err) {
     error.value = err.message
@@ -183,8 +232,8 @@ async function unbind(account) {
 }
 
 function openPublish() {
-  publishForm.accountId = accountOptions.value[0]?.id || ''
-  publishForm.contentId = ''
+  publishForm.accountId = accountOptions.value[0]?.value || null
+  publishForm.contentId = null
   publishForm.title = ''
   publishForm.body = ''
   publishForm.scheduledAt = ''
@@ -220,17 +269,25 @@ async function onSelectArticle() {
   }
 }
 
-// 渠道目录：已接入平台展示真实能力与账号，未接入平台只作占位
+// 渠道目录：左侧平台导航使用真实能力与账号状态，右侧维护当前平台。
 const platformCards = computed(() =>
   capabilities.value.map((cap) => ({
     ...cap,
     accounts: accounts.value.filter((account) => account.platform === cap.platform),
   })),
 )
+const activePlatform = ref('')
+const selectedPlatform = computed(
+  () => platformCards.value.find((platform) => platform.platform === activePlatform.value) || platformCards.value[0],
+)
+
+function selectPlatform(platform) {
+  activePlatform.value = platform
+}
 
 function openBind(platform) {
   if (platform !== 'wechat_official') {
-    notice.value = '该平台尚未接入，暂不支持绑定账号'
+    toast('该平台尚未接入，暂不支持绑定账号', 'warning')
     return
   }
   wechatBindForm.displayName = ''
@@ -272,10 +329,11 @@ async function submitJob() {
     })
     jobs.value.unshift(job)
     showPublish.value = false
-    notice.value =
+    toast(
       publishForm.mode === 'manual'
         ? '已加入排期。请在平台侧手动发布后回到本页回填结果。'
-        : '已创建自动发布任务。平台能力未核验时不会真实提交到平台。'
+        : '已创建自动发布任务。平台能力未核验时不会真实提交到平台。',
+    )
   } catch (err) {
     publishError.value = err.message
   }
@@ -298,7 +356,7 @@ async function submitRecord() {
     })
     Object.assign(recordingJob.value, updated)
     recordingJob.value = null
-    notice.value = '已回填手动发布结果（来源标记为手动记录）。'
+    toast('已回填手动发布结果（来源标记为手动记录）。')
   } catch (err) {
     error.value = err.message
   }
@@ -329,13 +387,14 @@ const canDelete = (job) => ['succeeded', 'cancelled', 'failed', 'needs_attention
 
 async function deleteJob(job) {
   if (!canDelete(job) || deletingJobId.value) return
-  if (!window.confirm('删除后将从发布队列移除该任务，确定继续吗？')) return
+  const ok = await confirm('删除后将从发布队列移除该任务，确定继续吗？', '删除发布任务')
+  if (!ok) return
   deletingJobId.value = job.id
   error.value = ''
   try {
     await api.del(`/publishing/jobs/${job.id}`)
     jobs.value = jobs.value.filter((item) => item.id !== job.id)
-    notice.value = '发布任务已删除'
+    toast('发布任务已删除')
   } catch (err) {
     error.value = err.message
   } finally {
@@ -376,7 +435,7 @@ async function saveAccountCred() {
     if (res.probeError) {
       error.value = `凭据已保存到账号，但验证未通过：${res.probeError.message}（常见原因：公众号后台 IP 白名单未包含本机出口 IP）`
     } else {
-      notice.value = '账号凭据已保存并验证通过，后续推送将使用该账号自己的凭据。'
+      toast('账号凭据已保存并验证通过，后续推送将使用该账号自己的凭据。')
     }
     await load()
   } catch (err) {
@@ -389,7 +448,6 @@ async function saveAccountCred() {
 async function bindWechat() {
   wechatBusy.value = true
   error.value = ''
-  notice.value = ''
   try {
     const payload = { displayName: wechatBindForm.displayName }
     // 多账号：勾选独立凭据时，AppID/AppSecret 加密存到该账号上；留空走部署级默认凭据
@@ -400,7 +458,7 @@ async function bindWechat() {
       }
     }
     const res = await api.post('/wechat-mp/bind', payload)
-    notice.value = `验证通过：AppID ${res.probe.appId}，后台现有草稿 ${res.probe.draftTotal} 篇。正式群发仍需在公众号后台操作。`
+    toast(`验证通过：AppID ${res.probe.appId}，后台现有草稿 ${res.probe.draftTotal} 篇。正式群发仍需在公众号后台操作。`)
     showWechatBind.value = false
     wechatBindForm.displayName = ''
     wechatBindForm.useOwnCred = false
@@ -422,40 +480,28 @@ async function bindWechat() {
         <h1 class="page-title">发布管理</h1>
         <p class="page-sub">渠道平台维护与发布任务追踪分开管理</p>
       </div>
-      <div class="row row-tight">
+      <n-space :size="8">
         <template v-if="activeTab === 'queue'">
-          <button class="btn btn-ghost btn-sm" :disabled="queueRefreshing" @click="refreshQueue">
-            {{ queueRefreshing ? '刷新中…' : '刷新队列' }}
-          </button>
-          <button class="btn btn-sm" @click="openPublish">新建排期任务</button>
+          <n-button secondary :loading="queueRefreshing" @click="refreshQueue">刷新队列</n-button>
+          <n-button type="primary" @click="openPublish">新建排期任务</n-button>
         </template>
-        <button v-else class="btn btn-sm" @click="openBind('wechat_official')">绑定公众号账号</button>
-      </div>
+        <n-button
+          v-else
+          type="primary"
+          :disabled="!selectedPlatform?.available"
+          @click="selectedPlatform && openBind(selectedPlatform.platform)"
+        >
+          绑定{{ selectedPlatform?.label || '平台' }}账号
+        </n-button>
+      </n-space>
     </div>
 
-    <div v-if="error" class="banner banner-danger" role="alert">{{ error }}</div>
-    <div v-if="notice" class="banner banner-info" role="status">{{ notice }}</div>
+    <n-alert v-if="error" type="error" :bordered="false" style="margin-bottom: 12px">{{ error }}</n-alert>
 
-    <nav class="page-tabs" role="tablist" aria-label="发布管理分区">
-      <button
-        type="button"
-        role="tab"
-        :aria-selected="activeTab === 'queue'"
-        :class="{ 'is-active': activeTab === 'queue' }"
-        @click="activeTab = 'queue'"
-      >
-        发布任务
-      </button>
-      <button
-        type="button"
-        role="tab"
-        :aria-selected="activeTab === 'channels'"
-        :class="{ 'is-active': activeTab === 'channels' }"
-        @click="activeTab = 'channels'"
-      >
-        渠道平台
-      </button>
-    </nav>
+    <n-tabs v-model:value="activeTab" type="line" animated>
+      <n-tab name="queue">发布任务</n-tab>
+      <n-tab name="channels">渠道平台</n-tab>
+    </n-tabs>
 
     <!-- 发布任务 -->
     <template v-if="activeTab === 'queue'">
@@ -500,27 +546,46 @@ async function bindWechat() {
           <span>创建任务后会显示在这里，可取消或核实后重试。</span>
         </div>
         <div v-if="jobs.length" class="queue-toolbar">
-          <div class="queue-status-tabs" role="tablist" aria-label="任务状态筛选">
-            <button v-for="option in queueStatusOptions" :key="option.value" type="button" :class="{ 'is-active': queueStatus === option.value }" @click="queueStatus = option.value">
+          <n-space :size="6">
+            <n-button
+              v-for="option in queueStatusOptions"
+              :key="option.value"
+              size="small"
+              :type="queueStatus === option.value ? 'primary' : 'default'"
+              :secondary="queueStatus !== option.value"
+              :quaternary="queueStatus !== option.value"
+              @click="queueStatus = option.value"
+            >
               {{ option.label }}
-            </button>
-          </div>
-          <div class="queue-filters">
-            <select v-if="queuePlatformOptions.length > 2" v-model="queuePlatform" class="select select-sm" aria-label="平台筛选">
-              <option v-for="option in queuePlatformOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-            </select>
-            <select v-model="queueAccount" class="select select-sm" aria-label="账号筛选">
-              <option v-for="option in queueAccountOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-            </select>
-            <input v-model="queueSearch" class="input input-sm queue-search" placeholder="搜索任务" aria-label="搜索任务" />
-          </div>
+            </n-button>
+          </n-space>
+          <n-space :size="8">
+            <n-select
+              v-if="queuePlatformOptions.length > 1"
+              v-model:value="queuePlatformModel"
+              :options="queuePlatformOptions"
+              clearable
+              placeholder="全部平台"
+              size="small"
+              style="width: 160px"
+            />
+            <n-select
+              v-model:value="queueAccountModel"
+              :options="queueAccountOptions"
+              clearable
+              placeholder="全部账号"
+              size="small"
+              style="width: 160px"
+            />
+            <n-input v-model:value="queueSearch" size="small" clearable placeholder="搜索任务" style="width: 180px" />
+          </n-space>
         </div>
         <div v-if="!filteredJobs.length" class="empty">
           <span class="empty-title">没有匹配的任务</span>
           <span>可以切换筛选条件，或刷新队列获取最新任务。</span>
         </div>
         <div v-else class="list">
-          <div v-for="job in filteredJobs" :key="job.id" class="list-row">
+          <div v-for="job in filteredJobs" :key="job.id" class="list-row job-row">
             <div class="list-main">
               <div class="list-title">
                 <router-link v-if="job.contentItemId" class="job-article-link" :to="{ name: 'studio', query: { id: job.contentItemId } }">
@@ -540,19 +605,19 @@ async function bindWechat() {
               </div>
             </div>
             <StatusTag :status="job.status" />
-            <button v-if="canRecord(job)" class="btn btn-ghost btn-sm" @click="openRecord(job)">
-              回填手发结果
-            </button>
-            <button v-if="canRetry(job)" class="btn btn-ghost btn-sm" @click="retryJob(job)">重试</button>
-            <button v-if="canCancel(job)" class="btn btn-ghost btn-sm" @click="cancelJob(job)">取消</button>
-            <button
+            <n-button v-if="canRecord(job)" size="small" secondary @click="openRecord(job)">回填手发结果</n-button>
+            <n-button v-if="canRetry(job)" size="small" secondary @click="retryJob(job)">重试</n-button>
+            <n-button v-if="canCancel(job)" size="small" secondary @click="cancelJob(job)">取消</n-button>
+            <n-button
               v-if="canDelete(job)"
-              class="btn btn-danger btn-sm"
-              :disabled="deletingJobId === job.id"
+              size="small"
+              type="error"
+              secondary
+              :loading="deletingJobId === job.id"
               @click="deleteJob(job)"
             >
-              {{ deletingJobId === job.id ? '删除中…' : '删除' }}
-            </button>
+              删除
+            </n-button>
           </div>
         </div>
       </section>
@@ -561,215 +626,212 @@ async function bindWechat() {
 
     <!-- 渠道平台 -->
     <template v-else>
-      <div v-if="loading" class="stack">
-        <div class="skeleton" style="height: 160px" />
-        <div class="skeleton" style="height: 160px" />
+      <div v-if="loading" class="platform-layout platform-layout-loading">
+        <div class="card platform-sidebar-skeleton" />
+        <div class="card platform-detail-skeleton" />
       </div>
-      <div v-else class="platform-grid">
-        <section
-          v-for="platform in platformCards"
-          :key="platform.platform"
-          class="card platform-card"
-          :class="{ 'is-unavailable': !platform.available }"
-        >
-          <header class="platform-card-head">
+      <div v-else-if="platformCards.length" class="platform-layout">
+        <aside class="card platform-sidebar" aria-label="渠道平台列表">
+          <div class="platform-sidebar-head">
+            <h2 class="card-title">渠道平台</h2>
+            <span class="platform-count">{{ platformCards.length }}</span>
+          </div>
+          <nav class="platform-nav">
+            <button
+              v-for="platform in platformCards"
+              :key="platform.platform"
+              type="button"
+              class="platform-nav-item"
+              :class="{ 'is-active': selectedPlatform?.platform === platform.platform }"
+              :aria-current="selectedPlatform?.platform === platform.platform ? 'page' : undefined"
+              @click="selectPlatform(platform.platform)"
+            >
+              <span class="platform-nav-icon">{{ platform.label.slice(0, 1) }}</span>
+              <span class="platform-nav-copy">
+                <strong>{{ platform.label }}</strong>
+                <small>{{ platform.available ? `${platform.accounts.length} 个账号` : '暂未接入' }}</small>
+              </span>
+              <span class="platform-nav-state" :class="{ 'is-ready': platform.available }" />
+            </button>
+          </nav>
+        </aside>
+
+        <section v-if="selectedPlatform" class="card platform-detail">
+          <header class="platform-detail-head">
             <div>
-              <h2 class="card-title">{{ platform.label }}</h2>
+              <div class="platform-detail-title-row">
+                <h2 class="card-title">{{ selectedPlatform.label }}</h2>
+                <n-tag :type="selectedPlatform.available ? 'success' : 'warning'" size="small" round>
+                  {{ selectedPlatform.available ? '已接入' : '未接入' }}
+                </n-tag>
+              </div>
               <p class="section-subtitle">
-                {{ platform.available ? platform.note : '该平台尚未接入，暂不可绑定或发布' }}
+                {{ selectedPlatform.available ? selectedPlatform.note : '该平台尚未接入，暂不可绑定或发布' }}
               </p>
             </div>
-            <span class="tag" :class="platform.available ? 'tag-success' : 'tag-warning'">
-              {{ platform.available ? '已接入' : '未接入' }}
-            </span>
+            <n-button
+              v-if="selectedPlatform.available"
+              type="primary"
+              @click="openBind(selectedPlatform.platform)"
+            >
+              绑定新账号
+            </n-button>
           </header>
 
-          <div v-if="platform.available" class="platform-capabilities">
-            <span v-if="platform.draftUpload" class="tag tag-success">草稿箱推送</span>
-            <span v-if="platform.publish" class="tag tag-success">自动发布</span>
-            <span v-if="platform.contentMetrics" class="tag tag-success">内容数据</span>
-            <span
-              v-if="!platform.draftUpload && !platform.publish && !platform.contentMetrics"
-              class="tag tag-warning"
-            >暂无可用能力</span>
-            <span
-              class="tag"
-              :class="connectorStatuses[platform.platform]?.configured ? 'tag-success' : 'tag-warning'"
+          <n-space v-if="selectedPlatform.available" class="platform-capabilities" :size="6">
+            <n-tag v-if="selectedPlatform.draftUpload" type="success" size="small" round>草稿箱推送</n-tag>
+            <n-tag v-if="selectedPlatform.publish" type="success" size="small" round>自动发布</n-tag>
+            <n-tag v-if="selectedPlatform.contentMetrics" type="success" size="small" round>内容数据</n-tag>
+            <n-tag
+              v-if="!selectedPlatform.draftUpload && !selectedPlatform.publish && !selectedPlatform.contentMetrics"
+              type="warning"
+              size="small"
+              round
+            >暂无可用能力</n-tag>
+            <n-tag
+              size="small"
+              round
+              :type="connectorStatuses[selectedPlatform.platform]?.configured ? 'success' : 'warning'"
             >
-              {{ connectorModeLabel(platform.platform) }}
-            </span>
+              {{ connectorModeLabel(selectedPlatform.platform) }}
+            </n-tag>
+          </n-space>
+
+          <div v-if="selectedPlatform.available" class="platform-detail-body">
+            <PlatformCard
+              :platform="selectedPlatform"
+              :egress="egress"
+              :egress-loading="egressLoading"
+              :egress-copied="egressCopied"
+              @bind="openBind"
+              @verify="verifyAuth"
+              @unbind="unbind"
+              @edit-credential="openAcctCred"
+              @egress-refresh="loadEgressIp(true)"
+              @egress-copy="copyEgressIp"
+            />
           </div>
-
-          <template v-if="platform.available">
-            <div v-if="!platform.accounts.length" class="empty">
-              <span class="empty-title">还没有绑定账号</span>
-              <span>绑定并验证后即可使用该平台的发布能力。</span>
-              <button class="btn btn-sm" @click="openBind(platform.platform)">绑定账号</button>
+          <div v-else class="platform-unavailable platform-detail-empty">
+            <div>
+              <strong>该平台尚未开放账号维护</strong>
+              <span>完成平台接入后，这里会出现账号绑定、授权验证和发布能力配置。</span>
             </div>
-            <div v-else class="list">
-              <div v-for="account in platform.accounts" :key="account.id" class="list-row">
-                <div class="list-main">
-                  <div class="list-title">{{ account.displayName }}</div>
-                  <div class="list-meta">
-                    {{ account.hasOwnCredential ? `独立凭据 ${account.appIdMasked}` : '使用默认凭据（服务端配置）' }} ·
-                    来源：{{ account.authSource === 'app_secret' ? '官方凭据' : account.authSource === 'demo' ? '历史演示账号（无凭据）' : '待验证' }}
-                  </div>
-                  <div v-if="account.platform === 'wechat_official'" class="account-egress">
-                    <span>公众号 IP 白名单</span>
-                    <code v-if="egress?.ip">{{ egress.ip }}</code>
-                    <span v-else class="account-egress-muted">未检测到</span>
-                    <button class="btn btn-ghost btn-xs" :disabled="egressLoading" @click="loadEgressIp(true)">
-                      {{ egressLoading ? '检测中…' : '重新检测' }}
-                    </button>
-                    <button v-if="egress?.ip" class="btn btn-ghost btn-xs" @click="copyEgressIp">
-                      {{ egressCopied ? '已复制' : '复制' }}
-                    </button>
-                    <span class="account-egress-hint">请填入公众号后台「设置与开发 → 基本配置 → IP 白名单」</span>
-                  </div>
-                </div>
-                <StatusTag :status="account.status" />
-                <button
-                  v-if="account.platform === 'wechat_official' && account.authSource !== 'demo'"
-                  class="btn btn-ghost btn-sm"
-                  @click="openAcctCred(account)"
-                >
-                  修改凭据
-                </button>
-                <button
-                  v-if="account.authSource !== 'demo'"
-                  class="btn btn-ghost btn-sm"
-                  @click="verifyAuth(account)"
-                >
-                  验证授权
-                </button>
-                <button
-                  v-if="account.status !== 'unbound'"
-                  class="btn btn-danger btn-sm"
-                  @click="unbind(account)"
-                >
-                  解绑
-                </button>
-              </div>
-            </div>
-            <div class="row">
-              <button class="btn btn-ghost btn-sm" @click="openBind(platform.platform)">绑定新账号</button>
-            </div>
-          </template>
-
-          <div v-else class="platform-unavailable">
-            <span>接入后会在这里出现账号绑定与能力配置。</span>
-            <button class="btn btn-sm" disabled>暂不可用</button>
+            <n-button disabled>暂不可用</n-button>
           </div>
         </section>
       </div>
+      <n-empty v-else description="暂无可维护的渠道平台" />
     </template>
 
-    <AppModal v-if="showWechatBind" title="绑定并验证公众号" description="同一平台可绑定多个账号；每个账号可持有自己的凭据。" @close="showWechatBind = false">
-      <div class="stack">
-        <label class="field">
-          <span class="field-label">账号备注</span>
-          <input v-model="wechatBindForm.displayName" class="input" placeholder="例如：主号 / 分公司号" />
-        </label>
-        <label class="row" style="justify-content: flex-start; gap: 8px; cursor: pointer">
-          <input v-model="wechatBindForm.useOwnCred" type="checkbox" />
-          <span>为该账号使用独立 AppID/AppSecret（不勾选则使用默认凭据）</span>
-        </label>
+    <n-modal v-model:show="showWechatBind" preset="card" title="绑定并验证公众号" style="width: min(480px, calc(100vw - 32px))" :mask-closable="!wechatBusy">
+      <p class="modal-desc">同一平台可绑定多个账号；每个账号可持有自己的凭据。</p>
+      <n-form label-placement="top">
+        <n-form-item label="账号备注">
+          <n-input v-model:value="wechatBindForm.displayName" placeholder="例如：主号 / 分公司号" />
+        </n-form-item>
+        <n-form-item :show-label="false">
+          <n-checkbox v-model:checked="wechatBindForm.useOwnCred">
+            为该账号使用独立 AppID/AppSecret（不勾选则使用默认凭据）
+          </n-checkbox>
+        </n-form-item>
         <template v-if="wechatBindForm.useOwnCred">
-          <label class="field">
-            <span class="field-label">AppID</span>
-            <input v-model="wechatBindForm.appId" class="input" placeholder="wx 开头的应用 ID" autocomplete="off" />
-          </label>
-          <label class="field">
-            <span class="field-label">AppSecret</span>
-            <input
-              v-model="wechatBindForm.appSecret"
-              class="input"
+          <n-form-item label="AppID">
+            <n-input v-model:value="wechatBindForm.appId" placeholder="wx 开头的应用 ID" autocomplete="off" />
+          </n-form-item>
+          <n-form-item label="AppSecret">
+            <n-input
+              v-model:value="wechatBindForm.appSecret"
               type="password"
+              show-password-on="click"
               placeholder="公众号后台生成，仅保存加密副本"
               autocomplete="new-password"
             />
-          </label>
+          </n-form-item>
         </template>
-        <div class="field-hint">
+        <p class="field-hint">
           AppID / AppSecret 在公众号后台「设置与开发 → 基本配置」获取；绑定会真实调用微信接口验证，
           请先在公众号后台「IP 白名单」中加入本机出口 IP。同一 AppID 重复绑定会更新原账号，不同 AppID 会新建账号。
-        </div>
-        <div class="row">
-          <div class="spacer" />
-          <button class="btn btn-ghost" @click="showWechatBind = false">取消</button>
-          <button
-            class="btn"
-            :disabled="wechatBusy || (wechatBindForm.useOwnCred && (!wechatBindForm.appId.trim() || !wechatBindForm.appSecret.trim()))"
+        </p>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary :disabled="wechatBusy" @click="showWechatBind = false">取消</n-button>
+          <n-button
+            type="primary"
+            :loading="wechatBusy"
+            :disabled="wechatBindForm.useOwnCred && (!wechatBindForm.appId.trim() || !wechatBindForm.appSecret.trim())"
             @click="bindWechat"
           >
-            {{ wechatBusy ? '验证中…' : '绑定并验证' }}
-          </button>
-        </div>
-      </div>
-    </AppModal>
+            绑定并验证
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
 
-    <AppModal
-      v-if="acctCredTarget"
-      :title="`修改凭据 · ${acctCredTarget.displayName}`"
-      description="保存前会真实调用微信接口验证；Secret 加密存储且永不回传。"
-      @close="acctCredTarget = null"
-    >
-      <div class="stack">
-        <div v-if="acctCredError" class="banner banner-danger" role="alert">{{ acctCredError }}</div>
-        <label class="field">
-          <span class="field-label">AppID</span>
-          <input v-model="acctCredForm.appId" class="input" placeholder="wx 开头的应用 ID" autocomplete="off" />
-        </label>
-        <label class="field">
-          <span class="field-label">AppSecret</span>
-          <input
-            v-model="acctCredForm.appSecret"
-            class="input"
+    <n-modal :show="!!acctCredTarget" preset="card" :title="acctCredTarget ? `修改凭据 · ${acctCredTarget.displayName}` : '修改凭据'" style="width: min(480px, calc(100vw - 32px))" :mask-closable="!acctCredBusy" @update:show="(value) => { if (!value) acctCredTarget = null }">
+      <p class="modal-desc">保存前会真实调用微信接口验证；Secret 加密存储且永不回传。</p>
+      <n-alert v-if="acctCredError" type="error" :bordered="false" style="margin-bottom: 12px">{{ acctCredError }}</n-alert>
+      <n-form label-placement="top">
+        <n-form-item label="AppID">
+          <n-input v-model:value="acctCredForm.appId" placeholder="wx 开头的应用 ID" autocomplete="off" />
+        </n-form-item>
+        <n-form-item label="AppSecret">
+          <n-input
+            v-model:value="acctCredForm.appSecret"
             type="password"
+            show-password-on="click"
             placeholder="公众号后台生成，仅保存加密副本"
             autocomplete="new-password"
           />
-        </label>
-        <div class="row">
-          <div class="spacer" />
-          <button class="btn btn-ghost" @click="acctCredTarget = null">取消</button>
-          <button
-            class="btn"
-            :disabled="acctCredBusy || !acctCredForm.appId.trim() || !acctCredForm.appSecret.trim()"
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary :disabled="acctCredBusy" @click="acctCredTarget = null">取消</n-button>
+          <n-button
+            type="primary"
+            :loading="acctCredBusy"
+            :disabled="!acctCredForm.appId.trim() || !acctCredForm.appSecret.trim()"
             @click="saveAccountCred"
           >
-            {{ acctCredBusy ? '保存并验证中…' : '保存并验证' }}
-          </button>
-        </div>
-      </div>
-    </AppModal>
+            保存并验证
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
 
-    <AppModal v-if="showPublish" title="新建发布任务" description="先预览校验，确认后才会入队。" @close="showPublish = false">
-      <div class="stack">
-        <label class="field">
-          <span class="field-label">目标账号</span>
-          <select v-model="publishForm.accountId" class="select">
-            <option value="">选择已连接账号</option>
-            <option v-for="option in accountOptions" :key="option.id" :value="option.id">{{ option.label }}</option>
-          </select>
-          <span v-if="!accountOptions.length" class="field-hint">还没有已连接账号，请先在列表中绑定并标记已连接。</span>
-        </label>
-        <label v-if="!manualEntry" class="field">
-          <span class="field-label">选择创作空间稿件</span>
-          <select v-model="publishForm.contentId" class="select" :disabled="articleLoading" @change="onSelectArticle">
-            <option value="">请选择要发布的稿件</option>
-            <option v-for="item in contents" :key="item.id" :value="item.id">{{ item.title }}</option>
-          </select>
-          <span v-if="!contents.length" class="field-hint">
-            创作空间还没有稿件，请先去创作空间写一篇，或切换为手动填写。
-          </span>
-          <span v-else class="field-hint">标题与正文会自动取自稿件的最新内容，无需重复输入。</span>
-        </label>
+    <n-modal v-model:show="showPublish" preset="card" title="新建发布任务" style="width: min(560px, calc(100vw - 32px))">
+      <p class="modal-desc">先预览校验，确认后才会入队。</p>
+      <n-form label-placement="top">
+        <n-form-item label="目标账号">
+          <n-select
+            v-model:value="publishForm.accountId"
+            :options="accountOptions"
+            placeholder="选择已连接账号"
+            :fallback-option="false"
+          />
+        </n-form-item>
+        <p v-if="!accountOptions.length" class="field-hint">还没有已连接账号，请先在列表中绑定并标记已连接。</p>
+        <n-form-item v-if="!manualEntry" label="选择创作空间稿件">
+          <n-select
+            v-model:value="publishForm.contentId"
+            :options="contentSelectOptions"
+            :loading="articleLoading"
+            :disabled="articleLoading"
+            placeholder="请选择要发布的稿件"
+            :fallback-option="false"
+            @update:value="onSelectArticle"
+          />
+        </n-form-item>
+        <p v-if="!manualEntry && !contents.length" class="field-hint">
+          创作空间还没有稿件，请先去创作空间写一篇，或切换为手动填写。
+        </p>
+        <p v-else-if="!manualEntry" class="field-hint">标题与正文会自动取自稿件的最新内容，无需重复输入。</p>
 
         <div v-if="selectedArticle && !manualEntry" class="card-flat article-preview">
           <div class="row row-tight">
             <strong>{{ selectedArticle.title }}</strong>
-            <span class="tag">{{ selectedArticle.status === 'published' ? '已发布' : '草稿' }}</span>
+            <n-tag size="small" round>{{ selectedArticle.status === 'published' ? '已发布' : '草稿' }}</n-tag>
           </div>
           <p class="article-excerpt">{{ (selectedArticle.draftBody ?? publishForm.body ?? '').slice(0, 160) || '稿件暂无正文' }}</p>
           <router-link class="article-link" :to="{ name: 'studio', query: { id: selectedArticle.id } }">
@@ -779,86 +841,95 @@ async function bindWechat() {
 
         <p v-if="articleLoading" class="field-hint">正在读取稿件内容…</p>
 
-        <label v-if="manualEntry" class="field">
-          <span class="field-label">标题</span>
-          <input v-model="publishForm.title" class="input" />
-        </label>
-        <label v-if="manualEntry" class="field">
-          <span class="field-label">正文</span>
-          <textarea v-model="publishForm.body" class="textarea" style="min-height: 120px" />
-        </label>
-        <button v-if="!manualEntry" type="button" class="link-btn" @click="manualEntry = true; publishForm.contentId = ''; selectedArticle = null">
+        <template v-if="manualEntry">
+          <n-form-item label="标题">
+            <n-input v-model:value="publishForm.title" />
+          </n-form-item>
+          <n-form-item label="正文">
+            <n-input v-model:value="publishForm.body" type="textarea" :autosize="{ minRows: 5, maxRows: 12 }" />
+          </n-form-item>
+        </template>
+        <n-button
+          v-if="!manualEntry"
+          text
+          type="primary"
+          size="small"
+          @click="manualEntry = true; publishForm.contentId = null; selectedArticle = null"
+        >
           没有对应稿件，改用手动填写
-        </button>
-        <button v-else type="button" class="link-btn" @click="manualEntry = false">
+        </n-button>
+        <n-button v-else text type="primary" size="small" @click="manualEntry = false">
           返回从创作空间选择稿件
-        </button>
-        <label class="field">
-          <span class="field-label">计划时间（可选）</span>
-          <input v-model="publishForm.scheduledAt" type="datetime-local" class="input" />
-        </label>
+        </n-button>
+        <n-form-item label="计划时间（可选）">
+          <n-date-picker v-model:value="scheduledAtTs" type="datetime" clearable style="width: 100%" />
+        </n-form-item>
+        <p class="field-hint">
+          本页只做「排期 + 手动发布」与结果回填。需要直接推送公众号草稿箱，请到创作空间右侧「发布」面板操作。
+        </p>
 
-        <div class="field">
-          <span class="field-label">发布方式</span>
-          <p class="field-hint" style="margin: 0">
-            本页只做「排期 + 手动发布」与结果回填。需要直接推送公众号草稿箱，请到创作空间右侧「发布」面板操作。
-          </p>
-        </div>
+        <n-button secondary size="small" @click="doPreview">校验并预览</n-button>
 
-        <div class="row">
-          <button class="btn btn-ghost btn-sm" @click="doPreview">校验并预览</button>
-        </div>
-
-        <div v-if="previewResult" class="card-flat">
-          <div class="row row-tight">
-            <span class="tag">{{ previewResult.platformLabel }}</span>
-            <span v-if="previewResult.issues.length" class="tag tag-warning">{{ previewResult.issues.length }} 项待检查</span>
-            <span v-else class="tag tag-success">校验通过</span>
-          </div>
-          <ul v-if="previewResult.issues.length" style="margin: var(--space-2) 0 0; padding-left: 18px; font-size: var(--font-sm)">
-            <li v-for="(issue, index) in previewResult.issues" :key="index">
-              {{ issue.message }}
-            </li>
+        <div v-if="previewResult" class="card-flat" style="margin-top: 12px">
+          <n-space :size="6">
+            <n-tag size="small" round>{{ previewResult.platformLabel }}</n-tag>
+            <n-tag v-if="previewResult.issues.length" size="small" round type="warning">{{ previewResult.issues.length }} 项待检查</n-tag>
+            <n-tag v-else size="small" round type="success">校验通过</n-tag>
+          </n-space>
+          <ul v-if="previewResult.issues.length" class="preview-issues">
+            <li v-for="(issue, index) in previewResult.issues" :key="index">{{ issue.message }}</li>
           </ul>
         </div>
 
-        <p v-if="publishError" class="field-error" role="alert">{{ publishError }}</p>
+        <n-alert v-if="publishError" type="error" :bordered="false" style="margin-top: 12px">{{ publishError }}</n-alert>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary @click="showPublish = false">取消</n-button>
+          <n-button
+            type="primary"
+            :disabled="!publishForm.accountId || (!manualEntry && !publishForm.contentId) || articleLoading"
+            @click="submitJob"
+          >
+            确认并提交
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
 
-        <div class="row">
-          <div class="spacer" />
-          <button class="btn btn-ghost" @click="showPublish = false">取消</button>
-          <button class="btn" :disabled="!publishForm.accountId || (!manualEntry && !publishForm.contentId) || articleLoading" @click="submitJob">确认并提交</button>
-        </div>
-      </div>
-    </AppModal>
-
-    <AppModal
-      v-if="recordingJob"
-      title="回填手动发布结果"
-      description="你在平台侧发布完成后填写；此处记录会标注来源为手动。"
-      @close="recordingJob = null"
-    >
-      <div class="stack">
-        <label class="field">
-          <span class="field-label">平台内容 ID（可选）</span>
-          <input v-model="recordForm.remoteContentId" class="input" placeholder="平台返回的帖子 ID" />
-        </label>
-        <label class="field">
-          <span class="field-label">链接（可选）</span>
-          <input v-model="recordForm.permalink" class="input" placeholder="https://" />
-        </label>
-        <div class="row">
-          <div class="spacer" />
-          <button class="btn btn-ghost" @click="recordingJob = null">取消</button>
-          <button class="btn" @click="submitRecord">确认回填</button>
-        </div>
-      </div>
-    </AppModal>
+    <n-modal :show="!!recordingJob" preset="card" title="回填手动发布结果" style="width: min(480px, calc(100vw - 32px))" @update:show="(value) => { if (!value) recordingJob = null }">
+      <p class="modal-desc">你在平台侧发布完成后填写；此处记录会标注来源为手动。</p>
+      <n-form label-placement="top">
+        <n-form-item label="平台内容 ID（可选）">
+          <n-input v-model:value="recordForm.remoteContentId" placeholder="平台返回的帖子 ID" />
+        </n-form-item>
+        <n-form-item label="链接（可选）">
+          <n-input v-model:value="recordForm.permalink" placeholder="https://" />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary @click="recordingJob = null">取消</n-button>
+          <n-button type="primary" @click="submitRecord">确认回填</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 
 <style scoped>
-/* 稿件关联 */
+.modal-desc {
+  margin: 0 0 12px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-xs);
+  line-height: 1.6;
+}
+
+.preview-issues {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: var(--font-sm);
+}
 .job-article-link {
   color: var(--color-text-primary);
   text-decoration: none;
@@ -930,27 +1001,154 @@ async function bindWechat() {
   font-weight: 600;
 }
 
-.platform-grid {
+.platform-layout {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  grid-template-columns: minmax(208px, 252px) minmax(0, 1fr);
   gap: var(--space-3);
+  align-items: start;
 }
 
-.platform-card {
+.platform-layout-loading {
+  min-height: 420px;
+}
+
+.platform-sidebar,
+.platform-detail {
+  min-width: 0;
+}
+
+.platform-sidebar {
+  position: sticky;
+  top: var(--space-3);
+  padding: var(--space-3);
+}
+
+.platform-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 2px 4px var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.platform-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
+}
+
+.platform-nav {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: 4px;
+  padding-top: var(--space-2);
 }
 
-.platform-card.is-unavailable {
-  opacity: 0.72;
+.platform-nav-item {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 8px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease;
 }
 
-.platform-card-head {
+.platform-nav-item:hover {
+  border-color: var(--color-border);
+  background: var(--color-surface-raised);
+}
+
+.platform-nav-item.is-active {
+  border-color: color-mix(in srgb, var(--color-accent) 32%, var(--color-border));
+  background: var(--color-accent-soft);
+}
+
+.platform-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-text-secondary);
+  font-size: var(--font-sm);
+  font-weight: 700;
+}
+
+.platform-nav-item.is-active .platform-nav-icon {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.platform-nav-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.platform-nav-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.platform-nav-copy small {
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
+}
+
+.platform-nav-state {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+}
+
+.platform-nav-state.is-ready {
+  background: var(--color-success, #18a058);
+}
+
+.platform-detail {
+  display: flex;
+  min-height: 420px;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.platform-detail-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.platform-detail-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .platform-capabilities {
@@ -959,47 +1157,49 @@ async function bindWechat() {
   gap: 6px;
 }
 
+.platform-detail-body {
+  min-width: 0;
+}
+
+.platform-detail-body :deep(.platform-card) {
+  gap: var(--space-3);
+}
+
 .platform-unavailable {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-3);
+  gap: var(--space-3);
+  padding: var(--space-4);
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   font-size: var(--font-xs);
 }
 
-/* 平台账号专属配置 */
-.account-egress {
+.platform-detail-empty > div {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.platform-detail-empty strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-sm);
+}
+
+.platform-sidebar-skeleton,
+.platform-detail-skeleton {
+  min-height: 420px;
+}
+
+.job-row {
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-  padding: 7px 9px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-raised);
-  font-size: 11px;
+  align-items: flex-start;
 }
 
-.account-egress code {
-  padding: 2px 5px;
-  border-radius: 3px;
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-  font-family: 'JetBrains Mono', Consolas, monospace;
-}
-
-.account-egress-muted,
-.account-egress-hint {
-  color: var(--color-text-muted);
-}
-
-.account-egress-hint {
-  flex-basis: 100%;
+.job-row > .btn {
+  margin-top: 2px;
 }
 
 /* 服务器出口 IP 卡片 */
@@ -1040,11 +1240,11 @@ async function bindWechat() {
 .queue-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   gap: var(--space-3);
   margin-bottom: var(--space-3);
-  padding: var(--space-3) 0;
-  border-top: 1px solid var(--color-border);
+  padding: var(--space-2) 0;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -1076,14 +1276,20 @@ async function bindWechat() {
 
 .queue-filters .select-sm,
 .queue-filters .input-sm {
+  width: auto;
   height: 30px;
+  min-height: 30px;
   padding-top: 4px;
   padding-bottom: 4px;
   font-size: var(--font-xs);
 }
 
+.queue-filters .select-sm {
+  max-width: 180px;
+}
+
 .queue-search {
-  width: 150px;
+  width: 180px;
 }
 
 .section-head {
@@ -1175,8 +1381,17 @@ async function bindWechat() {
     flex-direction: column;
   }
 
-  .platform-grid {
+  .platform-layout {
     grid-template-columns: 1fr;
+  }
+
+  .platform-sidebar {
+    position: static;
+  }
+
+  .platform-nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -1196,6 +1411,18 @@ async function bindWechat() {
 
   .queue-search {
     width: auto;
+  }
+
+  .platform-detail {
+    padding: var(--space-3);
+  }
+
+  .platform-detail-head {
+    flex-direction: column;
+  }
+
+  .platform-nav {
+    grid-template-columns: 1fr;
   }
 }
 </style>

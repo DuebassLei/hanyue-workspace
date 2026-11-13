@@ -31,8 +31,10 @@ TERMINAL = {SUCCEEDED, CANCELLED}
 
 _TRANSITIONS: dict[str, set[str]] = {
     PENDING_REVIEW: {APPROVED, CANCELLED},
-    APPROVED: {QUEUED, CANCELLED, NEEDS_ATTENTION},
-    QUEUED: {PUBLISHING, CANCELLED, FAILED, NEEDS_ATTENTION},
+    # APPROVED → PUBLISHING：Worker 领取任务后立即标记执行中（真实发生在 job_runner）
+    APPROVED: {QUEUED, PUBLISHING, CANCELLED, NEEDS_ATTENTION},
+    # QUEUED → APPROVED：排期到点自动提升（_promote_due_jobs）
+    QUEUED: {APPROVED, PUBLISHING, CANCELLED, FAILED, NEEDS_ATTENTION},
     PUBLISHING: {SUCCEEDED, FAILED, NEEDS_ATTENTION, CANCELLED},
     NEEDS_ATTENTION: {SUCCEEDED, FAILED, QUEUED, CANCELLED},
     FAILED: {QUEUED, CANCELLED, NEEDS_ATTENTION},
@@ -65,6 +67,45 @@ def can_record_manual_result(current: str) -> bool:
 def assert_transition(current: str, target: str) -> str:
     if not can_transition(current, target):
         raise TransitionError(f"非法状态流转：{current} → {target}")
+    return target
+
+
+# ---------------- 状态流转历史（发布中心重构 P1）----------------
+# status_history 每条：{"status", "at", "actor", "note"}
+# actor: "user"（界面上的人工操作）| "system"（队列 / 调度等自动流转）
+
+
+def history_entry(status: str, *, actor: str = "system", note: str | None = None) -> dict:
+    from datetime import datetime, timezone
+
+    return {
+        "status": status,
+        "at": datetime.now(timezone.utc).isoformat(),
+        "actor": actor,
+        "note": note or "",
+    }
+
+
+def initial_history(status: str, *, actor: str = "user", note: str | None = None) -> list[dict]:
+    """任务创建时的第一条历史记录。"""
+    return [history_entry(status, actor=actor, note=note)]
+
+
+def record_history(job, status: str, *, actor: str = "system", note: str | None = None) -> None:
+    """只追加历史，不做状态机校验。
+
+    用于两类场景：一是流转本身不经过 assert_transition 的既有策略路径
+    （如手动回填 MANUAL_RECORDABLE）；二是状态不变但需要留痕的操作
+    （如改期、修改内容）。必须整体赋值新列表，JSON 列的原地修改不会被 SQLAlchemy 追踪。
+    """
+    job.status_history = [*(job.status_history or []), history_entry(status, actor=actor, note=note)]
+
+
+def apply_transition(job, target: str, *, actor: str = "system", note: str | None = None) -> str:
+    """校验流转合法性、写状态并追加历史；非法流转抛 TransitionError。"""
+    assert_transition(job.status, target)
+    job.status = target
+    record_history(job, target, actor=actor, note=note)
     return target
 
 

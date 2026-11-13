@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { NButton } from 'naive-ui'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -163,10 +164,10 @@ onBeforeUnmount(() => {
             }}
           </span>
           <div class="foot-actions">
-            <button class="btn btn-ghost btn-sm" @click="emit('trigger-server-test')" :disabled="isSyncing">
+            <n-button size="small" quaternary :disabled="isSyncing" @click="emit('trigger-server-test')">
               调用一次接口
-            </button>
-            <button class="btn btn-sm" @click="emit('close')">关闭</button>
+            </n-button>
+            <n-button size="small" type="primary" @click="emit('close')">关闭</n-button>
           </div>
         </footer>
       </div>

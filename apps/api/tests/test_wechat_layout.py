@@ -150,6 +150,69 @@ def test_theme_changes_output_style():
     assert default != blue
 
 
+def test_row_blocks_keep_content_and_stay_wechat_safe():
+    from app.services import wechat_layout
+
+    body = (
+        ":::lead\n先说结论，再展开。\n:::\n\n"
+        ":::stat\n12% | 转化率\n3 | 倍增速\n:::\n\n"
+        ":::steps\n定问题 | 先写清楚要回答什么\n找证据 | 每个数字都要有出处\n:::\n\n"
+        ":::compare 旧做法 / 新做法\n凭感觉 | 先核对来源\n:::\n\n"
+        ":::layers\n现象 | 阅读量掉了\n原因 | 标题没有承诺\n:::\n\n"
+        ":::checklist\ndone | 核对数字\nmaybe | 补一张图\n:::\n\n"
+        ":::quote-card 某位编辑\n这句话值得单独留下。\n:::\n"
+    )
+    result = wechat_layout.render_document(body, None, [])
+    html = result["html"]
+    for text in (
+        "先说结论",
+        "12%",
+        "转化率",
+        "定问题",
+        "找证据",
+        "凭感觉",
+        "先核对来源",
+        "阅读量掉了",
+        "核对数字",
+        "补一张图",
+        "这句话值得单独留下",
+        "某位编辑",
+    ):
+        assert text in html
+    assert "tabular-nums" in html
+    assert "border-radius:999px" in html
+    assert ">1<" in html and ">2<" in html
+    assert "✓" in html
+    assert "○" in html  # 不认识的状态默认空心圆，正文不掉进标记列
+    for forbidden in ("<style", "<script", "<div", "<h1", "<table", "class=", " id="):
+        assert forbidden not in html
+    assert wechat_layout.lint_html(html) == [] or all(
+        item["level"] != "error" for item in wechat_layout.lint_html(html)
+    )
+
+
+def test_new_heading_styles_and_presets_normalize():
+    from app.services import wechat_layout
+
+    for theme_id in ("news-ink", "paper-cinnabar", "magazine-slate", "friendly-pill"):
+        tokens = wechat_layout.PRESET_THEMES[theme_id]["tokens"]
+        normalized = wechat_layout.normalize_tokens(tokens)
+        html = wechat_layout.render_document("# 主标题\n\n## 小标题\n\n- 一条", normalized, [])["html"]
+        assert "主标题" in html and "小标题" in html
+        for forbidden in ("<div", "<h1", "<h2", "<style", "class="):
+            assert forbidden not in html
+    pill = wechat_layout.render_document(
+        "# 主标题\n\n## 小标题",
+        wechat_layout.PRESET_THEMES["friendly-pill"]["tokens"],
+        [],
+    )["html"]
+    assert pill.count("border-radius:999px") == 2
+    hairline = wechat_layout.render_document(
+        "## 小标题", wechat_layout.PRESET_THEMES["news-ink"]["tokens"], []
+    )["html"]
+    assert "0.8px solid" in hairline
+
+
 # ---------- 主题 API ----------
 
 
@@ -159,7 +222,7 @@ def test_theme_crud_and_preset_protection(client):
     assert listing.status_code == 200, listing.text
     data = listing.json()
     assert data["defaultThemeId"] == "ink-green"
-    assert len(data["presets"]) == 6
+    assert len(data["presets"]) == 10
     assert all(item["editable"] is False for item in data["presets"])
 
     created = client.post(

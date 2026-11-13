@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { NAlert, NButton, NEmpty, NFormItem, NInput, NModal, NSelect, NSpace } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import { api, fetchBlobUrl } from '../api/client'
 import { useSessionStore } from '../stores/session'
@@ -23,7 +24,7 @@ const error = ref('')
 
 const colors = ref([])
 const colorId = ref('')
-const accentColorId = ref('')
+const accentColorId = ref(null)
 const theme = ref('')
 const composing = ref(false)
 const composed = ref(null)
@@ -33,6 +34,13 @@ const copied = ref('')
 // 风格提示词详情弹层
 const viewingStyle = ref(null)
 const detailLoading = ref(false)
+
+const showDetail = computed({
+  get: () => viewingStyle.value !== null,
+  set: (open) => {
+    if (!open) viewingStyle.value = null
+  },
+})
 
 // 弹层内展示的合成结果只认当前查看的风格
 const detailComposed = computed(
@@ -56,6 +64,11 @@ const activeColor = computed(() => colors.value.find((item) => item.id === color
 const activeAccent = computed(
   () => colors.value.find((item) => item.id === accentColorId.value) || null,
 )
+
+const accentOptions = computed(() => [
+  { label: '不指定', value: null },
+  ...colors.value.map((item) => ({ label: `${item.id} · ${item.nameZh}`, value: item.id })),
+])
 
 // 参考图与色卡接口需要 Bearer 令牌，<img src> 直连会 401，
 // 这里统一按需拉取二进制并缓存 object URL。
@@ -258,30 +271,30 @@ onBeforeUnmount(() => {
           从手绘风格库挑选画风与主题色，自动合成可直接出图的提示词。
         </p>
       </div>
-      <button class="btn btn-ghost" @click="goImages">去图片生成</button>
+      <n-button secondary @click="goImages">去图片生成</n-button>
     </div>
 
-    <div class="segmented prompt-tabs" role="tablist" aria-label="提示词库视图">
-      <button class="segmented-item" role="tab" aria-selected="false" @click="goPrompts">
+    <n-space class="prompt-tabs" role="tablist" aria-label="提示词库视图" :size="8">
+      <n-button secondary size="small" role="tab" aria-selected="false" @click="goPrompts">
         我的提示词
-      </button>
-      <button class="segmented-item is-active" role="tab" aria-selected="true" :disabled="true">
+      </n-button>
+      <n-button type="primary" size="small" role="tab" aria-selected="true" disabled>
         手绘风格
-      </button>
-    </div>
+      </n-button>
+    </n-space>
 
-    <div v-if="error" class="banner banner-danger" role="alert">{{ error }}</div>
+    <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
 
     <div class="handdraw-layout">
       <section class="card handdraw-main">
         <div class="row handdraw-toolbar">
-          <input
-            v-model="keyword"
-            class="input handdraw-search"
-            type="search"
+          <n-input
+            v-model:value="keyword"
+            class="handdraw-search"
+            clearable
             placeholder="搜索风格名称、作者或编号"
             aria-label="搜索手绘风格"
-            @input="onSearch"
+            @update:value="onSearch"
           />
           <div class="spacer" />
           <span class="field-hint">{{ total }} 种风格</span>
@@ -308,8 +321,7 @@ onBeforeUnmount(() => {
 
         <div v-if="loading && !styles.length" class="skeleton" style="height: 240px; margin-top: var(--space-3)" />
         <div v-else-if="!styles.length" class="empty">
-          <span class="empty-title">没有匹配的风格</span>
-          <span>换个关键词或切换分组再试试。</span>
+          <n-empty description="换个关键词或切换分组再试试。" />
         </div>
         <div v-else class="style-grid" :class="{ 'is-busy': loading }">
           <div
@@ -334,30 +346,29 @@ onBeforeUnmount(() => {
             <span class="style-meta">{{ item.number }}<template v-if="item.legacyNumber"> · {{ item.legacyNumber }}</template></span>
             <span class="style-meta">{{ item.referenceAuthor }}</span>
             <span class="style-actions">
-              <button class="btn btn-ghost btn-sm" @click.stop="openDetail(item)">查看提示词</button>
+              <n-button quaternary size="small" block @click.stop="openDetail(item)">查看提示词</n-button>
             </span>
           </div>
         </div>
 
         <div v-if="pages > 1" class="row handdraw-pager">
-          <button class="btn btn-ghost btn-sm" :disabled="page <= 1" @click="goPage(-1)">上一页</button>
+          <n-button secondary size="small" :disabled="page <= 1" @click="goPage(-1)">上一页</n-button>
           <span class="field-hint">{{ page }} / {{ pages }}</span>
-          <button class="btn btn-ghost btn-sm" :disabled="page >= pages" @click="goPage(1)">
+          <n-button secondary size="small" :disabled="page >= pages" @click="goPage(1)">
             下一页
-          </button>
+          </n-button>
         </div>
       </section>
 
       <aside class="card handdraw-side">
-        <label class="field">
-          <span class="field-label">画面主题</span>
-          <textarea
-            v-model="theme"
-            class="textarea"
-            style="min-height: 88px"
+        <n-form-item label="画面主题" label-placement="top" :show-feedback="false">
+          <n-input
+            v-model:value="theme"
+            type="textarea"
+            :autosize="{ minRows: 3 }"
             placeholder="例如：春日庭院里晒太阳的橘猫"
           />
-        </label>
+        </n-form-item>
 
         <div class="field">
           <span class="field-label">主题色</span>
@@ -386,29 +397,30 @@ onBeforeUnmount(() => {
           </span>
         </div>
 
-        <label class="field">
-          <span class="field-label">点缀色（可选）</span>
-          <select v-model="accentColorId" class="select">
-            <option value="">不指定</option>
-            <option v-for="item in colors" :key="item.id" :value="item.id">
-              {{ item.id }} · {{ item.nameZh }}
-            </option>
-          </select>
+        <n-form-item label="点缀色（可选）" label-placement="top" :show-feedback="false">
+          <n-select
+            v-model:value="accentColorId"
+            :options="accentOptions"
+            placeholder="不指定"
+            clearable
+          />
           <span v-if="activeAccent" class="field-hint">点缀：{{ activeAccent.nameZh }}</span>
-        </label>
+        </n-form-item>
 
         <div class="row">
-          <button v-if="pendingStyle" class="btn btn-ghost btn-sm" @click="viewFromSide">
+          <n-button v-if="pendingStyle" quaternary size="small" @click="viewFromSide">
             查看提示词
-          </button>
+          </n-button>
           <div class="spacer" />
-          <button
-            class="btn btn-sm"
+          <n-button
+            type="primary"
+            size="small"
+            :loading="composing"
             :disabled="composing || !theme.trim() || !pendingStyle"
             @click="pendingStyle && compose(pendingStyle)"
           >
             {{ pendingStyle ? '合成提示词' : '先选一种风格' }}
-          </button>
+          </n-button>
         </div>
 
         <div v-if="composed" class="compose-result">
@@ -425,9 +437,9 @@ onBeforeUnmount(() => {
             <div class="row">
               <span class="field-label">中文提示词</span>
               <div class="spacer" />
-              <button class="btn btn-ghost btn-sm" @click="copyText(composed.promptZh, 'zh')">
+              <n-button quaternary size="small" @click="copyText(composed.promptZh, 'zh')">
                 {{ copied === 'zh' ? '已复制' : '复制' }}
-              </button>
+              </n-button>
             </div>
             <p class="compose-prompt">{{ composed.promptZh }}</p>
           </div>
@@ -435,9 +447,9 @@ onBeforeUnmount(() => {
             <div class="row">
               <span class="field-label">English prompt</span>
               <div class="spacer" />
-              <button class="btn btn-ghost btn-sm" @click="copyText(composed.promptEn, 'en')">
+              <n-button quaternary size="small" @click="copyText(composed.promptEn, 'en')">
                 {{ copied === 'en' ? '已复制' : '复制' }}
-              </button>
+              </n-button>
             </div>
             <p class="compose-prompt">{{ composed.promptEn }}</p>
           </div>
@@ -453,19 +465,20 @@ onBeforeUnmount(() => {
       </aside>
     </div>
 
-    <div v-if="viewingStyle" class="modal-backdrop" @click.self="closeDetail">
-      <div class="modal handdraw-detail" role="dialog" aria-modal="true" aria-label="风格提示词详情">
+    <n-modal
+      v-model:show="showDetail"
+      preset="card"
+      :title="viewingStyle?.generationName || '风格提示词详情'"
+      style="width: min(760px, calc(100vw - 32px))"
+      :mask-closable="!composing"
+    >
+      <template v-if="viewingStyle">
         <div class="row detail-head">
-          <div>
-            <h2 class="modal-title">{{ viewingStyle.generationName }}</h2>
-            <span class="field-hint">
-              {{ viewingStyle.number
-              }}<template v-if="viewingStyle.legacyNumber"> · {{ viewingStyle.legacyNumber }}</template>
-              · {{ viewingStyle.referenceAuthor }}
-            </span>
-          </div>
-          <div class="spacer" />
-          <button class="btn btn-ghost btn-sm" @click="closeDetail">关闭</button>
+          <span class="field-hint">
+            {{ viewingStyle.number
+            }}<template v-if="viewingStyle.legacyNumber"> · {{ viewingStyle.legacyNumber }}</template>
+            · {{ viewingStyle.referenceAuthor }}
+          </span>
         </div>
 
         <div class="detail-body">
@@ -503,18 +516,20 @@ onBeforeUnmount(() => {
           <div class="row">
             <span class="field-label">画面主题</span>
             <div class="spacer" />
-            <button
-              class="btn btn-sm"
+            <n-button
+              type="primary"
+              size="small"
+              :loading="composing"
               :disabled="composing || !theme.trim()"
               @click="compose(viewingStyle)"
             >
               {{ detailComposed ? '重新合成' : '合成提示词' }}
-            </button>
+            </n-button>
           </div>
-          <textarea
-            v-model="theme"
-            class="textarea"
-            style="min-height: 72px"
+          <n-input
+            v-model:value="theme"
+            type="textarea"
+            :autosize="{ minRows: 3 }"
             placeholder="填写画面主题后即可看到完整提示词"
           />
         </div>
@@ -524,9 +539,9 @@ onBeforeUnmount(() => {
             <div class="row">
               <span class="field-label">中文提示词</span>
               <div class="spacer" />
-              <button class="btn btn-ghost btn-sm" @click="copyText(composed.promptZh, 'zh')">
+              <n-button quaternary size="small" @click="copyText(composed.promptZh, 'zh')">
                 {{ copied === 'zh' ? '已复制' : '复制' }}
-              </button>
+              </n-button>
             </div>
             <p class="compose-prompt">{{ composed.promptZh }}</p>
           </div>
@@ -534,20 +549,25 @@ onBeforeUnmount(() => {
             <div class="row">
               <span class="field-label">English prompt</span>
               <div class="spacer" />
-              <button class="btn btn-ghost btn-sm" @click="copyText(composed.promptEn, 'en')">
+              <n-button quaternary size="small" @click="copyText(composed.promptEn, 'en')">
                 {{ copied === 'en' ? '已复制' : '复制' }}
-              </button>
+              </n-button>
             </div>
             <p class="compose-prompt">{{ composed.promptEn }}</p>
           </div>
           <div class="row">
             <div class="spacer" />
-            <button class="btn btn-sm" @click="goImages">用这个风格去生图</button>
+            <n-button type="primary" size="small" @click="goImages">用这个风格去生图</n-button>
           </div>
         </div>
         <p v-else class="field-hint">填写主题并合成后，可在这里查看完整中英文提示词。</p>
-      </div>
-    </div>
+      </template>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary @click="closeDetail">关闭</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -639,24 +659,15 @@ onBeforeUnmount(() => {
 .style-actions {
   margin-top: 2px;
 }
-.style-actions .btn {
-  width: 100%;
-  justify-content: center;
-}
-.handdraw-detail {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  width: min(760px, 100%);
-}
-.detail-head .modal-title {
-  margin-bottom: 2px;
+.detail-head {
+  margin-bottom: var(--space-2);
 }
 .detail-body {
   display: grid;
   grid-template-columns: 200px minmax(0, 1fr);
   gap: var(--space-3);
   align-items: start;
+  margin-bottom: var(--space-3);
 }
 .detail-ref {
   display: flex;

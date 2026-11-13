@@ -27,11 +27,13 @@ from .modules import (
     preferences,
     prompts,
     publishing,
+    skills,
     topics,
     wechat_mp,
     workspaces,
 )
 from .services import handdraw as handdraw_import
+from .services import skill_registry
 
 settings = get_settings()
 configure_logging(settings)
@@ -43,6 +45,8 @@ async def lifespan(app: FastAPI):
     init_db()
     with SessionLocal() as session:
         handdraw_import.import_library(session)
+        # 内置 Skill 在启动时同步；读接口不再承担写库/迁移职责
+        skill_registry.sync_builtin_skills(session)
     publishing.sweep_legacy_platform_accounts()
     # 线程池后端没有独立 Worker：API 重启后自己回收崩溃遗留的 running 任务，
     # 并重投启动前创建、尚未开始的任务。Redis 后端由 Worker 负责，避免重复投递。
@@ -85,6 +89,7 @@ for module in (
     platform_auth,
     wechat_mp,
     agent,
+    skills,
     dashboard,
     jobs,
     cards,

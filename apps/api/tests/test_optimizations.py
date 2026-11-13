@@ -205,7 +205,8 @@ def test_workspace_current_is_not_shadowed_by_path_param(client):
     assert client.get(f"/api/v1/workspaces/{second['id']}/topics", headers=headers).status_code in (404, 405)
 
 
-def test_registered_skill_has_real_checksum_and_is_untrusted(client):
+def test_registered_skill_is_owned_trusted_and_checksummed(client):
+    """用户自建 Skill 归属本人、默认可信，checksum 覆盖 manifest/tools/version。"""
     headers = _login(client, "skill-user")
     res = client.post(
         "/api/v1/skills",
@@ -220,8 +221,20 @@ def test_registered_skill_has_real_checksum_and_is_untrusted(client):
     assert res.status_code == 201, res.text
     body = res.json()
     assert len(body["checksum"]) == 64
-    assert body["trustStatus"] == "untrusted"
+    assert body["trustStatus"] == "trusted"
     assert body["enabled"] is False
+
+    # 本人可启用；他人看不到
+    enabled = client.patch(
+        f"/api/v1/skills/{body['id']}",
+        json={"enabled": True, "grantedToolIds": ["read_content"]},
+        headers=headers,
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+    other = _login(client, "skill-other")
+    keys = [s["skillKey"] for s in client.get("/api/v1/skills", headers=other).json()]
+    assert "custom-check-skill" not in keys
 
 
 # ---------------- 上传会话 ----------------

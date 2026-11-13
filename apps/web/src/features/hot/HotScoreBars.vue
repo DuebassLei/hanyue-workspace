@@ -4,6 +4,8 @@ import { computed } from 'vue'
 const props = defineProps({
   detail: { type: Object, default: () => ({}) },
   degraded: { type: Array, default: () => [] },
+  // 'stack'：五维各占一行（详情用）；'compact'：挤进一行（列表卡片用，省纵向空间）
+  variant: { type: String, default: 'stack' },
 })
 
 const lack = computed(() => {
@@ -73,7 +75,7 @@ const dims = computed(() => {
 </script>
 
 <template>
-  <div class="score-bars">
+  <div class="score-bars" :class="{ 'is-compact': variant === 'compact' }">
     <div v-for="dim in dims" :key="dim.key" class="bar-row" :title="dim.tip">
       <span class="bar-label">{{ dim.label }}</span>
       <span class="bar-wrap" :class="{ 'is-unknown': dim.unknown }">
@@ -138,5 +140,47 @@ const dims = computed(() => {
 .bar-note {
   color: var(--color-text-muted);
   white-space: nowrap;
+}
+
+/* 紧凑版：五个维度排成一行，每格「标签 + 短条 + 分数」。
+   证据仍靠悬浮提示，点「展开原文」能看到完整明细，信息一点没少。 */
+/* 紧凑版可以压缩：事实行放得下就贴右，放不下才整组换行。
+   内层行保持 nowrap，否则标签和条会被拆到两行。 */
+.score-bars.is-compact {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px var(--space-3);
+  /* 按内容撑开宽度：父级用 :where() 掉进这条规则时（0 特异性），
+     不至于被 flex-basis:0 压成一条窄带 */
+  width: max-content;
+  max-width: 100%;
+}
+.is-compact .bar-row {
+  flex: 0 1 auto;
+  gap: 4px;
+  white-space: nowrap;
+}
+.is-compact .bar-label {
+  width: auto;
+}
+.is-compact .bar-wrap {
+  width: 40px;
+  height: 5px;
+}
+.is-compact .bar-num {
+  width: auto;
+  min-width: 14px;
+  text-align: left;
+}
+@media (max-width: 560px) {
+  /* 窄屏放不下五格：条缩到最小，仍允许换行（奇数项奇怪时宁可折成两行） */
+  .is-compact {
+    gap: 2px var(--space-2);
+    flex-wrap: wrap;
+  }
+  .is-compact .bar-wrap {
+    width: 28px;
+  }
 }
 </style>

@@ -130,6 +130,15 @@ export const useSessionStore = defineStore('session', {
           this.themeSyncError = `主题已在本机生效，但未能同步到服务端：${err.message}`
         })
     },
+    /** 资料保存后同步到全局：顶栏头像、署名、设置页都读同一份 user。 */
+    applyUser(user) {
+      if (user) this.user = user
+    },
+    /** 顶栏提示条已把详情收进账号面板：点掉只清展示，接口失败仍然会重新出现。 */
+    dismissAlerts() {
+      this.error = ''
+      this.themeSyncError = ''
+    },
     async logout() {
       try {
         await api.post('/auth/logout')

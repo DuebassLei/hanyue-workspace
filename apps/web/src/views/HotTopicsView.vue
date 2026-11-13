@@ -1,7 +1,18 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import {
+  NAlert,
+  NButton,
+  NCheckbox,
+  NDatePicker,
+  NEmpty,
+  NInput,
+  NSelect,
+  NSpace,
+} from 'naive-ui'
 import { api } from '../api/client'
+import { toast } from '../ui/feedback'
 import HotClusterCard from '../features/hot/HotClusterCard.vue'
 import HotPlatformTabs from '../features/hot/HotPlatformTabs.vue'
 
@@ -15,7 +26,6 @@ const sources = ref({ platforms: [], enabled: [] })
 const loading = ref(true)
 const refreshing = ref(false)
 const error = ref('')
-const notice = ref('')
 const busyId = ref('')
 const openId = ref('')
 const detailCache = reactive({})
@@ -43,6 +53,34 @@ function showMore() {
 let searchTimer = null
 
 const trackOptions = computed(() => Object.keys(summary.value.tracks || {}).sort())
+const scoreOptions = [
+  { value: 0, label: '全部分数' },
+  { value: 40, label: '40+ 备用' },
+  { value: 55, label: '55+ 可做' },
+  { value: 70, label: '70+ 强烈推荐' },
+]
+const sortOptions = [
+  { value: 'score', label: '价值优先' },
+  { value: 'time', label: '最新优先' },
+  { value: 'resonance', label: '共振优先' },
+]
+const trackSelectOptions = computed(() => [
+  { value: '', label: '全部赛道' },
+  ...trackOptions.value.map((track) => ({ value: track, label: track })),
+])
+const dateTs = computed({
+  get: () => (filters.date ? Date.parse(`${filters.date}T00:00:00`) : null),
+  set: (value) => {
+    if (!value) {
+      filters.date = ''
+      return
+    }
+    const d = new Date(value)
+    const month = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    filters.date = `${d.getFullYear()}-${month}-${day}`
+  },
+})
 
 // 平台切换条：条数来自服务端 summary（当天该平台的事件数），
 // 切过去之前就知道会看到多少条，不用点进去撞空列表。
@@ -165,12 +203,12 @@ async function loadAll() {
 async function refreshTopics() {
   refreshing.value = true
   error.value = ''
-  notice.value = ''
   try {
     const result = await api.post('/hot-topics/refresh', {})
-    notice.value =
+    toast(
       `已刷新 ${result.day}：${result.items} 条素材 → ${result.clusters} 个事件` +
-      (result.notes && result.notes.length ? `（${result.notes.join('；')}）` : '')
+        (result.notes && result.notes.length ? `（${result.notes.join('；')}）` : ''),
+    )
     // 重新采集后筛选条件可能把新数据挡住，重置日期筛选
     filters.date = ''
     await Promise.all([loadClusters(), loadMeta()])
@@ -204,7 +242,7 @@ async function writeFromCluster(cluster) {
   error.value = ''
   try {
     const item = await api.post(`/hot-topics/clusters/${cluster.id}/draft`, {})
-    notice.value = `已新建稿件「${item.title}」，正在跳转到创作空间`
+    toast(`已新建稿件「${item.title}」，正在跳转到创作空间`)
     router.push({ name: 'studio', query: { id: item.id } })
   } catch (err) {
     error.value = err.message
@@ -222,7 +260,7 @@ async function toggleIgnore(cluster) {
     const index = clusters.value.findIndex((row) => row.id === cluster.id)
     if (index >= 0) clusters.value[index] = updated
     if (detailCache[cluster.id]) detailCache[cluster.id] = { ...detailCache[cluster.id], ...updated }
-    notice.value = next === 'ignored' ? '已忽略这条热点' : '已恢复到列表'
+    toast(next === 'ignored' ? '已忽略这条热点' : '已恢复到列表')
   } catch (err) {
     error.value = err.message
   } finally {
@@ -260,19 +298,17 @@ onMounted(loadAll)
     <div class="page-head">
       <div>
         <h1 class="page-title">热点选题</h1>
+        <!-- 定位说明只说一遍：topbar 和标题重复，会白占一屏里最贵的两行 -->
         <p class="page-sub">
-          「每日热榜」回答今天大家搜什么；这里回答我该写哪一个。分数与档位由服务端算好原样展示，前端只排序、筛选、成稿。
+          今天大家搜什么 → 我该写哪一个。分数由服务端算好，悬停分数条看证据。
         </p>
       </div>
-      <div class="row row-tight">
-        <button class="btn btn-ghost" :disabled="refreshing || loading" @click="refreshTopics">
-          {{ refreshing ? '采集中…' : '刷新并评分' }}
-        </button>
-      </div>
+      <n-button secondary :loading="refreshing" :disabled="loading" @click="refreshTopics">
+        刷新并评分
+      </n-button>
     </div>
 
-    <div v-if="error" class="banner banner-danger" role="alert">{{ error }}</div>
-    <div v-if="notice" class="banner banner-info" role="status">{{ notice }}</div>
+    <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
 
     <section class="card hot-stat">
       <div class="hot-stat-line">
@@ -295,11 +331,6 @@ onMounted(loadAll)
           :style="{ width: segment.pct + '%', background: segment.color }"
           :title="`${segment.name} ${segment.count} 个`"
         />
-      </div>
-      <div v-if="trackSegments.length" class="hot-track-legend">
-        <span v-for="segment in trackSegments" :key="segment.name">
-          {{ segment.name }} {{ segment.count }}
-        </span>
       </div>
 
       <p class="hot-stat-note">
@@ -329,70 +360,62 @@ onMounted(loadAll)
     </section>
 
     <section class="card hot-filters">
-      <input v-model="filters.date" class="input hot-date" type="date" aria-label="按日期筛选" />
-      <select v-model="filters.track" class="select" aria-label="按赛道筛选">
-        <option value="">全部赛道</option>
-        <option v-for="track in trackOptions" :key="track" :value="track">{{ track }}</option>
-      </select>
-      <select v-model.number="filters.minScore" class="select" aria-label="按分数筛选">
-        <option :value="0">全部分数</option>
-        <option :value="40">40+ 备用</option>
-        <option :value="55">55+ 可做</option>
-        <option :value="70">70+ 强烈推荐</option>
-      </select>
-      <select v-model="filters.sort" class="select" aria-label="排序方式">
-        <option value="score">价值优先</option>
-        <option value="time">最新优先</option>
-        <option value="resonance">共振优先</option>
-      </select>
-      <label class="hot-check">
-        <input v-model="filters.onlyNew" type="checkbox" />
-        只看未出稿
-      </label>
-      <input
-        v-model="filters.q"
-        class="input hot-search"
-        type="search"
+      <n-date-picker v-model:value="dateTs" type="date" clearable class="hot-date" />
+      <n-select
+        v-model:value="filters.track"
+        :options="trackSelectOptions"
+        class="hot-select"
+        aria-label="按赛道筛选"
+      />
+      <n-select
+        v-model:value="filters.minScore"
+        :options="scoreOptions"
+        class="hot-select"
+        aria-label="按分数筛选"
+      />
+      <n-select v-model:value="filters.sort" :options="sortOptions" class="hot-select" aria-label="排序方式" />
+      <n-checkbox v-model:checked="filters.onlyNew">只看未出稿</n-checkbox>
+      <div class="spacer" />
+      <span class="field-hint">{{ resultHint }}</span>
+      <n-button quaternary size="small" @click="resetFilters">清空</n-button>
+      <n-input
+        v-model:value="filters.q"
+        class="hot-search"
+        clearable
         placeholder="搜索事件标题…"
         aria-label="搜索事件"
       />
-      <div class="spacer" />
-      <span class="field-hint">{{ resultHint }}</span>
-      <button class="btn btn-ghost btn-sm" @click="resetFilters">清空</button>
     </section>
 
     <div v-if="loading" class="stack">
       <div v-for="i in 3" :key="i" class="skeleton" style="height: 150px" />
     </div>
 
-    <!-- 用当天总数判断「有没有数据」，不能用筛选后的列表：搜索/评分把结果挡光时
-         不该显示「还没有热点数据」并催人去采集。 -->
-    <div v-else-if="!summary.clusters" class="empty">
-      <span class="empty-title">还没有热点数据</span>
-      <span>点右上角「刷新并评分」，会抓取今日头条、百度、抖音、微博、知乎与 AI 资讯，合并同一事件后打分。</span>
-      <button class="btn btn-sm" :disabled="refreshing" @click="refreshTopics">
-        {{ refreshing ? '采集中…' : '现在采集' }}
-      </button>
-    </div>
+    <n-empty v-else-if="!summary.clusters" description="点右上角「刷新并评分」，会抓取今日头条、百度、抖音、微博、知乎与 AI 资讯，合并同一事件后打分。">
+      <template #extra>
+        <n-button type="primary" size="small" :loading="refreshing" @click="refreshTopics">现在采集</n-button>
+      </template>
+    </n-empty>
 
-    <div v-else-if="!visible.length" class="empty">
-      <template v-if="filters.platform">
-        <span class="empty-title">「{{ filters.platform }}」下没有符合条件的事件</span>
-        <span v-if="summary.platforms?.[filters.platform]">
-          这个平台今天有 {{ summary.platforms[filters.platform] }} 个事件，可能都被筛选条件挡住了。
-        </span>
-        <span v-else>今天这一路没采到事件（可能采集失败），换一个平台看看。</span>
-        <div class="row row-tight">
-          <button class="btn btn-sm" @click="filters.platform = ''">看全部平台</button>
-          <button class="btn btn-ghost btn-sm" @click="resetFilters">清空筛选</button>
-        </div>
+    <n-empty v-else-if="!visible.length">
+      <template #default>
+        <template v-if="filters.platform">
+          「{{ filters.platform }}」下没有符合条件的事件。
+          <span v-if="summary.platforms?.[filters.platform]">
+            这个平台今天有 {{ summary.platforms[filters.platform] }} 个事件，可能都被筛选条件挡住了。
+          </span>
+          <span v-else>今天这一路没采到事件（可能采集失败），换一个平台看看。</span>
+        </template>
+        <template v-else>没有符合条件的事件。取消「只看未出稿」，或清空筛选再试试。</template>
       </template>
-      <template v-else>
-        <span class="empty-title">没有符合条件的事件</span>
-        <span>取消「只看未出稿」，或清空筛选再试试。</span>
-        <button class="btn btn-ghost btn-sm" @click="resetFilters">清空筛选</button>
+      <template #extra>
+        <n-space v-if="filters.platform">
+          <n-button type="primary" size="small" @click="filters.platform = ''">看全部平台</n-button>
+          <n-button secondary size="small" @click="resetFilters">清空筛选</n-button>
+        </n-space>
+        <n-button v-else secondary size="small" @click="resetFilters">清空筛选</n-button>
       </template>
-    </div>
+    </n-empty>
 
     <div v-else class="hot-list">
       <HotClusterCard
@@ -411,7 +434,7 @@ onMounted(loadAll)
     </div>
 
     <div v-if="!loading && clusters.length >= limit && limit < 200" class="hot-more">
-      <button class="btn btn-ghost btn-sm" @click="showMore">显示更多</button>
+      <n-button secondary size="small" @click="showMore">显示更多</n-button>
     </div>
   </div>
 </template>
@@ -425,8 +448,8 @@ onMounted(loadAll)
 .hot-platform {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-3) var(--space-2);
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3) var(--space-1);
 }
 .hot-platform-head {
   display: flex;
@@ -472,13 +495,6 @@ onMounted(loadAll)
   display: block;
   height: 100%;
 }
-.hot-track-legend {
-  display: flex;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-  font-size: var(--font-xs);
-  color: var(--color-text-secondary);
-}
 .hot-stat-note {
   margin: 0;
   font-size: var(--font-xs);
@@ -486,23 +502,36 @@ onMounted(loadAll)
 }
 .hot-filters {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
-  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  /* 往下滚时筛选贴顶，换平台/改分数不用先滚回顶部 */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--color-surface);
 }
+/* 全部快速筛选排一行（桌面），搜索独占第二行；结果计数和清空在右侧。
+   以前七件东西挤一行，窄一点就折成三四行，粘顶后白占半屏。 */
 .hot-date {
-  width: 150px;
+  flex: 0 0 auto;
+  width: 160px;
 }
-/* .select 基础样式是 width:100%，在 flex-wrap 里会一行一个把筛选栏撑成四行 */
-.hot-filters .select {
+.hot-filters :deep(.hot-select) {
   width: auto;
-  flex: 1 1 128px;
-  max-width: 176px;
+  flex: 1 1 140px;
+  max-width: 180px;
 }
 .hot-search {
-  flex: 1 1 180px;
-  min-width: 140px;
-  max-width: 280px;
+  flex: 1 1 100%;
+  max-width: 360px;
+}
+@media (max-width: 560px) {
+  .hot-search {
+    order: -1;
+    flex-basis: 100%;
+  }
 }
 .hot-check {
   display: inline-flex;
@@ -516,7 +545,7 @@ onMounted(loadAll)
 .hot-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 .hot-more {
   display: flex;

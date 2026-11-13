@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import { NButton, NSpace } from 'naive-ui'
 import HotScoreBars from './HotScoreBars.vue'
 
 const props = defineProps({
@@ -70,47 +71,54 @@ const score = computed(() => Number(props.cluster.score) || 0)
           <span v-if="statusLabel" class="tag" :class="{ 'tag-success': cluster.status === 'generated' }">
             {{ statusLabel }}
           </span>
-        </div>
-
-        <div class="hot-chips">
-          <span v-for="platform in cluster.platforms || []" :key="platform" class="tag">{{ platform }}</span>
           <span v-for="flag in cluster.riskFlags || []" :key="flag" class="tag tag-danger">{{ flag }}</span>
         </div>
 
-        <div class="hot-meta">
-          <span>{{ cluster.track || '未判赛道' }}</span>
-          <span v-if="firstSeen">· 首见 {{ firstSeen }}</span>
-          <span>· 连续 {{ cluster.daysSeen || 1 }} 天</span>
-          <span>· 最高 {{ bestRank }}</span>
-          <span>· {{ cluster.itemCount || 0 }} 条原文</span>
-        </div>
+        <!-- 平台 | 赛道·名次 | 分数条 | 操作 挤成一行；放不下时分数条整组换行，
+             而不是把五格条压成窄条（见 .hot-facts 的 flex-basis 说明） -->
+        <div class="hot-facts">
+          <div class="hot-chips">
+            <span v-for="platform in cluster.platforms || []" :key="platform" class="tag">{{ platform }}</span>
+          </div>
 
-        <HotScoreBars :detail="cluster.scoreDetail || {}" :degraded="degraded" />
+          <div class="hot-meta">
+            <span>{{ cluster.track || '未判赛道' }}</span>
+            <span v-if="firstSeen">· 首见 {{ firstSeen }}</span>
+            <span>· 连续 {{ cluster.daysSeen || 1 }} 天</span>
+            <span>· 最高 {{ bestRank }}</span>
+            <span>· {{ cluster.itemCount || 0 }} 条原文</span>
+          </div>
 
-        <div class="hot-actions">
-          <button
-            class="btn btn-sm"
-            :disabled="busy || cluster.status === 'ignored'"
-            :title="cluster.status === 'ignored' ? '已忽略，先恢复再写' : '基于这条热点新建稿件'"
-            @click="emit('write', cluster)"
-          >
-            {{ busy ? '创建中…' : cluster.status === 'generated' ? '再写一篇' : '写这篇' }}
-          </button>
-          <button
-            class="btn btn-ghost btn-sm"
-            :disabled="busy"
-            @click="emit('ignore', cluster)"
-          >
-            {{ cluster.status === 'ignored' ? '恢复' : '忽略' }}
-          </button>
-          <button class="btn btn-ghost btn-sm" :disabled="detailLoading" @click="emit('toggle', cluster)">
-            {{ expanded ? '收起原文' : '展开原文' }}
-          </button>
-          <a
-            v-if="cluster.contentItemId"
-            class="hot-link"
-            :href="`/studio?id=${cluster.contentItemId}`"
-          >打开已生成的稿件 →</a>
+          <HotScoreBars
+            :detail="cluster.scoreDetail || {}"
+            :degraded="degraded"
+            variant="compact"
+            class="hot-bars"
+          />
+
+          <n-space class="hot-actions" :size="8" align="center">
+            <n-button
+              type="primary"
+              size="small"
+              :loading="busy"
+              :disabled="cluster.status === 'ignored'"
+              :title="cluster.status === 'ignored' ? '已忽略，先恢复再写' : '基于这条热点新建稿件'"
+              @click="emit('write', cluster)"
+            >
+              {{ cluster.status === 'generated' ? '再写一篇' : '写这篇' }}
+            </n-button>
+            <n-button secondary size="small" :disabled="busy" @click="emit('ignore', cluster)">
+              {{ cluster.status === 'ignored' ? '恢复' : '忽略' }}
+            </n-button>
+            <n-button secondary size="small" :loading="detailLoading" @click="emit('toggle', cluster)">
+              {{ expanded ? '收起原文' : '展开原文' }}
+            </n-button>
+            <a
+              v-if="cluster.contentItemId"
+              class="hot-link"
+              :href="`/studio?id=${cluster.contentItemId}`"
+            >打开已生成的稿件 →</a>
+          </n-space>
         </div>
       </div>
     </div>
@@ -146,11 +154,13 @@ const score = computed(() => Number(props.cluster.score) || 0)
 </template>
 
 <style scoped>
+/* 列表卡片是扫读用的：分数、标题、平台、证据挤在紧凑的两三行里，
+   一屏能看十来条；完整证据靠悬浮提示和「展开原文」。 */
 .hot-card {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
-  padding: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -168,11 +178,13 @@ const score = computed(() => Number(props.cluster.score) || 0)
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-width: 54px;
+  justify-content: center;
+  align-self: stretch;
+  min-width: 48px;
   line-height: 1.1;
 }
 .hot-score b {
-  font-size: 24px;
+  font-size: 22px;
   font-variant-numeric: tabular-nums;
 }
 .hot-grade {
@@ -184,7 +196,7 @@ const score = computed(() => Number(props.cluster.score) || 0)
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
 }
 .hot-title-row {
   display: flex;
@@ -194,9 +206,9 @@ const score = computed(() => Number(props.cluster.score) || 0)
 }
 .hot-title {
   margin: 0;
-  font-size: var(--font-section);
+  font-size: var(--font-body);
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 1.35;
 }
 .hot-chips {
   display: flex;
@@ -209,13 +221,79 @@ const score = computed(() => Number(props.cluster.score) || 0)
   flex-wrap: wrap;
   font-size: var(--font-xs);
   color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+/* 没判定赛道的条目会显示「未判赛道」再跟「· 首见」，开头那个「·」要藏掉 */
+.hot-meta > span:first-child + span::before {
+  content: none;
+}
+/* 操作按钮是卡片里最高的元素，砍掉 4px 每条省一行高度。
+   触控目标靠 ::after 撑到 40px：视觉变小，命中区域不变。 */
+.hot-actions .btn-sm {
+  position: relative;
+  height: 28px;
+  padding: 0;
+  background: none;
+  border-color: transparent;
+  color: var(--color-text-secondary);
+}
+.hot-actions .btn-sm::after {
+  content: '';
+  position: absolute;
+  inset: -6px -4px;
+}
+.hot-actions .btn-sm:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+/* 「写这篇」是主操作，保持实心按钮 */
+.hot-actions .btn-sm:first-child {
+  padding: 0 var(--space-3);
+  background: var(--color-accent);
+  border-color: transparent;
+  color: var(--color-on-accent);
+}
+.hot-actions .btn-sm:first-child:hover:not(:disabled) {
+  color: var(--color-on-accent);
+  text-decoration: none;
 }
 .hot-actions {
   display: flex;
   gap: var(--space-2);
   align-items: center;
+  margin-left: auto;
+}
+/* 事实行：平台 | 赛道·名次 | 分数条 | 操作。
+   每一项都是 flex-basis:auto，放不下时 flex-basis:0 的分数条先让位，
+   整组换到第二行，而不是把五格条压成窄条。 */
+.hot-facts {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
   flex-wrap: wrap;
-  margin-top: 2px;
+  min-width: 0;
+}
+.hot-facts > * {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+@media (max-width: 900px) {
+  .hot-meta {
+    display: none;
+  }
+}
+@media (max-width: 560px) {
+  /* 窄屏：平台一行、五个分数一行、操作一行；分数条独占整行才放得下。
+     顺序要按 DOM 顺序写（平台/分数/操作），否则 flex 换行后的位置和读到的不一致。 */
+  .hot-facts .hot-bars {
+    flex-basis: 100%;
+    order: 2;
+  }
+  .hot-facts .hot-actions {
+    flex-basis: 100%;
+    order: 3;
+  }
 }
 .hot-detail {
   border-top: 1px dashed var(--color-border);

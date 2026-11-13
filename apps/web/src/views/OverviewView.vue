@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { NAlert, NButton, NSpace } from 'naive-ui'
 import { api } from '../api/client'
 import StatusTag from '../components/StatusTag.vue'
 
@@ -44,19 +45,20 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
         <h1 class="page-title">创作总览</h1>
         <p class="page-sub">本周内容运营状态，先看重点，再继续行动。</p>
       </div>
-      <div class="overview-actions">
-        <button class="btn btn-ghost btn-sm" :disabled="loading" @click="load">
-          <span aria-hidden="true">↻</span>
-          刷新数据
-        </button>
-        <RouterLink class="btn btn-sm" :to="{ name: 'studio' }">＋ 新建稿件</RouterLink>
-      </div>
+      <n-space class="overview-actions" :size="8">
+        <n-button secondary size="small" :loading="loading" @click="load">刷新数据</n-button>
+        <RouterLink v-slot="{ navigate }" custom :to="{ name: 'studio' }">
+          <n-button type="primary" size="small" @click="navigate">＋ 新建稿件</n-button>
+        </RouterLink>
+      </n-space>
     </div>
 
-    <div v-if="error" class="banner banner-danger" role="alert">
-      <span>加载失败：{{ error }}</span>
-      <button class="btn btn-ghost btn-sm" @click="load">重试</button>
-    </div>
+    <n-alert v-if="error" type="error" :bordered="false">
+      <n-space align="center" justify="space-between">
+        <span>加载失败：{{ error }}</span>
+        <n-button size="small" secondary @click="load">重试</n-button>
+      </n-space>
+    </n-alert>
 
     <div v-if="loading" class="overview-skeleton">
       <div v-for="i in 4" :key="i" class="skeleton" style="height: 118px" />
@@ -101,7 +103,9 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
             <span class="empty-icon">＋</span>
             <span class="empty-title">还没有绑定平台账号</span>
             <span>绑定后可以查看授权状态与自动发布开关。</span>
-            <RouterLink class="btn btn-sm" :to="{ name: 'publishing' }">去绑定账号</RouterLink>
+            <RouterLink v-slot="{ navigate }" custom :to="{ name: 'publishing' }">
+              <n-button type="primary" size="small" @click="navigate">去绑定账号</n-button>
+            </RouterLink>
           </div>
           <div v-else class="platform-list">
             <div v-for="item in data.platformStatus" :key="item.platform" class="platform-row">
@@ -129,7 +133,9 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
             <span class="empty-icon">✎</span>
             <span class="empty-title">还没有草稿</span>
             <span>从一个想法开始，直接让 AI 生成初稿。</span>
-            <RouterLink class="btn btn-sm" :to="{ name: 'studio' }">新建稿件</RouterLink>
+            <RouterLink v-slot="{ navigate }" custom :to="{ name: 'studio' }">
+              <n-button type="primary" size="small" @click="navigate">新建稿件</n-button>
+            </RouterLink>
           </div>
           <div v-else class="recent-list">
             <RouterLink
@@ -157,7 +163,9 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
           <p class="page-sub">已配置 {{ fmt(data.aiStatus.modelConnections) }} 个模型连接。{{ data.aiStatus.note }}</p>
         </div>
         <div class="ai-status"><span class="status-dot" /> {{ fmt(data.aiStatus.modelConnections) }} 个模型连接</div>
-        <RouterLink class="btn btn-ghost btn-sm" :to="{ name: 'settings' }">配置模型 <span>→</span></RouterLink>
+        <RouterLink v-slot="{ navigate }" custom :to="{ name: 'settings' }">
+          <n-button secondary size="small" @click="navigate">配置模型 →</n-button>
+        </RouterLink>
       </section>
     </template>
   </div>

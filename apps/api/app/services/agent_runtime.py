@@ -14,8 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models
-from . import agent_policy, ai_gateway
+from . import agent_policy, ai_article, ai_gateway, article_workflow
 from .agent_policy import ToolNotAllowed
+
+# 只读写作检查工具：都作用在稿件版本上，不调用模型
+_WRITING_CHECK_TOOLS = frozenset({"review_article", "check_ai_tone", "extract_facts", "plan_images"})
 
 APPROVAL_TTL_SECONDS = 15 * 60
 
@@ -76,6 +79,84 @@ def resolve_run_permissions(db: Session, run: models.AgentRun) -> list[str]:
     return sorted({t for t in allowed if not snapshot_tools or t in snapshot_tools})
 
 
+class WorkflowConflict(Exception):
+    """一次 run 里出现了不止一个带 workflow 的 Skill。"""
+
+    def __init__(self, keys: list[str]) -> None:
+        self.keys = keys
+        super().__init__("、".join(keys))
+
+
+def _workflow_steps(entry: models.SkillRegistryEntry) -> list:
+    manifest = entry.manifest if isinstance(entry.manifest, dict) else {}
+    steps = manifest.get("workflow") or []
+    return steps if isinstance(steps, list) else []
+
+
+def resolve_workflow_skill(db: Session, run: models.AgentRun) -> models.SkillRegistryEntry | None:
+    """一次 run 最多一个带非空 workflow 的 Skill。
+
+    零个：返回 None，调用方走 LLM / 关键词规划。
+    多于一个：抛 WorkflowConflict，由 start_run 把整次 run 标失败。
+    """
+    skill_ids = run.permission_snapshot.get("skillIds") or []
+    found: list[models.SkillRegistryEntry] = []
+    for skill_id in skill_ids:
+        entry = db.get(models.SkillRegistryEntry, skill_id)
+        if not entry or entry.trust_status != "trusted":
+            continue
+        if _workflow_steps(entry):
+            found.append(entry)
+    if len(found) > 1:
+        raise WorkflowConflict([entry.skill_key for entry in found])
+    return found[0] if found else None
+
+
+def steps_from_workflow(entry: models.SkillRegistryEntry, goal: str) -> list[dict]:
+    """按 manifest.workflow 的顺序生成步骤；参数以服务端默认值为底，清单里的静态参数覆盖。"""
+    steps: list[dict] = []
+    for raw in _workflow_steps(entry):
+        if not isinstance(raw, dict):
+            continue
+        tool = raw.get("tool")
+        if not isinstance(tool, str) or not tool:
+            continue
+        args = _default_args(tool, goal)
+        extra = raw.get("args")
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if isinstance(key, str) and isinstance(value, (str, int, float, bool)):
+                    args[key] = value
+        steps.append({"tool": tool, "args": args})
+    return steps
+
+
+def assert_workflow_authorized(steps: list[dict], allowed_tools: list[str]) -> None:
+    """workflow 的每一步都必须在本次授权内；缺一步就整次失败，不删步。"""
+    allowed = set(allowed_tools)
+    missing = [step["tool"] for step in steps if step["tool"] not in allowed]
+    if missing:
+        raise AgentRuntimeError(
+            "workflow 中的工具未授权，已中止：" + "、".join(missing)
+        )
+
+
+def _resolve_run_skill(db: Session, run: models.AgentRun) -> models.SkillRegistryEntry | None:
+    """成文与检查只读一份 manifest：有 workflow 用那份，否则用快照里第一个 trusted。"""
+    try:
+        flow = resolve_workflow_skill(db, run)
+    except WorkflowConflict:
+        flow = None
+    if flow is not None:
+        return flow
+    skill_ids = run.permission_snapshot.get("skillIds") or []
+    for skill_id in skill_ids:
+        entry = db.get(models.SkillRegistryEntry, skill_id)
+        if entry and entry.trust_status == "trusted":
+            return entry
+    return None
+
+
 def plan_steps(goal: str, allowed_tools: list[str]) -> list[dict]:
     """确定性规划：按目标关键词选择工作台内部工具，永不生成 shell/SQL。"""
     steps: list[dict] = []
@@ -86,6 +167,13 @@ def plan_steps(goal: str, allowed_tools: list[str]) -> list[dict]:
         steps.append({"tool": "generate_article", "args": {"prompt": goal}})
     if "create_publish_preview" in has:
         steps.append({"tool": "create_publish_preview", "args": {"goal": goal}})
+    if steps and "review_article" in has:
+        # 成稿之后的写作检查：占位由服务端从本 run 最近一条 tool.result 里取稿件版本
+        steps.append({"tool": "review_article", "args": {}})
+        if "check_ai_tone" in has:
+            steps.append({"tool": "check_ai_tone", "args": {}})
+        if "plan_images" in has:
+            steps.append({"tool": "plan_images", "args": {}})
     return steps or [{"tool": "read_content", "args": {"goal": goal}}]
 
 
@@ -102,6 +190,12 @@ _ARG_KEYS = {
     "prepare_platform_variant": "prompt",
     "create_publish_preview": "goal",
     "read_content": "goal",
+    "retrieve_content": "query",
+    # 写作检查类工具默认检查本 run 最近生成的稿件，不需要模型伪造稿件 ID
+    "review_article": None,
+    "check_ai_tone": None,
+    "extract_facts": None,
+    "plan_images": None,
 }
 
 
@@ -270,21 +364,37 @@ async def _execute_tool(db: Session, run: models.AgentRun, tool_id: str, args: d
             "prepare_platform_variant": "platform_variant",
         }[tool_id]
         prompt = str(args.get("prompt") or run.goal or "写一篇短文章")
+        skill = _resolve_run_skill(db, run)
+        system_prompt = ai_article.build_system_prompt(skill)
         generated = await ai_gateway.generate_text(
             db,
             owner_user_id=run.owner_user_id,
             task_type=task_type,
             prompt=prompt,
             constraints={"targetLength": 400 if task_type == "outline" else 900},
+            system_prompt=system_prompt,
         )
-        if not generated["text"]:
+        raw_text = generated["text"]
+        if not raw_text:
             raise AgentRuntimeError(
                 f"模型未返回内容（{generated.get('errorCode') or 'empty_response'}），请检查模型连接"
             )
+        title, body, summary = prompt[:80], raw_text, f"Agent 工具 {tool_id} 生成（未按契约解析）"
+        if tool_id == "generate_article":
+            # 与普通成文路径一致：按 JSON 契约只把 markdown 落库；未按契约输出时保留原文容错
+            draft = ai_article.parse_llm_output(raw_text)
+            if draft.ok:
+                title = draft.title or prompt[:80]
+                body = draft.markdown
+                summary = draft.summary[:300] if draft.summary else f"Agent 工具 {tool_id} 生成"
+            else:
+                parsed_title, parsed_body = ai_article.article_from_raw_output(raw_text)
+                title = parsed_title or prompt[:80]
+                body = parsed_body or raw_text
         item = models.ContentItem(
             workspace_id=run.workspace_id,
             owner_user_id=run.owner_user_id,
-            title=prompt[:80],
+            title=title,
             type="article",
             status="draft",
         )
@@ -295,10 +405,14 @@ async def _execute_tool(db: Session, run: models.AgentRun, tool_id: str, args: d
             version_no=1,
             source_type="agent",
             model_id=generated["modelCode"],
-            title=item.title,
-            body=generated["text"],
-            summary=f"Agent 工具 {tool_id} 生成",
-            prompt_template_version=ai_gateway.PROMPT_TEMPLATE_VERSION,
+            title=title,
+            body=body,
+            summary=summary,
+            prompt_template_version=(
+                f"{skill.skill_key}@{skill.version}"[:32]
+                if skill
+                else ai_gateway.PROMPT_TEMPLATE_VERSION
+            ),
         )
         db.add(version)
         db.flush()
@@ -306,12 +420,19 @@ async def _execute_tool(db: Session, run: models.AgentRun, tool_id: str, args: d
         return {
             "contentItemId": item.id,
             "versionId": version.id,
-            "chars": len(generated["text"]),
+            "chars": len(body),
             "modelCode": generated["modelCode"],
         }
 
     if tool_id == "create_publish_preview":
         return _build_publish_preview(db, run, args)
+
+    if tool_id == "retrieve_content":
+        query = args.get("query") or run.goal
+        return article_workflow.retrieve_content(db, run.workspace_id, str(query), limit=5)
+
+    if tool_id in _WRITING_CHECK_TOOLS:
+        return _run_writing_check(db, run, tool_id, args)
     # 兜底不再返回伪成功：未实现的工具必须让本轮运行明确失败。
     raise AgentRuntimeError(f"工具未在服务端实现：{tool_id}")
 
@@ -379,6 +500,105 @@ def _build_publish_preview(db: Session, run: models.AgentRun, args: dict) -> dic
 
 
 
+def _latest_workspace_version_id(db: Session, workspace_id: str) -> str | None:
+    item = db.scalar(
+        select(models.ContentItem)
+        .where(models.ContentItem.workspace_id == workspace_id)
+        .order_by(models.ContentItem.updated_at.desc())
+        .limit(1)
+    )
+    if not item:
+        return None
+    version = db.scalar(
+        select(models.ContentVersion)
+        .where(models.ContentVersion.content_item_id == item.id)
+        .order_by(models.ContentVersion.created_at.desc())
+        .limit(1)
+    )
+    return version.id if version else None
+
+
+def _find_recent_version_id(db: Session, run: models.AgentRun) -> str | None:
+    """本 run 最近一条带 versionId 的工具结果；没有则用工作区最新稿件。"""
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        calls = db.scalars(
+            select(models.AgentToolCall)
+            .where(models.AgentToolCall.run_id == run.id)
+            .order_by(models.AgentToolCall.created_at.desc())
+        ).all()
+    except OperationalError:
+        db.rollback()
+        calls = []
+    for call in calls:
+        ref = call.result_ref if isinstance(call.result_ref, dict) else {}
+        version_id = ref.get("versionId") or ref.get("contentVersionId")
+        if isinstance(version_id, str) and version_id:
+            return version_id
+    try:
+        events = db.scalars(
+            select(models.AgentEvent)
+            .where(models.AgentEvent.run_id == run.id, models.AgentEvent.event_type == "tool.result")
+            .order_by(models.AgentEvent.seq.desc())
+        ).all()
+    except OperationalError:
+        db.rollback()
+        events = []
+    for event in events:
+        result = (event.safe_payload or {}).get("result")
+        if not isinstance(result, dict):
+            continue
+        version_id = result.get("versionId") or result.get("contentVersionId")
+        if isinstance(version_id, str) and version_id:
+            return version_id
+    return _latest_workspace_version_id(db, run.workspace_id)
+
+
+def _resolve_check_version(db: Session, run: models.AgentRun, args: dict):
+    """取待检查的稿件版本，并校验它属于本 run 的工作区。"""
+    version_id = args.get("contentVersionId") or _find_recent_version_id(db, run)
+    if not version_id or not isinstance(version_id, str):
+        return None, {"error": "no_draft"}
+    version = db.get(models.ContentVersion, version_id)
+    item = db.get(models.ContentItem, version.content_item_id) if version else None
+    if not version or not item or item.workspace_id != run.workspace_id:
+        return None, {"error": "not_found"}
+    return version, None
+
+
+def _run_writing_check(db: Session, run: models.AgentRun, tool_id: str, args: dict) -> dict:
+    version, error = _resolve_check_version(db, run, args)
+    if error:
+        return error
+    markdown = version.body or ""
+
+    if tool_id == "review_article":
+        skill = _resolve_run_skill(db, run)
+        manifest = skill.manifest if skill and isinstance(skill.manifest, dict) else {}
+        draft = {"title": version.title or "", "markdown": markdown, "summary": version.summary or ""}
+        result = article_workflow.review_article(draft, manifest.get("reviewRules") or [])
+        return {**result, "versionId": version.id}
+
+    if tool_id == "check_ai_tone":
+        return {**article_workflow.check_ai_tone(markdown), "versionId": version.id}
+
+    if tool_id == "extract_facts":
+        return {**article_workflow.extract_facts(markdown), "versionId": version.id}
+
+    # plan_images：正文存的是 JSON 合同（成文落库前已解析成 markdown）时，提示词只能从 JSON 里取
+    inline_prompts: list[str] = []
+    cover_prompt = None
+    draft = ai_article.parse_llm_output(markdown) if markdown.lstrip().startswith("{") else None
+    if draft and draft.ok:
+        inline_prompts = list(draft.inline_prompts)
+        cover_prompt = draft.cover_prompt or None
+    skill = _resolve_run_skill(db, run)
+    policy = skill.manifest.get("imagePolicy") if skill and isinstance(skill.manifest, dict) else None
+    plan = article_workflow.plan_images(markdown, inline_prompts, cover_prompt, policy)
+    return {**plan, "versionId": version.id}
+
+
 def _digest(payload: dict) -> str:
     import hashlib
     import json
@@ -394,9 +614,33 @@ async def start_run(db: Session, run: models.AgentRun) -> None:
     run.permission_snapshot = {**run.permission_snapshot, "resolvedToolIds": allowed_tools}
     emit(db, run, "run.started", {"goal": run.goal, "allowedTools": allowed_tools})
 
-    steps, planner, planner_note = await plan_steps_with_llm(
-        db, run.owner_user_id, run.goal, allowed_tools
-    )
+    try:
+        flow_skill = resolve_workflow_skill(db, run)
+    except WorkflowConflict as exc:
+        run.status = "failed"
+        run.error_code = "workflow_conflict"
+        emit(
+            db,
+            run,
+            "run.failed",
+            {"code": "workflow_conflict", "message": f"一次只能使用一个带流程的 Skill：{'、'.join(exc.keys)}"},
+        )
+        return
+
+    if flow_skill is not None:
+        try:
+            steps = steps_from_workflow(flow_skill, run.goal)
+            assert_workflow_authorized(steps, allowed_tools)
+        except AgentRuntimeError as exc:
+            run.status = "failed"
+            run.error_code = "workflow_unauthorized"
+            emit(db, run, "run.failed", {"code": "workflow_unauthorized", "message": str(exc)})
+            return
+        planner, planner_note = "workflow", f"按 {flow_skill.skill_key} 的流程执行，未询问规划模型"
+    else:
+        steps, planner, planner_note = await plan_steps_with_llm(
+            db, run.owner_user_id, run.goal, allowed_tools
+        )
     emit(
         db,
         run,

@@ -40,6 +40,7 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("publish_jobs", "theme_id", "VARCHAR(32) DEFAULT ''"),
     ("publish_jobs", "layout_snapshot", "JSON"),
     ("publish_jobs", "content_item_id", "VARCHAR(32)"),
+    ("publish_jobs", "status_history", "JSON"),
     ("connected_accounts", "auth_source", "VARCHAR(24) DEFAULT 'none'"),
     ("connected_accounts", "app_id", "VARCHAR(64) DEFAULT ''"),
     ("connected_accounts", "app_secret_ciphertext", "TEXT DEFAULT ''"),
@@ -69,8 +70,35 @@ _INDEXES: list[tuple[str, str]] = [
 ]
 
 
+def _dedupe_skill_entries(conn) -> None:
+    """同一 (skill_key, owner) 只保留最早一行。
+
+    旧版创建路径没有唯一约束，并发首次请求可能写入重复内置行；
+    重复行会让设置页出现同名 Skill，且授权可能指向即将被删的那一条。
+    """
+    ranked = (
+        "SELECT id FROM ("
+        " SELECT id, ROW_NUMBER() OVER ("
+        "   PARTITION BY skill_key, COALESCE(owner_user_id, '')"
+        "   ORDER BY CASE WHEN source = 'builtin' THEN 0 ELSE 1 END, created_at, id"
+        " ) AS rn FROM skill_registry_entries"
+        ") ranked WHERE rn = 1"
+    )
+    tables = set(inspect(engine).get_table_names())
+    if "workspace_skills" in tables:
+        conn.execute(
+            text(
+                "DELETE FROM workspace_skills "
+                f"WHERE skill_entry_id NOT IN ({ranked})"
+            )
+        )
+    conn.execute(
+        text(f"DELETE FROM skill_registry_entries WHERE id NOT IN ({ranked})")
+    )
+
+
 def _apply_additive_migrations() -> None:
-    """只做加列 / 加索引，不改不删，幂等可重复执行。"""
+    """只做加列 / 加索引 / 必要去重，幂等可重复执行。"""
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     pg = engine.dialect.name == "postgresql"
@@ -92,6 +120,23 @@ def _apply_additive_migrations() -> None:
                 conn.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON {target}"))
             except Exception as exc:  # 旧库缺列时不影响启动，明确告警即可
                 logger.warning("索引 %s 创建失败（可忽略）：%s", name, exc)
+        if "skill_registry_entries" in existing_tables:
+            try:
+                _dedupe_skill_entries(conn)
+                # SQLite 直接写表达式；PostgreSQL 的表达式索引要求额外一层括号
+                expression = (
+                    "(COALESCE(owner_user_id, ''))"
+                    if pg
+                    else "COALESCE(owner_user_id, '')"
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_owner_key "
+                        f"ON skill_registry_entries (skill_key, {expression})"
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Skill 唯一索引创建失败（可忽略）：%s", exc)
 
 
 def init_db() -> None:

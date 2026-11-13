@@ -165,3 +165,123 @@ def test_article_raw_output_only_keeps_markdown_body():
     # 非契约输出（如摘要任务）原样保留，不能丢内容
     assert ai_article.article_from_raw_output("普通文本") == ("", "普通文本")
 
+
+def _stream_with_double(client, headers, monkeypatch, *, task_type: str, model_text: str, extra=None):
+    """用测试替身替换 stream_text，返回 (事件列表, 稿件详情或 None)。"""
+    from app.services import ai_gateway
+
+    async def fake_stream(db, *, connection, model_code, **kwargs):
+        yield {
+            "event": "generation.delta",
+            "data": {"text": model_text, "provider": "openai_compatible"},
+        }
+        yield {"event": "generation.done", "data": {"provider": "openai_compatible"}}
+
+    monkeypatch.setattr(ai_gateway, "stream_text", fake_stream)
+    item = client.post("/api/v1/content", json={"title": "原文"}, headers=headers).json()
+    payload = {
+        "taskType": task_type,
+        "prompt": "写一篇关于选题的文章",
+        "contentItemId": item["id"],
+        **(extra or {}),
+    }
+    with client.stream(
+        "POST", "/api/v1/ai/text-generations", json=payload, headers=headers
+    ) as response:
+        body = "".join(response.iter_text())
+    detail = client.get(f"/api/v1/content/{item['id']}", headers=headers).json()
+    return _sse_events(body), detail
+
+
+def test_article_generation_records_skill_version_in_request_summary(client, monkeypatch):
+    from app import models
+    from app.core.db import SessionLocal
+
+    headers = _headers(client, "skill-version")
+    events, detail = _stream_with_double(
+        client,
+        headers,
+        monkeypatch,
+        task_type="article",
+        model_text='{"title":"标题","markdown":"正文","summary":"真实摘要",'
+        '"coverPrompt":"cover","inlinePrompts":[]}',
+    )
+    events_by_name = dict(events)
+    assert events_by_name["generation.done"]["skillKey"] == "article-drafting"
+    assert events_by_name["generation.done"]["skillVersion"]
+    assert events_by_name["generation.done"]["review"] == {"ok": True, "issues": []}
+    assert "generation.saved" in events_by_name
+
+    with SessionLocal() as db:
+        row = db.query(models.AiGeneration).order_by(
+            models.AiGeneration.created_at.desc()
+        ).first()
+        assert row.request_summary["skillKey"] == "article-drafting"
+        assert row.request_summary["skillVersion"]
+        version = db.query(models.ContentVersion).filter(
+            models.ContentVersion.content_item_id == detail["item"]["id"]
+        ).order_by(models.ContentVersion.version_no.desc()).first()
+        assert version.prompt_template_version
+        assert version.prompt_template_version.startswith("article-drafting@")
+        assert len(version.prompt_template_version) <= 32
+        assert version.summary == "真实摘要"
+
+
+def test_non_style_generation_has_null_skill_and_no_review(client, monkeypatch):
+    headers = _headers(client, "skill-none")
+    events, _ = _stream_with_double(
+        client,
+        headers,
+        monkeypatch,
+        task_type="summarize",
+        model_text='{"title":"标题","markdown":"正文","inlinePrompts":[]}',
+    )
+    done = dict(events)["generation.done"]
+    assert done["skillKey"] is None
+    assert done["skillVersion"] is None
+    assert "review" not in done
+
+
+def test_article_review_flags_image_count_mismatch(client, monkeypatch):
+    headers = _headers(client, "review-mismatch")
+    events, _ = _stream_with_double(
+        client,
+        headers,
+        monkeypatch,
+        task_type="article",
+        model_text='{"title":"标题","markdown":"正文{{image1}}结束",'
+        '"summary":"摘要","coverPrompt":"cover","inlinePrompts":[]}',
+    )
+    assert dict(events)["generation.done"]["review"] == {
+        "ok": False,
+        "issues": ["image_count_mismatch"],
+    }
+
+
+def test_article_review_passes_when_placeholders_match_inline_prompts(client, monkeypatch):
+    headers = _headers(client, "review-ok")
+    events, _ = _stream_with_double(
+        client,
+        headers,
+        monkeypatch,
+        task_type="article",
+        model_text='{"title":"标题","markdown":"开头{{image1|配图说明}}结尾",'
+        '"summary":"摘要","coverPrompt":"cover","inlinePrompts":["a cat"]}',
+    )
+    assert dict(events)["generation.done"]["review"] == {"ok": True, "issues": []}
+
+
+def test_review_contract_pure_function():
+    from app.services import ai_article
+
+    def draft(markdown, prompts):
+        return ai_article.ArticleDraft(
+            title="t", markdown=markdown, inline_prompts=prompts
+        )
+
+    assert ai_article.review_contract(draft("无图正文", [])) == {"ok": True, "issues": []}
+    assert ai_article.review_contract(draft("无图正文", ["p"]))["ok"] is False
+    assert ai_article.review_contract(draft("{{image1}} {{image2}}", ["a", "b"]))["ok"] is True
+    assert ai_article.review_contract(draft("{{image1}} {{image3}}", ["a", "b"]))["ok"] is False
+    assert ai_article.review_contract(draft("{{image1}} {{image1}}", ["a", "b"]))["ok"] is False
+

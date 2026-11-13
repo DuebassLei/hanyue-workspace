@@ -270,6 +270,9 @@ class PublishJob(Base, TimestampMixin):
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(32), default="pending_review", index=True)
+    # 状态流转历史：每条 {"status", "at", "actor", "note"}，由 publish_state 的
+    # apply_transition / record_history 追加；详情页时间线据此展示任务经历了什么
+    status_history: Mapped[list] = mapped_column(JSON, default=list)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     remote_content_id: Mapped[str | None] = mapped_column(String(190), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -380,6 +383,10 @@ class AgentProviderConnection(Base, TimestampMixin):
 
 class SkillRegistryEntry(Base, TimestampMixin):
     __tablename__ = "skill_registry_entries"
+    # 新建库由该约束兜底；已有库由 core/db.py 的表达式唯一索引兜住内置行（owner 为 NULL）
+    __table_args__ = (
+        UniqueConstraint("skill_key", "owner_user_id", name="uq_skill_owner_key"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     source: Mapped[str] = mapped_column(String(120), default="builtin")

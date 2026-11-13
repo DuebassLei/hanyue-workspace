@@ -1,9 +1,23 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { NAlert, NButton, NInput, NModal, NSelect } from 'naive-ui'
 import { api, fetchBlobUrl } from '../api/client'
 
 const REFERENCE_LIMIT = 4
+const referenceInput = ref(null)
+const ASPECT_OPTIONS = [
+  { label: '3:4', value: '3:4' },
+  { label: '1:1', value: '1:1' },
+  { label: '16:9', value: '16:9' },
+  { label: '9:16', value: '9:16' },
+]
+const COUNT_OPTIONS = [
+  { label: '1', value: 1 },
+  { label: '2', value: 2 },
+  { label: '3', value: 3 },
+  { label: '4', value: 4 },
+]
 const MAX_POLL_ROUNDS = 120 // 1.5s × 120 = 3 分钟
 
 const router = useRouter()
@@ -39,6 +53,13 @@ const handdrawStyle = ref(null)
 const handdrawCompose = ref(null)
 
 const providers = computed(() => provider.value.providers || [])
+const providerOptions = computed(() =>
+  providers.value.map((item) => ({ label: item.label, value: item.modelId || '' })),
+)
+const promptCategoryOptions = computed(() => [
+  { label: '全部分类', value: '' },
+  ...promptCategories.value.map((item) => ({ label: item, value: item })),
+])
 const selectedProvider = computed(
   () => providers.value.find((item) => (item.modelId || '') === selectedModelId.value) || null,
 )
@@ -602,14 +623,11 @@ onBeforeUnmount(() => {
         <span class="tag" :class="provider.available ? 'tag-success' : 'tag-warning'">
           {{ provider.available ? `${providers.length} 个供应商可用` : '供应商未接入' }}
         </span>
-        <button class="btn btn-ghost btn-sm" @click="load">刷新</button>
+        <n-button quaternary size="small" @click="load">刷新</n-button>
       </div>
     </div>
 
-    <div v-if="error" class="banner banner-danger" role="alert">
-      {{ error }}
-      <button class="btn btn-ghost btn-sm" @click="error = ''">知道了</button>
-    </div>
+    <n-alert v-if="error" type="error" closable @close="error = ''">{{ error }}</n-alert>
 
     <div class="gen-layout">
       <!-- 创建任务 -->
@@ -621,11 +639,7 @@ onBeforeUnmount(() => {
 
         <label v-if="providers.length" class="field" style="margin-top: var(--space-3)">
           <span class="field-label">供应商</span>
-          <select v-model="selectedModelId" class="select">
-            <option v-for="item in providers" :key="item.modelId || 'env'" :value="item.modelId || ''">
-              {{ item.label }}
-            </option>
-          </select>
+          <n-select v-model:value="selectedModelId" :options="providerOptions" />
         </label>
         <p v-if="providers.length" class="field-hint" style="margin-top: 4px">
           当前使用：{{ selectedProvider?.label || '默认供应商' }}
@@ -636,16 +650,16 @@ onBeforeUnmount(() => {
           <div class="row row-tight" style="gap: var(--space-2)">
             <label class="field-label" for="gen-prompt">提示词</label>
             <div class="spacer" />
-            <button class="btn btn-ghost btn-sm" type="button" @click="openPromptPicker">
-              提示词库
-            </button>
+            <n-button quaternary size="small" @click="openPromptPicker">提示词库</n-button>
           </div>
-          <textarea
+          <n-input
             id="gen-prompt"
-            v-model="form.prompt"
-            class="textarea gen-prompt"
+            v-model:value="form.prompt"
+            type="textarea"
+            class="gen-prompt"
             placeholder="例如：一只橘猫坐在木质窗台上晒太阳，水彩插画风格，柔和光线"
-            @input="appliedPrompt = ''"
+            :autosize="{ minRows: 4, maxRows: 10 }"
+            @update:value="appliedPrompt = ''"
           />
         </div>
         <p v-if="appliedPrompt" class="field-hint" style="margin-top: var(--space-2)">
@@ -660,9 +674,7 @@ onBeforeUnmount(() => {
           <div class="row row-tight">
             <span class="field-label">手绘风格（可选）</span>
             <div class="spacer" />
-            <button class="btn btn-ghost btn-sm" type="button" @click="openStylePicker">
-              选择风格
-            </button>
+            <n-button quaternary size="small" @click="openStylePicker">选择风格</n-button>
           </div>
           <div v-if="handdrawStyle" class="handdraw-chip">
             <img v-if="handdrawThumb" :src="handdrawThumb" :alt="handdrawStyle.generationName" />
@@ -673,9 +685,7 @@ onBeforeUnmount(() => {
                 <template v-if="handdrawCompose?.needReference"> · 出图时自动附加参考图</template>
               </span>
             </div>
-            <button class="btn btn-ghost btn-sm" type="button" @click="clearHanddrawStyle">
-              移除
-            </button>
+            <n-button quaternary size="small" @click="clearHanddrawStyle">移除</n-button>
           </div>
           <p v-else class="field-hint">
             未选择；点「选择风格」按画风合成提示词，不用离开本页。
@@ -685,17 +695,23 @@ onBeforeUnmount(() => {
         <div class="field" style="margin-top: var(--space-3)">
           <span class="field-label">参考图（最多 {{ REFERENCE_LIMIT }} 张，可选）</span>
           <div class="row row-tight">
-            <label class="btn btn-ghost btn-sm" :class="{ 'is-disabled': !canAddReference }">
+            <n-button
+              quaternary
+              size="small"
+              :disabled="!canAddReference"
+              @click="referenceInput?.click()"
+            >
               选择文件
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                hidden
-                :disabled="!canAddReference"
-                @change="onReferencePick"
-              />
-            </label>
+            </n-button>
+            <input
+              ref="referenceInput"
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+              :disabled="!canAddReference"
+              @change="onReferencePick"
+            />
             <span class="field-hint">{{ referenceHint }}</span>
           </div>
           <div v-if="referenceFiles.length" class="ref-grid">
@@ -719,37 +735,28 @@ onBeforeUnmount(() => {
         <div class="row row-tight" style="flex-wrap: wrap; margin-top: var(--space-3)">
           <label class="field" style="width: 130px">
             <span class="field-label">比例</span>
-            <select v-model="form.aspectRatio" class="select">
-              <option value="3:4">3:4</option>
-              <option value="1:1">1:1</option>
-              <option value="16:9">16:9</option>
-              <option value="9:16">9:16</option>
-            </select>
+            <n-select v-model:value="form.aspectRatio" :options="ASPECT_OPTIONS" />
           </label>
           <label class="field" style="width: 110px">
             <span class="field-label">数量</span>
-            <select v-model.number="form.count" class="select">
-              <option :value="1">1</option>
-              <option :value="2">2</option>
-              <option :value="3">3</option>
-              <option :value="4">4</option>
-            </select>
+            <n-select v-model:value="form.count" :options="COUNT_OPTIONS" />
           </label>
           <div class="spacer" />
-          <button
-            class="btn btn-sm"
+          <n-button
+            type="primary"
+            size="small"
             :disabled="!provider.available || !form.prompt.trim() || busy"
             @click="generate"
           >
             {{ busy ? '提交中…' : '生成图片' }}
-          </button>
-          <button class="btn btn-ghost btn-sm" :disabled="busy" @click="resetForm">清空</button>
+          </n-button>
+          <n-button quaternary size="small" :disabled="busy" @click="resetForm">清空</n-button>
         </div>
 
-        <div v-if="!provider.available" class="banner banner-warning" style="margin-top: var(--space-3)">
+        <n-alert v-if="!provider.available" type="warning" :bordered="false" style="margin-top: var(--space-3)">
           未配置图像生成供应商时不会生成占位图。可在设置中添加支持 image.generate 能力的模型，
           或设置 IMAGE_PROVIDER_BASE_URL / IMAGE_PROVIDER_API_KEY / IMAGE_PROVIDER_MODEL 后重启服务。
-        </div>
+        </n-alert>
       </section>
 
       <!-- 生成结果 -->
@@ -827,13 +834,13 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="genAssets.length" class="result-foot">
           <p class="result-prompt">{{ genPrompt || '本次生成的提示词' }}</p>
-          <button
-            class="btn btn-ghost btn-sm"
-            type="button"
+          <n-button
+            quaternary
+            size="small"
             @click="copyPrompt({ id: currentGenJob?.id || 'gen', prompt: genPrompt })"
           >
             {{ copiedId === (currentGenJob?.id || 'gen') ? '已复制' : '复制提示词' }}
-          </button>
+          </n-button>
         </div>
       </section>
     </div>
@@ -865,235 +872,192 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <!-- 大图预览 -->
-    <div v-if="previewAsset" class="modal-backdrop" role="presentation" @click.self="closePreview">
-      <div
-        class="modal preview-modal"
-        role="dialog"
-        aria-modal="true"
-        :aria-label="`图片预览：${previewAsset.originalName}`"
-      >
-        <div class="row" style="margin-bottom: var(--space-3)">
-          <h2 class="modal-title" style="margin: 0; overflow: hidden; text-overflow: ellipsis">
-            {{ previewAsset.originalName }}
-          </h2>
-          <div class="spacer" />
-          <button
-            v-if="previewAsset.url"
-            class="btn btn-ghost btn-sm"
-            type="button"
-            :disabled="downloadingId === (previewAsset.id || previewAsset.url)"
-            @click="downloadAsset(previewAsset)"
-          >
-            {{ downloadingId === (previewAsset.id || previewAsset.url) ? '下载中…' : '下载图片' }}
-          </button>
-          <button class="icon-btn" aria-label="关闭" @click="closePreview">✕</button>
+    <n-modal
+      :show="!!previewAsset"
+      preset="card"
+      :title="previewAsset?.originalName || '图片预览'"
+      style="width: min(880px, calc(100vw - 32px))"
+      @update:show="(value) => { if (!value) closePreview() }"
+    >
+      <template #header-extra>
+        <n-button
+          v-if="previewAsset?.url"
+          quaternary
+          size="small"
+          :disabled="downloadingId === (previewAsset.id || previewAsset.url)"
+          @click="downloadAsset(previewAsset)"
+        >
+          {{ downloadingId === (previewAsset.id || previewAsset.url) ? '下载中…' : '下载图片' }}
+        </n-button>
+      </template>
+      <div class="preview-body">
+        <div class="preview-figure">
+          <img
+            v-if="previewAsset?.url"
+            :src="previewAsset.url"
+            :alt="previewAsset.originalName"
+            class="preview-image"
+          />
+          <div v-else class="asset-placeholder" style="height: 240px">▣</div>
         </div>
-        <div class="preview-body">
-          <div class="preview-figure">
-            <img
-              v-if="previewAsset.url"
-              :src="previewAsset.url"
-              :alt="previewAsset.originalName"
-              class="preview-image"
-            />
-            <div v-else class="asset-placeholder" style="height: 240px">▣</div>
-          </div>
-          <div class="preview-side">
-            <p class="field-hint" style="margin: 0">
-              {{ previewAsset.width ? `${previewAsset.width}×${previewAsset.height}` : '尺寸未知' }} ·
-              {{ sizeLabel(previewAsset.sizeBytes) }} · {{ previewAsset.sourceType }}
-            </p>
-            <template v-if="previewAsset.prompt">
-              <span class="field-label">生成提示词</span>
-              <p class="preview-prompt">{{ previewAsset.prompt }}</p>
-              <button class="btn btn-sm" type="button" @click="copyPrompt(previewAsset)">
-                {{ copiedId === previewAsset.id ? '已复制' : '复制提示词' }}
-              </button>
-            </template>
-            <p v-else class="field-hint" style="margin: 0">该图片没有记录生成提示词。</p>
-          </div>
+        <div v-if="previewAsset" class="preview-side">
+          <p class="field-hint" style="margin: 0">
+            {{ previewAsset.width ? `${previewAsset.width}×${previewAsset.height}` : '尺寸未知' }} ·
+            {{ sizeLabel(previewAsset.sizeBytes) }} · {{ previewAsset.sourceType }}
+          </p>
+          <template v-if="previewAsset.prompt">
+            <span class="field-label">生成提示词</span>
+            <p class="preview-prompt">{{ previewAsset.prompt }}</p>
+            <n-button type="primary" size="small" @click="copyPrompt(previewAsset)">
+              {{ copiedId === previewAsset.id ? '已复制' : '复制提示词' }}
+            </n-button>
+          </template>
+          <p v-else class="field-hint" style="margin: 0">该图片没有记录生成提示词。</p>
         </div>
       </div>
-    </div>
+    </n-modal>
 
-    <!-- 提示词库选择 -->
-    <div
-      v-if="promptPickerOpen"
-      class="modal-backdrop"
-      role="presentation"
-      @click.self="promptPickerOpen = false"
+    <n-modal
+      v-model:show="promptPickerOpen"
+      preset="card"
+      title="提示词库"
+      style="width: min(720px, calc(100vw - 32px))"
     >
-      <div class="modal prompt-picker" role="dialog" aria-modal="true" aria-label="选择提示词模板">
-        <div class="row">
-          <h2 class="modal-title" style="margin: 0">提示词库</h2>
-          <div class="spacer" />
-          <button class="icon-btn" aria-label="关闭" @click="promptPickerOpen = false">✕</button>
-        </div>
-        <div class="row prompt-picker-filter" style="margin-top: var(--space-3)">
-          <input
-            v-model="promptKeyword"
-            class="input"
-            type="search"
-            placeholder="搜索名称、内容或标签"
-            aria-label="搜索提示词"
-          />
-          <select v-model="promptCategory" class="select" aria-label="按分类筛选">
-            <option value="">全部分类</option>
-            <option v-for="item in promptCategories" :key="item" :value="item">
-              {{ item }}
-            </option>
-          </select>
-        </div>
-
-        <div v-if="promptLibraryError" class="banner banner-danger" style="margin-top: var(--space-3)">
-          {{ promptLibraryError }}
-          <button class="btn btn-ghost btn-sm" type="button" @click="loadPromptLibrary">重试</button>
-        </div>
-
-        <div v-if="promptLibraryLoading" class="skeleton" style="height: 96px; margin-top: var(--space-3)" />
-        <div v-else-if="promptLibraryError" class="picker-empty">
-          <span>暂时无法加载提示词，请稍后重试。</span>
-        </div>
-        <div v-else-if="!promptLibrary.length" class="picker-empty">
-          <span>提示词库还是空的，先去维护几条常用模板。</span>
-          <button class="btn btn-sm" type="button" @click="goPromptLibrary">去维护提示词</button>
-        </div>
-        <div v-else-if="!filteredPrompts.length" class="picker-empty">
-          <span>没有匹配的提示词，换个关键词试试。</span>
-        </div>
-        <div v-else class="picker-list">
-          <div v-for="item in filteredPrompts" :key="item.id" class="picker-item">
-            <div class="picker-item-main">
-              <div class="picker-item-head">
-                <strong>{{ item.title }}</strong>
-                <span class="tag tag-accent">{{ item.category }}</span>
-              </div>
-              <p class="picker-item-content">{{ item.content }}</p>
-            </div>
-            <div class="picker-item-actions">
-              <button class="btn btn-sm" type="button" @click="applyPrompt(item, 'replace')">
-                使用
-              </button>
-              <button class="btn btn-ghost btn-sm" type="button" @click="applyPrompt(item, 'append')">
-                追加
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div class="row" style="margin-top: var(--space-3)">
-          <span class="field-hint">使用=替换当前提示词；追加=保留已输入内容并接在后面。</span>
-          <div class="spacer" />
-          <button class="btn btn-ghost btn-sm" type="button" @click="goPromptLibrary">
-            管理提示词
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 手绘风格选择：就地选，不跳页 -->
-    <div
-      v-if="stylePickerOpen"
-      class="modal-backdrop"
-      role="presentation"
-      @click.self="stylePickerOpen = false"
-    >
-      <div class="modal style-picker" role="dialog" aria-modal="true" aria-label="选择手绘风格">
-        <div class="row">
-          <h2 class="modal-title" style="margin: 0">选择手绘风格</h2>
-          <div class="spacer" />
-          <button class="icon-btn" aria-label="关闭" @click="stylePickerOpen = false">✕</button>
-        </div>
-        <div class="row prompt-picker-filter" style="margin-top: var(--space-3)">
-          <input
-            v-model="stylePickerKeyword"
-            class="input"
-            type="search"
-            placeholder="搜索风格名称、作者或编号"
-            aria-label="搜索手绘风格"
-            @input="onStyleSearch"
-          />
-        </div>
-        <div class="row row-tight style-picker-groups">
-          <button
-            class="tag"
-            :class="{ 'tag-accent': !stylePickerGroup }"
-            type="button"
-            @click="pickStyleGroup('')"
-          >
-            全部
-          </button>
-          <button
-            v-for="item in stylePickerGroups"
-            :key="item.key"
-            class="tag"
-            :class="{ 'tag-accent': stylePickerGroup === item.key }"
-            type="button"
-            @click="pickStyleGroup(item.key)"
-          >
-            {{ item.key }} · {{ item.count }}
-          </button>
-        </div>
-
-        <div v-if="stylePickerError" class="banner banner-danger" style="margin-top: var(--space-3)">
-          {{ stylePickerError }}
-          <button class="btn btn-ghost btn-sm" type="button" @click="loadStylePicker">重试</button>
-        </div>
-
-        <div
-          v-if="stylePickerLoading && !stylePickerItems.length"
-          class="skeleton"
-          style="height: 200px; margin-top: var(--space-3)"
+      <div class="row prompt-picker-filter">
+        <n-input
+          v-model:value="promptKeyword"
+          clearable
+          placeholder="搜索名称、内容或标签"
+          aria-label="搜索提示词"
         />
-        <div v-else-if="!stylePickerItems.length" class="picker-empty">
-          <span>没有匹配的风格，换个关键词或分组试试。</span>
-        </div>
-        <div v-else class="style-picker-grid">
-          <button
-            v-for="item in stylePickerItems"
-            :key="item.number"
-            class="style-picker-card"
-            :class="{ 'is-active': handdrawStyle?.number === item.number }"
-            type="button"
-            @click="applyPickedStyle(item)"
-          >
-            <span class="style-picker-thumb">
-              <img v-if="styleThumb(item.number)" :src="styleThumb(item.number)" :alt="item.generationName" />
-              <span v-else>{{ item.referenceAvailable ? '加载中' : '无参考图' }}</span>
-            </span>
-            <span class="style-picker-name">{{ item.generationName }}</span>
-          </button>
-        </div>
-
-        <div v-if="stylePickerPages > 1" class="row" style="margin-top: var(--space-3)">
-          <button
-            class="btn btn-ghost btn-sm"
-            type="button"
-            :disabled="stylePickerPage <= 1"
-            @click="goStylePage(-1)"
-          >
-            上一页
-          </button>
-          <span class="field-hint">{{ stylePickerPage }} / {{ stylePickerPages }}</span>
-          <button
-            class="btn btn-ghost btn-sm"
-            type="button"
-            :disabled="stylePickerPage >= stylePickerPages"
-            @click="goStylePage(1)"
-          >
-            下一页
-          </button>
-          <div class="spacer" />
-          <button class="btn btn-ghost btn-sm" type="button" @click="goHanddrawLibrary">
-            打开风格库
-          </button>
-        </div>
-        <p class="field-hint" style="margin-top: var(--space-2)">
-          选中后会按当前提示词内容合成画风提示词；需要主题色和参考图说明时去风格库。
-        </p>
+        <n-select
+          v-model:value="promptCategory"
+          :options="promptCategoryOptions"
+          aria-label="按分类筛选"
+          style="width: 160px"
+        />
       </div>
-    </div>
+
+      <n-alert v-if="promptLibraryError" type="error" :bordered="false" style="margin-top: var(--space-3)">
+        {{ promptLibraryError }}
+        <n-button quaternary size="small" style="margin-left: 8px" @click="loadPromptLibrary">重试</n-button>
+      </n-alert>
+
+      <div v-if="promptLibraryLoading" class="skeleton" style="height: 96px; margin-top: var(--space-3)" />
+      <div v-else-if="promptLibraryError" class="picker-empty">
+        <span>暂时无法加载提示词，请稍后重试。</span>
+      </div>
+      <div v-else-if="!promptLibrary.length" class="picker-empty">
+        <span>提示词库还是空的，先去维护几条常用模板。</span>
+        <n-button type="primary" size="small" @click="goPromptLibrary">去维护提示词</n-button>
+      </div>
+      <div v-else-if="!filteredPrompts.length" class="picker-empty">
+        <span>没有匹配的提示词，换个关键词试试。</span>
+      </div>
+      <div v-else class="picker-list">
+        <div v-for="item in filteredPrompts" :key="item.id" class="picker-item">
+          <div class="picker-item-main">
+            <div class="picker-item-head">
+              <strong>{{ item.title }}</strong>
+              <span class="tag tag-accent">{{ item.category }}</span>
+            </div>
+            <p class="picker-item-content">{{ item.content }}</p>
+          </div>
+          <div class="picker-item-actions">
+            <n-button type="primary" size="small" @click="applyPrompt(item, 'replace')">使用</n-button>
+            <n-button quaternary size="small" @click="applyPrompt(item, 'append')">追加</n-button>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top: var(--space-3)">
+        <span class="field-hint">使用=替换当前提示词；追加=保留已输入内容并接在后面。</span>
+        <div class="spacer" />
+        <n-button quaternary size="small" @click="goPromptLibrary">管理提示词</n-button>
+      </div>
+    </n-modal>
+
+    <n-modal
+      v-model:show="stylePickerOpen"
+      preset="card"
+      title="选择手绘风格"
+      style="width: min(880px, calc(100vw - 32px))"
+    >
+      <div class="row prompt-picker-filter">
+        <n-input
+          v-model:value="stylePickerKeyword"
+          clearable
+          placeholder="搜索风格名称、作者或编号"
+          aria-label="搜索手绘风格"
+          @input="onStyleSearch"
+        />
+      </div>
+      <div class="row row-tight style-picker-groups">
+        <button
+          class="tag"
+          :class="{ 'tag-accent': !stylePickerGroup }"
+          type="button"
+          @click="pickStyleGroup('')"
+        >
+          全部
+        </button>
+        <button
+          v-for="item in stylePickerGroups"
+          :key="item.key"
+          class="tag"
+          :class="{ 'tag-accent': stylePickerGroup === item.key }"
+          type="button"
+          @click="pickStyleGroup(item.key)"
+        >
+          {{ item.key }} · {{ item.count }}
+        </button>
+      </div>
+
+      <n-alert v-if="stylePickerError" type="error" :bordered="false" style="margin-top: var(--space-3)">
+        {{ stylePickerError }}
+        <n-button quaternary size="small" style="margin-left: 8px" @click="loadStylePicker">重试</n-button>
+      </n-alert>
+
+      <div
+        v-if="stylePickerLoading && !stylePickerItems.length"
+        class="skeleton"
+        style="height: 200px; margin-top: var(--space-3)"
+      />
+      <div v-else-if="!stylePickerItems.length" class="picker-empty">
+        <span>没有匹配的风格，换个关键词或分组试试。</span>
+      </div>
+      <div v-else class="style-picker-grid">
+        <button
+          v-for="item in stylePickerItems"
+          :key="item.number"
+          class="style-picker-card"
+          :class="{ 'is-active': handdrawStyle?.number === item.number }"
+          type="button"
+          @click="applyPickedStyle(item)"
+        >
+          <span class="style-picker-thumb">
+            <img v-if="styleThumb(item.number)" :src="styleThumb(item.number)" :alt="item.generationName" />
+            <span v-else>{{ item.referenceAvailable ? '加载中' : '无参考图' }}</span>
+          </span>
+          <span class="style-picker-name">{{ item.generationName }}</span>
+        </button>
+      </div>
+
+      <div v-if="stylePickerPages > 1" class="row" style="margin-top: var(--space-3)">
+        <n-button quaternary size="small" :disabled="stylePickerPage <= 1" @click="goStylePage(-1)">
+          上一页
+        </n-button>
+        <span class="field-hint">{{ stylePickerPage }} / {{ stylePickerPages }}</span>
+        <n-button quaternary size="small" :disabled="stylePickerPage >= stylePickerPages" @click="goStylePage(1)">
+          下一页
+        </n-button>
+        <div class="spacer" />
+        <n-button quaternary size="small" @click="goHanddrawLibrary">打开风格库</n-button>
+      </div>
+      <p class="field-hint" style="margin-top: var(--space-2)">
+        选中后会按当前提示词内容合成画风提示词；需要主题色和参考图说明时去风格库。
+      </p>
+    </n-modal>
   </div>
 </template>
 
@@ -1666,12 +1630,9 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.prompt-picker-filter .input {
+.prompt-picker-filter .n-input {
   flex: 1 1 200px;
   min-width: 0;
-}
-.prompt-picker-filter .select {
-  width: 150px;
 }
 .picker-list {
   display: flex;
@@ -1739,9 +1700,6 @@ onBeforeUnmount(() => {
   }
 }
 @media (max-width: 767px) {
-  .prompt-picker-filter .select {
-    width: 100%;
-  }
   .picker-item {
     flex-direction: column;
   }

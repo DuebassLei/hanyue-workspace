@@ -682,6 +682,9 @@ def push_draft(
             "themeId": theme_id,
             "layoutTokens": theme_tokens,
         },
+        status_history=publish_state.initial_history(
+            publish_state.QUEUED, actor="user", note="创建草稿推送任务"
+        ),
     )
     db.add(job)
     try:

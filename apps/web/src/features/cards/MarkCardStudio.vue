@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { NButton, NInput, NInputNumber } from 'naive-ui'
 import { toPng } from 'html-to-image'
 import JSZip from 'jszip'
 import { api } from '../../api/client'
@@ -100,12 +101,12 @@ function selectPreset(presetId) {
   }
 }
 
-function setCustomWidth(event) {
-  customWidth.value = Math.max(280, Math.min(640, Number(event.target.value) || 360))
+function setCustomWidth(value) {
+  customWidth.value = Math.max(280, Math.min(640, Number(value) || 360))
 }
 
-function setCustomHeight(event) {
-  customHeight.value = Math.max(320, Math.min(800, Number(event.target.value) || 480))
+function setCustomHeight(value) {
+  customHeight.value = Math.max(320, Math.min(800, Number(value) || 480))
 }
 
 function patchTemplate(patch) {
@@ -381,9 +382,9 @@ onBeforeUnmount(() => {
           {{ preset.name }}（{{ preset.ratioLabel.replace(/\s+/g, '') }}）
         </button>
       </div>
-      <button class="btn btn-sm" :disabled="exportingIndex !== null" @click="exportAllCardsZip">
+      <n-button size="small" type="primary" :disabled="exportingIndex !== null" :loading="exportingIndex === 'all'" @click="exportAllCardsZip">
         {{ exportingIndex === 'all' ? '正在打包图集...' : `批量导出图集（${cards.length}张）` }}
-      </button>
+      </n-button>
     </header>
 
     <!-- 从文章台跳转而来时显示返回提示 -->
@@ -719,10 +720,10 @@ onBeforeUnmount(() => {
             <div class="divider" />
             <label class="field-label">保存当前风格为新模板</label>
             <div class="inline-row">
-              <input v-model="newTemplateName" class="input" placeholder="输入自定义模板名称..." />
-              <button class="btn btn-sm" :disabled="savingTemplate" @click="saveCustomTemplate">
+              <n-input v-model:value="newTemplateName" placeholder="输入自定义模板名称..." />
+              <n-button size="small" type="primary" :disabled="savingTemplate" :loading="savingTemplate" @click="saveCustomTemplate">
                 {{ savingTemplate ? '保存中...' : '保存' }}
-              </button>
+              </n-button>
             </div>
           </template>
 
@@ -732,11 +733,11 @@ onBeforeUnmount(() => {
             <div class="inline-row">
               <label class="field">
                 <span class="field-label">宽度 (px)</span>
-                <input class="input mono" type="number" min="280" max="640" :value="customWidth" @input="setCustomWidth" />
+                <n-input-number :value="customWidth" :min="280" :max="640" :show-button="false" @update:value="setCustomWidth" />
               </label>
               <label class="field">
                 <span class="field-label">高度 (px)</span>
-                <input class="input mono" type="number" min="320" max="800" :value="customHeight" @input="setCustomHeight" />
+                <n-input-number :value="customHeight" :min="320" :max="800" :show-button="false" @update:value="setCustomHeight" />
               </label>
             </div>
 
@@ -820,8 +821,8 @@ onBeforeUnmount(() => {
               </label>
             </div>
             <div v-if="meta.showHeader" class="inline-row">
-              <input v-model="meta.headerLeft" class="input" placeholder="左侧栏目名" />
-              <input v-model="meta.headerRight" class="input mono" placeholder="右侧期刊号" />
+              <n-input v-model:value="meta.headerLeft" placeholder="左侧栏目名" />
+              <n-input v-model:value="meta.headerRight" placeholder="右侧期刊号" />
             </div>
 
             <div class="divider" />
@@ -832,14 +833,14 @@ onBeforeUnmount(() => {
               </label>
             </div>
             <div v-if="meta.showFooter" class="inline-row">
-              <input v-model="meta.authorHandle" class="input" placeholder="@账号名称" />
-              <input v-model="meta.footerNote" class="input" placeholder="底部引导语" />
+              <n-input v-model:value="meta.authorHandle" placeholder="@账号名称" />
+              <n-input v-model:value="meta.footerNote" placeholder="底部引导语" />
             </div>
           </template>
         </div>
 
         <div class="inspector-foot">
-          <button class="btn btn-ghost btn-sm" @click="modalOpen = true">查看后端 JSON 契约</button>
+          <n-button size="small" quaternary block @click="modalOpen = true">查看后端 JSON 契约</n-button>
         </div>
       </aside>
     </main>
@@ -1262,10 +1263,6 @@ onBeforeUnmount(() => {
 
 .inspector-foot {
   justify-content: stretch;
-}
-
-.inspector-foot .btn {
-  width: 100%;
 }
 
 .section-head {

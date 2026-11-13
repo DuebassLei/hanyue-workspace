@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header
@@ -12,6 +13,26 @@ from ..core.security import create_token, decode_token
 
 router = APIRouter(tags=["auth"])
 settings = get_settings()
+
+# 形如 Asia/Shanghai、America/Argentina/Buenos_Aires，或 UTC；不校验该时区在当前系统是否可解析
+# （Windows 上缺 tzdata 时 zoneinfo 会抛错，不能因此把一个合法时区判成非法）。
+_TZ_PATTERN = re.compile(r"^(?:UTC|[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)*)$")
+
+
+def _provider() -> str:
+    """身份来源：开发态登录开关打开时，账号是本地 subject 换来的；关闭时来自真实 IdP。"""
+    return "local-dev" if settings.allow_dev_login else "idp"
+
+
+def _user_out(user: models.User) -> schemas.UserOut:
+    return schemas.UserOut(
+        id=user.id,
+        display_name=user.display_name,
+        timezone=user.timezone,
+        auth_subject=user.auth_subject,
+        auth_provider=_provider(),
+        created_at=user.created_at,
+    )
 
 
 @router.post("/auth/login", response_model=schemas.LoginResponse)
@@ -38,17 +59,43 @@ def login(payload: schemas.LoginRequest, db: DbSession) -> schemas.LoginResponse
     workspace = default_workspace(db, user)
     db.commit()
     return schemas.LoginResponse(
-        token=create_token(user.id),
-        user=schemas.UserOut(
-            id=user.id, display_name=user.display_name, timezone=user.timezone
-        ),
-        workspace_id=workspace.id,
+        token=create_token(user.id), user=_user_out(user), workspace_id=workspace.id
     )
 
 
 @router.get("/auth/me", response_model=schemas.UserOut)
 def me(user: CurrentUser) -> schemas.UserOut:
-    return schemas.UserOut(id=user.id, display_name=user.display_name, timezone=user.timezone)
+    return _user_out(user)
+
+
+@router.patch("/auth/me", response_model=schemas.UserOut)
+def update_me(
+    payload: schemas.ProfilePatch, user: CurrentUser, db: DbSession
+) -> schemas.UserOut:
+    """更新本人资料。
+
+    身份字段（auth_subject / 令牌）不在可写范围内：正式接入 IdP 后由断言决定，
+    这里若允许改写就等于允许用户冒充别人的身份。
+    """
+    fields = payload.model_dump(exclude_none=True)
+    if not fields:
+        raise ApiError("empty_patch", "没有需要更新的字段")
+
+    if "display_name" in fields:
+        name = fields["display_name"].strip()
+        if not name:
+            raise ApiError("invalid_display_name", "显示名不能为空")
+        user.display_name = name
+
+    if "timezone" in fields:
+        tz = fields["timezone"].strip()
+        if not _TZ_PATTERN.match(tz):
+            raise ApiError("invalid_timezone", "时区格式不合法，应形如 Asia/Shanghai")
+        user.timezone = tz
+
+    db.commit()
+    db.refresh(user)
+    return _user_out(user)
 
 
 @router.post("/auth/logout")

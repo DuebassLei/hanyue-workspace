@@ -23,15 +23,26 @@ NUMERIC_RANGES: dict[str, tuple[float, float]] = {
     "letterSpacing": (0, 2),
     "paragraphGap": (0.8, 3),
     "indent": (0, 2),
-    "imageRadius": (0, 16),
+    "imageRadius": (0, 20),
 }
 
 ENUMS: dict[str, set[str]] = {
     "align": {"left", "justify", "center"},
-    "h1Style": {"bar", "block", "number", "center", "underline", "number-divider"},
-    "h2Style": {"tag", "underline", "plain", "bar", "strong"},
-    "listMarker": {"dot", "square", "number"},
+    "h1Style": {"bar", "block", "number", "center", "underline", "number-divider", "capsule"},
+    "h2Style": {"tag", "underline", "plain", "bar", "strong", "capsule", "hairline"},
+    "listMarker": {"dot", "square", "number", "circle"},
 }
+
+#: `:::name` 信息块。行式块每行用 | 分列；自由块整段当正文。
+ROW_BLOCKS = {
+    "stat": 2,
+    "steps": 2,
+    "compare": 2,
+    "layers": 2,
+    "checklist": 2,
+}
+FREE_BLOCKS = {"card", "follow", "sign", "lead", "quote-card"}
+FENCE_BLOCKS = ROW_BLOCKS.keys() | FREE_BLOCKS
 
 _COLOR_KEYS = (
     "textColor",
@@ -169,6 +180,101 @@ PRESET_THEMES: dict[str, dict] = {
             imageRadius=0,
             h1Style="number-divider",
             h2Style="strong",
+            listMarker="dot",
+        ),
+    },
+    # 下面四套对齐参考项目的骨架气质：亲和 / 资讯 / 书卷 / 杂志。
+    # 中文字体名在微信里无效，辨识度只放在几何和配色上。
+    "news-ink": {
+        "id": "news-ink",
+        "name": "资讯",
+        "description": "大字、松字距、发丝线标题，适合快讯、评测、行业观察",
+        "tokens": _base_tokens(
+            bodySize=17,
+            bodyLineHeight=2.0,
+            letterSpacing=0.8,
+            paragraphGap=1.6,
+            textColor="#111111",
+            mutedColor="#8A8F98",
+            primaryColor="#1F6F5F",
+            primarySoft="#E7F3EF",
+            quoteBg="#F4F5F7",
+            dividerColor="#E3E6EA",
+            strongColor="#1F6F5F",
+            align="left",
+            imageRadius=12,
+            h1Style="underline",
+            h2Style="hairline",
+            listMarker="dot",
+        ),
+    },
+    "paper-cinnabar": {
+        "id": "paper-cinnabar",
+        "name": "书卷",
+        "description": "居中标题、色条、收紧段距，适合人文、读书、深度长文",
+        "tokens": _base_tokens(
+            bodySize=15,
+            bodyLineHeight=1.95,
+            letterSpacing=0.3,
+            paragraphGap=1.1,
+            textColor="#222222",
+            mutedColor="#8A8F98",
+            primaryColor="#9E3D30",
+            primarySoft="#F8EEEB",
+            quoteBg="#F7F5F2",
+            dividerColor="#D9DDE1",
+            strongColor="#9E3D30",
+            align="left",
+            imageRadius=0,
+            h1Style="center",
+            h2Style="plain",
+            listMarker="circle",
+        ),
+    },
+    "magazine-slate": {
+        "id": "magazine-slate",
+        "name": "杂志",
+        "description": "窄栏、大留白、细线引用，适合品牌故事、访谈、生活方式",
+        "tokens": _base_tokens(
+            bodySize=15,
+            bodyLineHeight=2.0,
+            letterSpacing=0.4,
+            paragraphGap=1.5,
+            textColor="#2A2A2A",
+            mutedColor="#8A8A8A",
+            primaryColor="#4A5D6E",
+            primarySoft="#EEF1F4",
+            quoteBg="#F7F7F6",
+            dividerColor="#D9DDE1",
+            strongColor="#4A5D6E",
+            align="left",
+            indent=0,
+            imageRadius=0,
+            h1Style="center",
+            h2Style="plain",
+            listMarker="circle",
+        ),
+    },
+    "friendly-pill": {
+        "id": "friendly-pill",
+        "name": "亲和",
+        "description": "胶囊标题、大圆角，适合教程和面向新手的解释",
+        "tokens": _base_tokens(
+            bodySize=16,
+            bodyLineHeight=1.95,
+            letterSpacing=0.5,
+            paragraphGap=1.5,
+            textColor="#1F1F1F",
+            mutedColor="#8A8F98",
+            primaryColor="#6B5B95",
+            primarySoft="#F1EEF6",
+            quoteBg="#F5F6F8",
+            dividerColor="#E6E4EE",
+            strongColor="#1F1F1F",
+            align="left",
+            imageRadius=16,
+            h1Style="capsule",
+            h2Style="capsule",
             listMarker="dot",
         ),
     },
@@ -352,6 +458,7 @@ class Block:
     text: str = ""
     level: int = 0
     items: list[str] = field(default_factory=list)
+    rows: list[list[str]] = field(default_factory=list)
     image_index: int = 0
     caption: str = ""
     meta: str = ""
@@ -395,7 +502,7 @@ def parse_blocks(body: str, warnings: list[dict]) -> list[Block]:
             flush()
             header = stripped[3:].strip()
             name, _, meta = header.partition(" ")
-            if name not in {"card", "follow", "sign"}:
+            if name not in FENCE_BLOCKS:
                 warnings.append(
                     {
                         "field": "body",
@@ -424,7 +531,12 @@ def parse_blocks(body: str, warnings: list[dict]) -> list[Block]:
                         "message": f"区块 :::{name} 未闭合，内容仍会输出但样式按普通区块处理",
                     }
                 )
-            blocks.append(Block(kind=name, text="\n".join(collected).strip(), meta=meta.strip()))
+            body_text = "\n".join(collected).strip()
+            if name in ROW_BLOCKS:
+                rows = _parse_rows(body_text, ROW_BLOCKS[name], name, warnings)
+                blocks.append(Block(kind=name, rows=rows, meta=meta.strip()))
+            else:
+                blocks.append(Block(kind=name, text=body_text, meta=meta.strip()))
             continue
 
         if stripped in {"---", "***", "___"}:
@@ -488,6 +600,40 @@ def parse_blocks(body: str, warnings: list[dict]) -> list[Block]:
     return blocks
 
 
+_CHECK_MARKS = {"done": "✓", "todo": "○", "warn": "!"}
+
+
+def _parse_rows(body_text: str, columns: int, name: str, warnings: list[dict]) -> list[list[str]]:
+    """行式区块：每行按 | 分成固定列数。缺列补空，多列并进最后一列，不丢字。"""
+    rows: list[list[str]] = []
+    for raw in body_text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) < columns:
+            warnings.append(
+                {
+                    "field": "body",
+                    "level": "warning",
+                    "message": f":::{name} 一行需要 {columns} 列（用 | 分开），已补空列：{line}",
+                }
+            )
+            parts.extend([""] * (columns - len(parts)))
+        elif len(parts) > columns:
+            parts = parts[: columns - 1] + [" | ".join(parts[columns - 1 :])]
+        rows.append(parts)
+    if not rows:
+        warnings.append(
+            {"field": "body", "level": "warning", "message": f":::{name} 没有可渲染的行"}
+        )
+    return rows
+
+
+def _check_mark(status: str) -> str:
+    return _CHECK_MARKS.get(status.strip().lower(), "○")
+
+
 # ---------- 区块渲染 ----------
 
 
@@ -533,6 +679,11 @@ def _render_heading(block: Block, tokens: dict, number: int) -> str:
                 f'<span style="{_style({"display": "block", "color": primary, "font-size": size + 6, "font-weight": 700, "margin-bottom": 4})}">{number:02d}</span>'
                 f'<strong style="{_style({"color": strong_color, "font-size": size, "font-weight": 600, "line-height": 1.6})}">{escape_text(block.text)}</strong>',
             )
+        if style == "capsule":
+            return _section(
+                {**base},
+                f'<span style="{_style({"display": "inline-block", "padding": "6px 16px", "background": primary, "color": "#FFFFFF", "font-size": size, "font-weight": 600, "border-radius": 999})}">{escape_text(block.text)}</span>',
+            )
         return _section(
             {**base},
             f'<span style="{_style({"display": "inline-block", "width": 4, "height": "1em", "background": primary, "vertical-align": "-1px", "margin-right": 8})}"></span>'
@@ -561,6 +712,16 @@ def _render_heading(block: Block, tokens: dict, number: int) -> str:
             {**base, "margin": "1.6em 0 0.7em"},
             f'<strong style="{_style({"color": strong_color, "font-size": size, "font-weight": 600, "line-height": 1.6})}">{escape_text(block.text)}</strong>',
         )
+    if style == "capsule":
+        return _section(
+            {**base, "margin": "1.6em 0 0.7em"},
+            f'<span style="{_style({"display": "inline-block", "padding": "4px 14px", "background": tokens["primarySoft"], "color": primary, "font-size": size, "font-weight": 600, "border-radius": 999})}">{escape_text(block.text)}</span>',
+        )
+    if style == "hairline":
+        return _section(
+            {**base, "margin": "1.6em 0 0.7em", "padding-bottom": 8, "border-bottom": f"0.8px solid {tokens['dividerColor']}"},
+            f'<strong style="{_style({"color": color, "font-size": size, "font-weight": 600, "letter-spacing": 0.8})}">{escape_text(block.text)}</strong>',
+        )
     return _section(
         {**base, "margin": "1.6em 0 0.7em"},
         f'<strong style="{_style({"color": primary, "font-size": size, "font-weight": 600})}">{escape_text(block.text)}</strong>',
@@ -582,7 +743,7 @@ def _render_list(block: Block, tokens: dict, warnings: list[dict], ordered: bool
         list_style = "decimal"
     else:
         tag = "ul"
-        list_style = "square" if marker == "square" else "disc"
+        list_style = "square" if marker == "square" else "circle" if marker == "circle" else "disc"
     items = "".join(
         f'<li style="{_style({"margin": "0 0 0.35em", "line-height": tokens["bodyLineHeight"]})}">{render_inline(item, tokens, warnings)}</li>'
         for item in block.items
@@ -652,6 +813,41 @@ def _render_blockquote_like(kind: str, block: Block, tokens: dict, warnings: lis
             },
             inner,
         )
+    if kind == "lead":
+        bar = (
+            f'<span style="{_style({"display": "block", "width": 36, "height": 4, "background": tokens["primaryColor"], "margin": "0 0 12px", "border-radius": 2})}"></span>'
+        )
+        return _section(
+            {
+                "margin": f"0 0 {tokens['paragraphGap']}em",
+                "font-size": 17.5,
+                "line-height": 1.7,
+                "font-weight": 500,
+                "color": tokens["textColor"],
+                "letter-spacing": tokens["letterSpacing"],
+            },
+            bar + inner,
+        )
+    if kind == "quote-card":
+        mark = (
+            f'<span style="{_style({"display": "block", "font-size": 36, "line-height": 1, "color": tokens["primaryColor"], "font-weight": 700, "margin": "0 0 4px"})}">“</span>'
+        )
+        source = (
+            f'<span style="{_style({"display": "block", "margin": "10px 0 0", "font-size": 13, "color": tokens["mutedColor"]})}">〔{escape_text(block.meta)}〕</span>'
+            if block.meta
+            else ""
+        )
+        return _section(
+            {
+                "margin": f"0 0 {tokens['paragraphGap']}em",
+                "padding": "8px 4px 8px 0",
+                "font-size": 19,
+                "line-height": 1.6,
+                "font-weight": 600,
+                "color": tokens["textColor"],
+            },
+            mark + inner + source,
+        )
     # sign：文末署名，上面一条细线
     return _section(
         {
@@ -684,6 +880,99 @@ def _render_code(block: Block, tokens: dict) -> str:
         },
         f"<span>{code}</span>",
     )
+
+
+def _cell(text: str, tokens: dict, warnings: list[dict]) -> str:
+    return render_inline(text, tokens, warnings) if text else ""
+
+
+def _render_stat(block: Block, tokens: dict, warnings: list[dict]) -> str:
+    rows = "".join(
+        _section(
+            {
+                "display": "flex",
+                "align-items": "baseline",
+                "margin": "0 0 10px",
+            },
+            f'<span style="{_style({"min-width": 96, "font-size": 30, "font-weight": 800, "line-height": 1.1, "color": tokens["primaryColor"], "font-variant-numeric": "tabular-nums", "margin-right": 12})}">{_cell(cols[0], tokens, warnings)}</span>'
+            f'<span style="{_style({"font-size": 14, "line-height": 1.5, "color": tokens["mutedColor"]})}">{_cell(cols[1], tokens, warnings)}</span>',
+        )
+        for cols in block.rows
+    )
+    return _section({"margin": f"0 0 {tokens['paragraphGap']}em"}, rows)
+
+
+def _render_steps(block: Block, tokens: dict, warnings: list[dict]) -> str:
+    rows = "".join(
+        _section(
+            {"display": "flex", "align-items": "flex-start", "margin": "0 0 14px"},
+            f'<span style="{_style({"flex": "0 0 26px", "width": 26, "height": 26, "line-height": 26, "text-align": "center", "border-radius": 999, "background": tokens["primaryColor"], "color": "#FFFFFF", "font-size": 13, "font-weight": 700, "margin-right": 12})}">{index}</span>'
+            f'<span style="{_style({"flex": 1})}">'
+            f'<strong style="{_style({"display": "block", "font-size": 16.5, "font-weight": 600, "line-height": 1.4, "color": tokens["textColor"]})}">{_cell(cols[0], tokens, warnings)}</strong>'
+            f'<span style="{_style({"display": "block", "margin": "2px 0 0", "font-size": 14, "line-height": 1.6, "color": tokens["mutedColor"]})}">{_cell(cols[1], tokens, warnings)}</span>'
+            f"</span>",
+        )
+        for index, cols in enumerate(block.rows, start=1)
+    )
+    return _section({"margin": f"0 0 {tokens['paragraphGap']}em"}, rows)
+
+
+def _render_compare(block: Block, tokens: dict, warnings: list[dict]) -> str:
+    heads = [part.strip() for part in block.meta.split("/", 1)] if block.meta else []
+    while len(heads) < 2:
+        heads.append("")
+    header = _section(
+        {"display": "flex", "margin": "0 0 8px"},
+        f'<strong style="{_style({"flex": 1, "font-size": 13, "font-weight": 600, "color": tokens["mutedColor"], "margin-right": 10})}">{escape_text(heads[0])}</strong>'
+        f'<strong style="{_style({"flex": 1, "font-size": 13, "font-weight": 600, "color": tokens["primaryColor"]})}">{escape_text(heads[1])}</strong>',
+    )
+    rows = "".join(
+        _section(
+            {"display": "flex", "margin": "0 0 8px"},
+            f'<span style="{_style({"flex": 1, "padding": "12px 14px", "background": "#F4F5F7", "border-radius": 12, "font-size": 14, "line-height": 1.6, "color": tokens["textColor"], "margin-right": 10})}">{_cell(cols[0], tokens, warnings)}</span>'
+            f'<span style="{_style({"flex": 1, "padding": "12px 14px", "background": tokens["primarySoft"], "border-radius": 12, "font-size": 14, "line-height": 1.6, "color": tokens["textColor"]})}">{_cell(cols[1], tokens, warnings)}</span>',
+        )
+        for cols in block.rows
+    )
+    return _section({"margin": f"0 0 {tokens['paragraphGap']}em"}, header + rows)
+
+
+def _render_layers(block: Block, tokens: dict, warnings: list[dict]) -> str:
+    cards = "".join(
+        _section(
+            {
+                "margin": "0 0 8px",
+                "padding": "12px 14px",
+                "background": tokens["primarySoft"],
+                "border-radius": 12,
+            },
+            f'<strong style="{_style({"display": "block", "margin": "0 0 4px", "font-size": 12, "font-weight": 600, "letter-spacing": 0.4, "color": tokens["primaryColor"]})}">{_cell(cols[0], tokens, warnings)}</strong>'
+            f'<span style="{_style({"display": "block", "font-size": tokens["bodySize"] - 1, "line-height": 1.7, "color": tokens["textColor"]})}">{_cell(cols[1], tokens, warnings)}</span>',
+        )
+        for cols in block.rows
+    )
+    return _section({"margin": f"0 0 {tokens['paragraphGap']}em"}, cards)
+
+
+def _render_checklist(block: Block, tokens: dict, warnings: list[dict]) -> str:
+    rows = "".join(
+        _section(
+            {"display": "flex", "align-items": "flex-start", "margin": "0 0 8px"},
+            f'<span style="{_style({"flex": "0 0 18px", "width": 18, "font-size": 15, "line-height": 1.6, "font-weight": 700, "color": tokens["primaryColor"], "margin-right": 8})}">{_check_mark(cols[0])}</span>'
+            f'<span style="{_style({"flex": 1, "font-size": tokens["bodySize"] - 1, "line-height": 1.6, "color": tokens["textColor"]})}">{_cell(cols[1], tokens, warnings)}</span>',
+        )
+        for cols in block.rows
+    )
+    return _section({"margin": f"0 0 {tokens['paragraphGap']}em"}, rows)
+
+
+_ROW_RENDERERS = {
+    "stat": _render_stat,
+    "steps": _render_steps,
+    "compare": _render_compare,
+    "layers": _render_layers,
+    "checklist": _render_checklist,
+}
 
 
 def _render_divider(tokens: dict) -> str:
@@ -732,8 +1021,10 @@ def render_document(
                     }
                 )
             parts.append(rendered)
-        elif block.kind in {"card", "follow", "sign"}:
+        elif block.kind in FREE_BLOCKS:
             parts.append(_render_blockquote_like(block.kind, block, theme, warnings))
+        elif block.kind in _ROW_RENDERERS:
+            parts.append(_ROW_RENDERERS[block.kind](block, theme, warnings))
         elif block.kind == "code":
             parts.append(_render_code(block, theme))
         elif block.kind == "divider":

@@ -247,6 +247,9 @@ async def text_generation(
         else None
     )
 
+    skill_key = getattr(selected_skill, "skill_key", None)
+    skill_version = getattr(selected_skill, "version", None)
+
     generation = models.AiGeneration(
         owner_user_id=user.id,
         task_type=payload.task_type,
@@ -257,6 +260,8 @@ async def text_generation(
             "prompt": payload.prompt[:200],
             "constraints": payload.constraints,
             "promptTemplateVersion": ai_gateway.PROMPT_TEMPLATE_VERSION,
+            "skillKey": skill_key,
+            "skillVersion": skill_version,
         },
     )
     db.add(generation)
@@ -298,7 +303,18 @@ async def text_generation(
                         pending_error = event["data"]
                     elif kind == "generation.done":
                         completed = True
-                        yield _sse(kind, {**event["data"], "generationId": generation.id})
+                        done_data = {
+                            **event["data"],
+                            "generationId": generation.id,
+                            "skillKey": skill_key,
+                            "skillVersion": skill_version,
+                        }
+                        if payload.task_type == "article":
+                            # 契约检查失败只告知，不阻断落库
+                            draft = ai_article.parse_llm_output("".join(collected))
+                            if draft.ok:
+                                done_data["review"] = ai_article.review_contract(draft)
+                        yield _sse(kind, done_data)
                     else:
                         yield _sse(kind, {**event["data"], "generationId": generation.id})
                 if pending_error is None:
@@ -316,7 +332,16 @@ async def text_generation(
             # 只有真实供应商完整返回才写入稿件版本；错误/中断/占位一律不落库
             if payload.content_item_id and collected and completed and not error_code:
                 saved_version_id = _persist_version(
-                    db, user, payload.content_item_id, "".join(collected), payload
+                    db,
+                    user,
+                    payload.content_item_id,
+                    "".join(collected),
+                    payload,
+                    skill_ref=(
+                        f"{skill_key}@{skill_version}"
+                        if skill_key and skill_version
+                        else None
+                    ),
                 )
                 if saved_version_id:
                     yield _sse("generation.saved", {"versionId": saved_version_id})
@@ -341,7 +366,12 @@ async def text_generation(
 
 
 def _persist_version(
-    db, user: models.User, content_item_id: str, text: str, payload: schemas.TextGenerationIn
+    db,
+    user: models.User,
+    content_item_id: str,
+    text: str,
+    payload: schemas.TextGenerationIn,
+    skill_ref: str | None = None,
 ) -> str | None:
     from sqlalchemy import func
 
@@ -354,16 +384,23 @@ def _persist_version(
         )
     )
     # 文章类任务是 JSON 契约输出，直接落库会把整个 JSON 写进正文
-    ai_title, ai_body = ai_article.article_from_raw_output(text)
+    draft = ai_article.parse_llm_output(text)
+    if draft.ok:
+        ai_title, ai_body = draft.title, draft.markdown
+        summary = draft.summary[:300] if draft.summary else f"{payload.task_type} 生成"
+    else:
+        ai_title, ai_body = ai_article.article_from_raw_output(text)
+        summary = f"{payload.task_type} 生成"
     version = models.ContentVersion(
         content_item_id=item.id,
         version_no=(max_no or 0) + 1,
         parent_version_id=item.current_version_id,
         source_type="ai",
         model_id=payload.model_id,
+        prompt_template_version=skill_ref[:32] if skill_ref else None,
         title=ai_title or item.title,
         body=ai_body,
-        summary=f"{payload.task_type} 生成",
+        summary=summary,
     )
     db.add(version)
     db.flush()

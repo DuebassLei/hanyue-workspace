@@ -22,7 +22,53 @@ def test_login_returns_token_and_workspace(client):
     headers = login(client)
     me = client.get("/api/v1/auth/me", headers=headers)
     assert me.status_code == 200
-    assert me.json()["displayName"] == "user-a"
+    body = me.json()
+    assert body["displayName"] == "user-a"
+    # 账号面板要展示的身份信息：不靠前端猜，由服务端给出
+    assert body["authSubject"] == "user-a"
+    assert body["authProvider"] in {"local-dev", "idp"}
+    assert body["createdAt"]
+
+
+def test_update_me_changes_only_owned_fields(client):
+    headers = login(client, "profile-owner")
+    updated = client.patch(
+        "/api/v1/auth/me",
+        json={"displayName": "  新的名字  ", "timezone": "Asia/Tokyo"},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert body["displayName"] == "新的名字"
+    assert body["timezone"] == "Asia/Tokyo"
+    # 身份标识不可被请求体改写
+    assert body["authSubject"] == "profile-owner"
+    assert client.get("/api/v1/auth/me", headers=headers).json()["displayName"] == "新的名字"
+
+
+def test_update_me_rejects_invalid_input(client):
+    headers = login(client, "profile-invalid")
+    blank = client.patch("/api/v1/auth/me", json={"displayName": "   "}, headers=headers)
+    assert blank.status_code == 400
+    assert blank.json()["code"] == "invalid_display_name"
+
+    bad_tz = client.patch("/api/v1/auth/me", json={"timezone": "../etc"}, headers=headers)
+    assert bad_tz.status_code == 400
+    assert bad_tz.json()["code"] == "invalid_timezone"
+
+    empty = client.patch("/api/v1/auth/me", json={}, headers=headers)
+    assert empty.status_code == 400
+
+    # 失败不改动已有资料
+    assert client.get("/api/v1/auth/me", headers=headers).json()["timezone"] == "Asia/Shanghai"
+
+
+def test_update_me_is_isolated_per_user(client):
+    a = login(client, "iso-a")
+    b = login(client, "iso-b")
+    client.patch("/api/v1/auth/me", json={"displayName": "A 改名"}, headers=a)
+    assert client.get("/api/v1/auth/me", headers=b).json()["displayName"] == "iso-b"
+    assert client.patch("/api/v1/auth/me", json={"displayName": "x"}).status_code == 401
 
 
 def test_requires_auth(client):
@@ -338,6 +384,106 @@ def test_agent_run_with_enabled_skill_creates_draft(client):
 
 def events_run(run):
     return run["id"]
+
+
+def _run_agent_with_article_json(client, monkeypatch, subject: str, skill_key: str = "article-drafting"):
+    """启用内置 Skill 跑一轮 Agent，模型替身返回契约 JSON；返回 (markdown, JSON, 调用参数, 稿件版本, Skill)。"""
+    import json
+
+    from sqlalchemy import select
+
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services import ai_gateway
+
+    headers = login(client, subject)
+    skills = client.get("/api/v1/skills?limit=100", headers=headers).json()
+    skill = next(s for s in skills if s["skillKey"] == skill_key)
+    enabled = client.patch(
+        f"/api/v1/skills/{skill['id']}",
+        json={"enabled": True, "grantedToolIds": skill["allowedToolIds"]},
+        headers=headers,
+    )
+    assert enabled.status_code == 200, enabled.text
+
+    markdown = "## 时间管理\n\n- 先做最重要的事\n\n> 记录时间流向"
+    payload = {
+        "title": "时间管理的三个习惯",
+        "markdown": markdown,
+        "summary": "从记录、排序、复盘三步讲清时间管理。",
+        "coverPrompt": "a quiet desk with a clock, warm light",
+        "inlinePrompts": ["notebook on a desk"],
+    }
+    calls: list[dict] = []
+
+    async def fake_generate_text(db, **kwargs):
+        calls.append(kwargs)
+        return {
+            "text": json.dumps(payload, ensure_ascii=False),
+            "modelCode": "test-model",
+            "provider": "test-double",
+            "errorCode": None,
+        }
+
+    monkeypatch.setattr(ai_gateway, "generate_text", fake_generate_text)
+    from app.services import agent_runtime
+
+    # 网关模块可能被重新导入成另一个对象，运行器实际调用的入口也一并替换
+    monkeypatch.setattr(agent_runtime.ai_gateway, "generate_text", fake_generate_text)
+
+    session = client.post("/api/v1/agent/sessions", json={"title": "写作"}, headers=headers).json()
+    run = client.post(
+        f"/api/v1/agent/sessions/{session['id']}/messages",
+        json={"goal": "写一篇关于时间管理的稿子", "skillIds": [skill["id"]], "maxRounds": 5},
+        headers=headers,
+    ).json()
+    assert run["status"] == "succeeded", run
+
+    with SessionLocal() as db:
+        # create_outline 与 generate_article 都会建稿，按本轮 tool.result 的 versionId 精确取值
+        events = client.get(f"/api/v1/agent/runs/{run['id']}/events", headers=headers).json()
+        results = {
+            e["payload"]["toolId"]: e["payload"]["result"]
+            for e in events
+            if e["eventType"] == "tool.result"
+        }
+        article = results["generate_article"]
+        version = db.get(models.ContentVersion, article["versionId"])
+        assert version.content_item_id == article["contentItemId"]
+        outline = results.get("create_outline")
+        if outline:
+            outline_body = db.get(models.ContentVersion, outline["versionId"]).body
+            assert "coverPrompt" in outline_body, "非文章工具不做 JSON 解析"
+        entry = db.scalar(
+            select(models.SkillRegistryEntry).where(
+                models.SkillRegistryEntry.skill_key == skill_key,
+                models.SkillRegistryEntry.owner_user_id.is_(None),
+            )
+        )
+        return markdown, payload, calls, version, entry
+
+
+def test_agent_generate_article_writes_markdown_not_json(client, monkeypatch):
+    markdown, payload, calls, version, entry = _run_agent_with_article_json(
+        client, monkeypatch, "agent-article-json"
+    )
+    assert version.body == markdown
+    assert "coverPrompt" not in version.body
+    assert version.title == payload["title"]
+    assert version.summary == payload["summary"]
+    assert version.prompt_template_version == f"{entry.skill_key}@{entry.version}"[:32]
+    checks = [c for c in calls if c.get("task_type") == "article" and "system_prompt" in c]
+    assert checks, calls
+
+
+def test_agent_generate_article_passes_skill_system_prompt(client, monkeypatch):
+    markdown, _, calls, _, entry = _run_agent_with_article_json(
+        client, monkeypatch, "agent-article-skill"
+    )
+    tone = entry.manifest["tone"]
+    assert markdown
+    for call in calls:
+        assert call["system_prompt"] and tone in call["system_prompt"], call
 
 
 def test_skill_cannot_grant_tool_outside_manifest(client):
@@ -864,3 +1010,222 @@ def test_agent_status_flags_connection_missing_credential(client):
     data = client.get("/api/v1/agent/status", headers=headers).json()
     assert data["mode"]["code"] == "degraded"
     assert "API Key" in data["mode"]["detail"]
+
+# ---------------- 发布中心重构 P1：筛选 / 汇总 / 详情 / 改期 / 审批 / 重试 ----------------
+
+
+def _seed_job(
+    job_id: str,
+    *,
+    status: str | None = None,
+    payload_patch: dict | None = None,
+    history: list[dict] | None = None,
+):
+    """直改库里的任务状态，模拟非 API 入口产生的状态（pending_review、执行失败等）。"""
+    from app import models
+    from app.core.db import SessionLocal
+
+    with SessionLocal() as db:
+        job = db.get(models.PublishJob, job_id)
+        if status is not None:
+            job.status = status
+            job.status_history = []  # 由调用方决定是否传入初始历史
+        if payload_patch:
+            job.payload_snapshot = {**(job.payload_snapshot or {}), **payload_patch}
+        if history is not None:
+            job.status_history = history
+        db.commit()
+
+
+def _create_manual_job(client, headers, subject, key, title, scheduled=None):
+    account = client.post(
+        "/api/v1/platform-accounts", json={"platform": "wechat_official"}, headers=headers
+    ).json()
+    res = client.post(
+        "/api/v1/publishing/jobs",
+        json={
+            "accountId": account["id"],
+            "idempotencyKey": key,
+            "title": title,
+            "body": "正文内容",
+            "reviewed": True,
+            "mode": "manual",
+            **({"scheduledAt": scheduled} if scheduled else {}),
+        },
+        headers=headers,
+    )
+    assert res.status_code == 201, res.text
+    return res.json()
+
+
+def test_publish_jobs_filter_search_and_summary(client):
+    headers = login(client, "pub-filter")
+    job_a = _create_manual_job(client, headers, "pub-filter", "filter-key-1", "每周选题复盘", "2099-11-10T10:00:00Z")
+    job_b = _create_manual_job(client, headers, "pub-filter", "filter-key-2", "产品更新公告")
+    _create_manual_job(client, headers, "pub-filter", "filter-key-3", "第三篇草稿")
+
+    summary = client.get("/api/v1/publishing/jobs/summary", headers=headers).json()
+    assert summary["total"] == 3
+    assert summary["byStatus"]["queued"] == 1
+    assert summary["byStatus"]["approved"] == 2
+
+    # 状态筛选：单值与逗号分隔多值
+    queued = client.get("/api/v1/publishing/jobs?status=queued", headers=headers).json()
+    assert [job["id"] for job in queued] == [job_a["id"]]
+    both = client.get("/api/v1/publishing/jobs?status=approved,queued", headers=headers).json()
+    assert len(both) == 3
+
+    # 未知状态明确报 400，不静默当空结果
+    bad = client.get("/api/v1/publishing/jobs?status=bogus", headers=headers)
+    assert bad.status_code == 400
+    assert bad.json()["code"] == "invalid_status_filter"
+
+    # 搜索命中 payload 标题与请求号
+    by_title = client.get("/api/v1/publishing/jobs?q=复盘", headers=headers).json()
+    assert [job["id"] for job in by_title] == [job_a["id"]]
+    by_request = client.get(
+        f"/api/v1/publishing/jobs?q={job_b['requestId'][:12]}", headers=headers
+    ).json()
+    assert [job["id"] for job in by_request] == [job_b["id"]]
+
+    # 平台 / 账号筛选
+    assert len(client.get("/api/v1/publishing/jobs?platform=wechat_official", headers=headers).json()) == 3
+    assert client.get("/api/v1/publishing/jobs?platform=douyin", headers=headers).json() == []
+    account_id = client.get("/api/v1/platform-accounts", headers=headers).json()[0]["id"]
+    assert len(client.get(f"/api/v1/publishing/jobs?accountId={account_id}", headers=headers).json()) == 1
+
+
+def test_publish_job_detail_timeline_and_records(client):
+    headers = login(client, "pub-detail")
+    job = _create_manual_job(client, headers, "pub-detail", "detail-key-1", "详情时间线")
+    recorded = client.post(
+        f"/api/v1/publishing/jobs/{job['id']}/record-manual-result",
+        json={"remoteContentId": "remote-1", "permalink": "https://example.com/p/1"},
+        headers=headers,
+    )
+    assert recorded.status_code == 200, recorded.text
+
+    detail = client.get(f"/api/v1/publishing/jobs/{job['id']}", headers=headers)
+    assert detail.status_code == 200
+    body = detail.json()
+    # 时间线：创建（approved）→ 手动回填（succeeded），触发方与备注齐全
+    assert [entry["status"] for entry in body["statusHistory"]] == ["approved", "succeeded"]
+    assert body["statusHistory"][-1]["actor"] == "user"
+    assert "回填" in body["statusHistory"][-1]["note"]
+    assert body["records"][0]["resultStatus"] == "manual_recorded"
+    assert body["records"][0]["permalink"] == "https://example.com/p/1"
+    # 列表字段同步暴露 mode / permalink，供行内上下文操作判断
+    assert body["mode"] == "manual"
+    assert body["permalink"] == "https://example.com/p/1"
+
+    assert client.get("/api/v1/publishing/jobs/nonexistent", headers=headers).status_code == 404
+
+
+def test_publish_job_patch_reschedule_and_edit(client):
+    headers = login(client, "pub-patch")
+    job = _create_manual_job(client, headers, "pub-patch", "patch-key-1", "原标题", "2099-11-10T10:00:00Z")
+
+    # 改期：状态不变但历史留痕
+    patched = client.patch(
+        f"/api/v1/publishing/jobs/{job['id']}",
+        json={"scheduledAt": "2099-12-01T09:00:00Z"},
+        headers=headers,
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["scheduledAt"].startswith("2099-12-01")
+    detail = client.get(f"/api/v1/publishing/jobs/{job['id']}", headers=headers).json()
+    assert detail["statusHistory"][-1]["note"] == "修改计划时间"
+    assert detail["statusHistory"][-1]["status"] == "queued"
+
+    # 改标题：同步反映到列表标题
+    renamed = client.patch(
+        f"/api/v1/publishing/jobs/{job['id']}", json={"title": "新标题"}, headers=headers
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["contentTitle"] == "新标题"
+
+    # 过去时间拒绝；排队任务显式清空计划时间拒绝（会永久滞留）
+    assert (
+        client.patch(
+            f"/api/v1/publishing/jobs/{job['id']}",
+            json={"scheduledAt": "2020-01-01T00:00:00Z"},
+            headers=headers,
+        ).status_code
+        == 422
+    )
+    assert (
+        client.patch(
+            f"/api/v1/publishing/jobs/{job['id']}", json={"scheduledAt": None}, headers=headers
+        ).status_code
+        == 422
+    )
+
+    # 终态不可编辑
+    client.post(
+        f"/api/v1/publishing/jobs/{job['id']}/record-manual-result",
+        json={"remoteContentId": "remote-x"},
+        headers=headers,
+    )
+    denied = client.patch(
+        f"/api/v1/publishing/jobs/{job['id']}", json={"title": "迟到修改"}, headers=headers
+    )
+    assert denied.status_code == 409
+    assert denied.json()["code"] == "job_not_editable"
+
+
+def test_publish_job_approve_flow(client):
+    headers = login(client, "pub-approve")
+    job = _create_manual_job(client, headers, "pub-approve", "approve-key-1", "待审任务")
+    # pending_review 目前只由 Agent 受控链路产生：直改库模拟（带初始历史，模拟真实创建路径）
+    from app.services import publish_state as ps
+
+    _seed_job(
+        job["id"],
+        status="pending_review",
+        history=ps.initial_history("pending_review", actor="system", note="Agent 创建，待人工审核"),
+    )
+
+    approved = client.post(f"/api/v1/publishing/jobs/{job['id']}/approve", headers=headers)
+    assert approved.status_code == 200, approved.text
+    body = approved.json()
+    assert body["status"] == "approved"
+    detail = client.get(f"/api/v1/publishing/jobs/{job['id']}", headers=headers).json()
+    assert [entry["status"] for entry in detail["statusHistory"]] == ["pending_review", "approved"]
+    assert detail["statusHistory"][-1]["note"] == "人工审核通过"
+
+    # 已审批任务不能重复审批
+    again = client.post(f"/api/v1/publishing/jobs/{job['id']}/approve", headers=headers)
+    assert again.status_code == 409
+    assert again.json()["code"] == "invalid_transition"
+
+
+def test_publish_retry_reenqueues_real_platform_job(client):
+    """草稿箱任务重试必须重新投递后台队列，否则会永久滞留在排队。"""
+    from app import models
+    from app.core.db import SessionLocal
+    from sqlalchemy import select
+
+    def background_job_count():
+        with SessionLocal() as db:
+            return len(
+                db.scalars(
+                    select(models.BackgroundJob).where(models.BackgroundJob.kind == "wechat_draft")
+                ).all()
+            )
+
+    headers = login(client, "pub-retry")
+    draft_job = _create_manual_job(client, headers, "pub-retry", "retry-key-1", "草稿重试")
+    _seed_job(draft_job["id"], status="failed", payload_patch={"mode": "draft"})
+
+    before = background_job_count()
+    retried = client.post(f"/api/v1/publishing/jobs/{draft_job['id']}/retry", headers=headers)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "queued"
+    assert background_job_count() == before + 1
+
+    # manual 模式重试由用户手动执行，不投递队列
+    manual_job = _create_manual_job(client, headers, "pub-retry", "retry-key-2", "手动重试")
+    _seed_job(manual_job["id"], status="failed")
+    before_manual = background_job_count()
+    assert client.post(f"/api/v1/publishing/jobs/{manual_job['id']}/retry", headers=headers).status_code == 200
+    assert background_job_count() == before_manual

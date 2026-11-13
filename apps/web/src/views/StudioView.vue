@@ -1,12 +1,23 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import {
+  NAlert,
+  NButton,
+  NCheckbox,
+  NForm,
+  NFormItem,
+  NInput,
+  NModal,
+  NSelect,
+  NSpace,
+} from 'naive-ui'
 import { api, streamGeneration, fetchBlobUrl, apiUrl } from '../api/client'
-import AppModal from '../components/AppModal.vue'
 import StatusTag from '../components/StatusTag.vue'
 import MarkdownEditor from '../components/MarkdownEditor.vue'
 import { articleBodyFromOutput, parseArticleOutput } from '../utils/aiArticle'
 import PublishDrawer from '../features/publish/PublishDrawer.vue'
+import { toast } from '../ui/feedback'
 
 const route = useRoute()
 const router = useRouter()
@@ -16,7 +27,6 @@ const detail = ref(null)
 const loading = ref(true)
 const error = ref('')
 const saving = ref(false)
-const notice = ref('')
 
 const draftTitle = ref('')
 const draftBody = ref('')
@@ -95,6 +105,10 @@ const writingStylesLoading = ref(false)
 const writingStyleKey = ref('article-drafting')
 const STYLE_TASKS = new Set(['article', 'polish', 'rewrite'])
 const usesWritingStyle = computed(() => STYLE_TASKS.has(aiTask.value))
+const writingStyleOptions = computed(() => {
+  if (!writingStyles.value.length) return [{ value: 'article-drafting', label: '使用默认风格' }]
+  return writingStyles.value.map((style) => ({ value: style.skillKey, label: style.displayName }))
+})
 const editorRef = ref(null)  // MarkdownEditor 暴露的 editor 实例
 let abortStream = null
 
@@ -204,7 +218,6 @@ async function openItem(id) {
   await nextTick()
   loadingDraft = false
   autoSaveStatus.value = hasDraft && dirty.value ? 'saved' : 'idle'
-  notice.value = ''
   if (route.query.id !== id) router.replace({ name: 'studio', query: { id } })
 }
 
@@ -252,7 +265,6 @@ async function saveVersion() {
   if (!detail.value) return
   const itemId = detail.value.item.id
   saving.value = true
-  notice.value = ''
   // 先把待保存草稿落库，保证草稿与版本内容一致
   if (autoSaveTimer) {
     clearTimeout(autoSaveTimer)
@@ -275,7 +287,7 @@ async function saveVersion() {
     detail.value.item.draftTitle = draftTitle.value
     detail.value.item.draftBody = draftBody.value
     autoSaveStatus.value = 'idle'
-    notice.value = `已保存为 v${version.versionNo}`
+    toast(`已保存为 v${version.versionNo}`)
   } catch (err) {
     error.value = err.message
   } finally {
@@ -286,14 +298,14 @@ async function saveVersion() {
 function restore(version) {
   draftTitle.value = version.title
   draftBody.value = normalizeAssetUrls(version.body)
-  notice.value = `已载入 v${version.versionNo}，保存后才会覆盖为最新版本`
+  toast(`已载入 v${version.versionNo}，保存后才会覆盖为最新版本`)
 }
 
 async function startAutoImageGeneration(rawOutput, contentItemId) {
   if (!contentItemId || detail.value?.item.id !== contentItemId) return
   const prompts = parseArticleOutput(rawOutput)
   if (!prompts || (!prompts.coverPrompt && !prompts.inlinePrompts.length)) {
-    notice.value = '文章已生成，但未提取到配图提示词'
+    toast('文章已生成，但未提取到配图提示词')
     return
   }
   const requests = [
@@ -332,7 +344,7 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
     else imgError.value = result.reason?.message || '自动配图任务创建失败'
   }
   if (results.some((result) => result.status === 'fulfilled')) {
-    notice.value = `文章已生成，${results.filter((result) => result.status === 'fulfilled').length} 个配图任务已开始，完成后自动插入正文`
+    toast(`文章已生成，${results.filter((result) => result.status === 'fulfilled').length} 个配图任务已开始，完成后自动插入正文`)
     startImgPoll()
   }
 }
@@ -369,7 +381,7 @@ function runAi() {
       },
       onSaved: () => {
         generationSaved = true
-        notice.value = 'AI 结果已保存为新版本'
+        toast('AI 结果已保存为新版本')
       },
       onEnd: async () => {
         aiRunning.value = false
@@ -460,7 +472,7 @@ async function saveVariant() {
   })
   detail.value.variants.unshift(created)
   showVariant.value = false
-  notice.value = '平台版本已保存（未提交发布）'
+  toast('平台版本已保存（未提交发布）')
 }
 
 watch(
@@ -517,7 +529,7 @@ async function createDraftFromHot(item) {
     await openItem(created.id)
     rightTab.value = 'ai'
     aiPrompt.value = `围绕「${item.title}」写一篇初稿，语气平实`
-    notice.value = `已新建稿件「${item.title}」，可在 AI 助手里继续生成`
+    toast(`已新建稿件「${item.title}」，可在 AI 助手里继续生成`)
   } catch (err) {
     hotError.value = err.message
   } finally {
@@ -548,6 +560,8 @@ const ASPECT_OPTIONS = [
   { value: '1:1', label: '1:1 方形' },
   { value: '16:9', label: '16:9 横版' },
 ]
+const countOptions = [1, 2, 3, 4].map((n) => ({ value: n, label: `${n} 张` }))
+const platformOptions = PLATFORMS.map((p) => ({ value: p.code, label: p.label }))
 
 // 已生成图片（含 blob URL，用于展示）
 const imgResults = ref([]) // [{assetId, blobUrl, rawUrl, mime, jobId}]
@@ -708,7 +722,7 @@ function startImgPoll() {
                 if (isArticleInEditor(job)) {
                   autoInsertInlineImage(result, job)
                 } else {
-                  notice.value = `配图 ${job.inlineIndex} 已生成，点击配图卡片即可插入正文`
+                  toast(`配图 ${job.inlineIndex} 已生成，点击配图卡片即可插入正文`)
                 }
               }
             }
@@ -747,7 +761,7 @@ function autoInsertInlineImage(result, job) {
   if (editorHasFocus()) {
     if (!pendingInlineInsertions.some((item) => item.result === result)) {
       pendingInlineInsertions.push({ result, job })
-      notice.value = `配图 ${index} 已生成，退出编辑后自动插入`
+      toast(`配图 ${index} 已生成，退出编辑后自动插入`)
     }
     return false
   }
@@ -761,7 +775,7 @@ function autoInsertInlineImage(result, job) {
   const markdown = `![${alt}](${result.rawUrl})`
   if (match) {
     draftBody.value = body.replace(placeholder, () => markdown)
-    notice.value = `配图 ${index} 已自动插入正文对应位置`
+    toast(`配图 ${index} 已自动插入正文对应位置`)
     return true
   }
   // 没有占位符：按小节位置兜底，避免所有插图都堆到文末
@@ -778,11 +792,11 @@ function autoInsertInlineImage(result, job) {
     )
     const at = headings[slot]
     draftBody.value = [...lines.slice(0, at), '', markdown, '', ...lines.slice(at)].join('\n')
-    notice.value = `配图 ${index} 未找到占位符，已插入第 ${slot + 1} 个小节处`
+    toast(`配图 ${index} 未找到占位符，已插入第 ${slot + 1} 个小节处`)
     return true
   }
   draftBody.value = `${body}\n\n${markdown}\n`
-  notice.value = `配图 ${index} 未找到占位符，已插入正文末尾`
+  toast(`配图 ${index} 未找到占位符，已插入正文末尾`)
   return true
 }
 
@@ -794,16 +808,16 @@ function isImageInBody(result) {
 /** 把图片以 Markdown 语法插入正文末尾（用后端返回的签名直链，img 标签才能直接取图） */
 function insertImageToBody(result) {
   if (!result.rawUrl) {
-    notice.value = '该素材缺少可用直链，请稍后重试'
+    toast('该素材缺少可用直链，请稍后重试')
     return
   }
   if (isImageInBody(result)) {
-    notice.value = '该图片已在正文中'
+    toast('该图片已在正文中')
     return
   }
   // 走 v-model 已经能同步到编辑器；这里保持原逻辑（追加到末尾）
   draftBody.value = (draftBody.value || '') + `\n\n![配图](${result.rawUrl})\n`
-  notice.value = '图片已插入正文末尾'
+  toast('图片已插入正文末尾')
 }
 
 /** 复制素材直链到剪贴板 */
@@ -811,9 +825,9 @@ async function copyImageUrl(result) {
   const url = result.rawUrl || `${location.origin}/api/v1/assets/${result.assetId}/raw`
   try {
     await navigator.clipboard.writeText(url)
-    notice.value = '已复制图片链接'
+    toast('已复制图片链接')
   } catch {
-    notice.value = `链接：${url}`
+    toast(`链接：${url}`)
   }
 }
 
@@ -855,30 +869,30 @@ onBeforeUnmount(() => {
         <h1 class="page-title">创作空间</h1>
         <p class="page-sub">从灵感到成稿，在同一处完成创作与发布</p>
       </div>
-      <div class="row row-tight studio-page-actions">
-        <button class="btn btn-ghost btn-sm" @click="createItem">新建稿件</button>
-        <button class="btn btn-ghost btn-sm" @click="openVariant" :disabled="!detail">
+      <n-space :size="8" class="studio-page-actions">
+        <n-button quaternary size="small" @click="createItem">新建稿件</n-button>
+        <n-button quaternary size="small" :disabled="!detail" @click="openVariant">
           生成平台版本
-        </button>
-        <button
-          class="btn btn-ghost btn-sm"
+        </n-button>
+        <n-button
+          quaternary
+          size="small"
           :disabled="!detail || !draftBody"
           title="将当前正文带入图文卡片创作台"
           @click="router.push({ name: 'cards', state: { markdown: draftBody } })"
         >
           转为图文卡片
-        </button>
-        <button class="btn btn-ghost btn-sm" :disabled="!detail" @click="publishDrawerOpen = true">
+        </n-button>
+        <n-button quaternary size="small" :disabled="!detail" @click="publishDrawerOpen = true">
           发布
-        </button>
-        <button class="btn btn-sm" :disabled="saving || !detail" @click="saveVersion">
-          {{ saving ? '保存中…' : '存为版本' }}
-        </button>
-      </div>
+        </n-button>
+        <n-button type="primary" size="small" :loading="saving" :disabled="!detail" @click="saveVersion">
+          存为版本
+        </n-button>
+      </n-space>
     </div>
 
-    <div v-if="error" class="banner banner-danger" role="alert">{{ error }}</div>
-    <div v-if="notice" class="banner banner-info" role="status">{{ notice }}</div>
+    <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
 
     <div v-if="loading" class="studio-grid" :class="{ 'drafts-collapsed': draftsCollapsed }">
       <div class="skeleton studio-drafts-skeleton" />
@@ -891,7 +905,7 @@ onBeforeUnmount(() => {
         <span class="studio-empty-mark" aria-hidden="true">✎</span>
         <span class="empty-title">从第一篇稿件开始</span>
         <span>写下你的想法，或从右侧「灵感」里挑一个热点方向。</span>
-        <button class="btn btn-sm" @click="createItem">新建稿件</button>
+        <n-button size="small" @click="createItem">新建稿件</n-button>
       </div>
     </div>
 
@@ -903,16 +917,16 @@ onBeforeUnmount(() => {
             <h2 class="studio-panel-title">稿件与版本</h2>
             <span class="studio-panel-count">{{ items.length }}</span>
           </div>
-          <button
-            class="icon-btn icon-btn-sm"
-            type="button"
+          <n-button
+            quaternary
+            size="small"
             aria-expanded="true"
             aria-label="收起稿件列表"
             title="收起稿件列表"
             @click="draftsCollapsed = true"
-          >‹</button>
+          >‹</n-button>
         </div>
-        <button class="btn btn-ghost btn-sm studio-new-draft" type="button" @click="createItem">+ 新建稿件</button>
+        <n-button quaternary size="small" class="studio-new-draft" @click="createItem">+ 新建稿件</n-button>
         <div class="list studio-list">
           <div
             v-for="item in items"
@@ -930,15 +944,16 @@ onBeforeUnmount(() => {
                 <div class="list-meta">{{ item.updatedAt.slice(0, 10) }}</div>
               </div>
             </button>
-            <button
-              class="icon-btn icon-btn-sm item-delete"
-              type="button"
+            <n-button
+              quaternary
+              size="small"
+              class="item-delete"
               aria-label="删除稿件"
               title="删除稿件"
               @click="askDelete(item)"
             >
               ✕
-            </button>
+            </n-button>
           </div>
         </div>
         <section v-if="detail" class="studio-versions" aria-labelledby="studio-versions-title">
@@ -949,7 +964,7 @@ onBeforeUnmount(() => {
                 <div class="list-title studio-version-title">v{{ v.versionNo }}</div>
                 <div class="list-meta">{{ v.sourceType }} · {{ v.createdAt.slice(5, 16).replace('T', ' ') }}</div>
               </div>
-              <button class="btn btn-ghost btn-sm" @click="restore(v)">载入</button>
+              <n-button quaternary size="small" @click="restore(v)">载入</n-button>
             </div>
           </div>
         </section>
@@ -961,14 +976,14 @@ onBeforeUnmount(() => {
         >
           <div class="studio-variants-head">
             <h3 id="studio-variants-title" class="studio-section-label">平台版本</h3>
-            <button
-              class="btn btn-ghost btn-sm"
-              type="button"
+            <n-button
+              quaternary
+              size="small"
               :aria-expanded="!variantsCollapsed"
               @click="variantsCollapsed = !variantsCollapsed"
             >
               {{ variantsCollapsed ? `展开 ${detail.variants.length}` : '收起' }}
-            </button>
+            </n-button>
           </div>
           <div v-if="!variantsCollapsed" class="list studio-list">
             <div v-for="variant in detail.variants" :key="variant.id" class="list-row">
@@ -986,14 +1001,15 @@ onBeforeUnmount(() => {
         </template>
         <template v-else>
           <div class="studio-drafts-rail">
-            <button
-              class="icon-btn icon-btn-sm studio-rail-toggle"
-              type="button"
+            <n-button
+              quaternary
+              size="small"
+              class="studio-rail-toggle"
               aria-expanded="false"
               aria-label="展开稿件列表"
               title="展开稿件列表"
               @click="draftsCollapsed = false"
-            >›</button>
+            >›</n-button>
             <span class="studio-rail-count" :title="`共 ${items.length} 篇稿件`">{{ items.length }}</span>
             <span class="studio-rail-label">稿件</span>
           </div>
@@ -1089,41 +1105,32 @@ onBeforeUnmount(() => {
               <p class="studio-tool-description">基于当前稿件生成内容，确认后再插入正文</p>
             </div>
             <div class="spacer" />
-            <button class="icon-btn icon-btn-sm" :aria-label="aiOpen ? '收起 AI 助手' : '展开 AI 助手'" @click="aiOpen = !aiOpen">
+            <n-button quaternary size="small" :aria-label="aiOpen ? '收起 AI 助手' : '展开 AI 助手'" @click="aiOpen = !aiOpen">
               {{ aiOpen ? '▾' : '▸' }}
-            </button>
+            </n-button>
           </div>
           <div v-if="aiOpen" class="studio-tool-stack">
             <div class="field">
               <label class="field-label" for="ai-task">任务</label>
-              <select id="ai-task" v-model="aiTask" class="select">
-                <option v-for="task in TASKS" :key="task.value" :value="task.value">{{ task.label }}</option>
-              </select>
+              <n-select id="ai-task" v-model:value="aiTask" :options="TASKS" />
             </div>
             <div v-if="usesWritingStyle" class="field">
               <label class="field-label" for="ai-writing-style">写作风格</label>
-              <select
+              <n-select
                 id="ai-writing-style"
-                v-model="writingStyleKey"
-                class="select"
+                v-model:value="writingStyleKey"
                 :disabled="aiRunning || writingStylesLoading"
-              >
-                <option v-if="!writingStyles.length" value="article-drafting">使用默认风格</option>
-                <option
-                  v-for="style in writingStyles"
-                  :key="style.skillKey"
-                  :value="style.skillKey"
-                >
-                  {{ style.displayName }}
-                </option>
-              </select>
+                :options="writingStyleOptions"
+              />
             </div>
             <div class="field">
               <label class="field-label" for="ai-prompt">要做什么</label>
-              <textarea
+              <n-input
                 id="ai-prompt"
-                v-model="aiPrompt"
-                class="textarea studio-ai-prompt"
+                v-model:value="aiPrompt"
+                type="textarea"
+                class="studio-ai-prompt"
+                :autosize="{ minRows: 4, maxRows: 10 }"
                 placeholder="例如：围绕「一周三篇图文」写一篇初稿，语气平实"
               />
             </div>
@@ -1140,21 +1147,19 @@ onBeforeUnmount(() => {
                 >{{ opt.label }}</button>
               </div>
             </div>
-            <label class="ai-auto-image-toggle">
-              <input v-model="aiAutoImages" type="checkbox" :disabled="aiRunning || aiTask !== 'article'">
-              <span class="ai-auto-image-switch" aria-hidden="true"><span /></span>
+            <n-checkbox v-model:checked="aiAutoImages" :disabled="aiRunning || aiTask !== 'article'">
               <span>
                 <strong>自动生成配图</strong>
                 <small>成文完成后自动生成封面图和正文插图</small>
               </span>
-            </label>
-            <div class="row studio-actions">
-              <button class="btn btn-sm" :disabled="aiRunning" @click="runAi">
-                {{ aiRunning ? '生成中…' : '开始生成' }}
-              </button>
-              <button v-if="aiRunning" class="btn btn-ghost btn-sm" @click="stopAi">中断</button>
-            </div>
-            <p v-if="aiError" class="field-error" role="alert">{{ aiError }}</p>
+            </n-checkbox>
+            <n-space :size="8" class="studio-actions">
+              <n-button size="small" type="primary" :loading="aiRunning" @click="runAi">
+                开始生成
+              </n-button>
+              <n-button v-if="aiRunning" quaternary size="small" @click="stopAi">中断</n-button>
+            </n-space>
+            <n-alert v-if="aiError" type="error" :bordered="false">{{ aiError }}</n-alert>
             <section v-if="aiOutput" class="studio-ai-output" aria-label="AI 生成结果">
               <span class="studio-ai-output-label">生成结果</span>
               <!-- 渲染 Markdown 预览 -->
@@ -1181,10 +1186,10 @@ onBeforeUnmount(() => {
                   >替换全文</button>
                 </div>
               </div>
-              <div class="row studio-actions">
-                <button class="btn btn-sm" @click="useAiOutput">插入正文</button>
-                <button class="btn btn-ghost btn-sm" @click="aiOutput = ''">丢弃</button>
-              </div>
+              <n-space :size="8" class="studio-actions">
+                <n-button size="small" type="primary" @click="useAiOutput">插入正文</n-button>
+                <n-button quaternary size="small" @click="aiOutput = ''">丢弃</n-button>
+              </n-space>
             </section>
           </div>
         </section>
@@ -1202,12 +1207,12 @@ onBeforeUnmount(() => {
               <span class="studio-section-label studio-section-label-flush">热点灵感</span>
               <p class="studio-tool-description">挑一个热点，直接开写</p>
             </div>
-            <button class="btn btn-ghost btn-sm" :disabled="hotLoading" @click="loadHotTopics">
-              {{ hotLoading ? '刷新中…' : '刷新' }}
-            </button>
+            <n-button quaternary size="small" :loading="hotLoading" @click="loadHotTopics">
+              刷新
+            </n-button>
           </div>
 
-          <div v-if="hotError" class="banner banner-danger" role="alert" style="margin-top: var(--space-3)">{{ hotError }}</div>
+          <n-alert v-if="hotError" type="error" :bordered="false" style="margin-top: var(--space-3)">{{ hotError }}</n-alert>
           <div v-if="hotLoading && !hotTopics.length" class="stack" style="margin-top: var(--space-3)">
             <div v-for="i in 4" :key="i" class="skeleton" style="height: 58px" />
           </div>
@@ -1227,11 +1232,12 @@ onBeforeUnmount(() => {
               </div>
               <div class="row row-tight inspiration-actions">
                 <span v-if="item.hot" class="hot-value">{{ item.hot }}</span>
-                <button
-                  class="btn btn-sm"
-                  :disabled="hotActionId === item.title"
+                <n-button
+                  size="small"
+                  type="primary"
+                  :loading="hotActionId === item.title"
                   @click="createDraftFromHot(item)"
-                >用它写稿</button>
+                >用它写稿</n-button>
               </div>
             </div>
           </div>
@@ -1261,17 +1267,21 @@ onBeforeUnmount(() => {
             <div class="field">
               <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: var(--space-1)">
                 <label class="field-label" for="img-prompt" style="margin: 0">图像描述</label>
-                <button
-                  class="btn btn-ghost btn-xs img-suggest-btn"
+                <n-button
+                  quaternary
+                  size="tiny"
+                  class="img-suggest-btn"
+                  :loading="imgBusy && !imgJobs.length"
                   :disabled="imgBusy || !detail"
                   @click="suggestImagePrompt"
-                >{{ imgBusy && !imgJobs.length ? '提炼中…' : '✦ 从正文提炼' }}</button>
+                >✦ 从正文提炼</n-button>
               </div>
-              <textarea
+              <n-input
                 id="img-prompt"
-                v-model="imgPrompt"
-                class="textarea"
-                style="min-height: 88px; font-size: 12px; line-height: 1.65"
+                v-model:value="imgPrompt"
+                type="textarea"
+                :autosize="{ minRows: 4, maxRows: 8 }"
+                style="font-size: 12px"
                 placeholder="描述你想要的画面，例如：A serene mountain landscape at golden hour, soft mist, cinematic lighting"
               />
             </div>
@@ -1292,24 +1302,24 @@ onBeforeUnmount(() => {
               </div>
               <div class="field" style="flex-shrink: 0; min-width: 72px">
                 <label class="field-label" for="img-count">数量</label>
-                <select id="img-count" v-model="imgCount" class="select" style="min-height: 34px; font-size: var(--font-xs)">
-                  <option v-for="n in [1,2,3,4]" :key="n" :value="n">{{ n }} 张</option>
-                </select>
+                <n-select id="img-count" v-model:value="imgCount" :options="countOptions" style="min-width: 88px" />
               </div>
             </div>
 
             <!-- 操作按钮 -->
-            <div class="row studio-actions">
-              <button
-                class="btn btn-sm"
+            <n-space :size="8" class="studio-actions">
+              <n-button
+                size="small"
+                type="primary"
+                :loading="imgBusy && imgJobs.some(j => ['queued','running'].includes(j.status))"
                 :disabled="imgBusy || !imgPrompt.trim()"
                 @click="generateImages"
               >
-                {{ imgBusy && imgJobs.some(j => ['queued','running'].includes(j.status)) ? '生成中…' : '生成配图' }}
-              </button>
-            </div>
+                生成配图
+              </n-button>
+            </n-space>
 
-            <p v-if="imgError" class="field-error" role="alert">{{ imgError }}</p>
+            <n-alert v-if="imgError" type="error" :bordered="false">{{ imgError }}</n-alert>
 
             <!-- 任务进度 -->
             <div
@@ -1339,26 +1349,35 @@ onBeforeUnmount(() => {
                     />
                     <div v-else class="img-card-placeholder">加载中…</div>
                   </div>
-                  <div class="row img-card-actions">
-                    <button
-                      class="btn btn-ghost btn-xs"
+                  <n-space :size="4" class="img-card-actions" style="width: 100%">
+                    <n-button
+                      quaternary
+                      size="tiny"
                       style="flex:1"
                       :disabled="isImageInBody(result)"
                       @click="insertImageToBody(result)"
-                    >{{ isImageInBody(result) ? '已在正文' : '插入正文' }}</button>
-                    <button class="btn btn-ghost btn-xs" @click="copyImageUrl(result)" title="复制链接">🔗</button>
-                  </div>
+                    >{{ isImageInBody(result) ? '已在正文' : '插入正文' }}</n-button>
+                    <n-button quaternary size="tiny" title="复制链接" @click="copyImageUrl(result)">🔗</n-button>
+                  </n-space>
                 </div>
               </div>
             </div>
 
             <!-- 失败任务提示 -->
-            <div v-for="job in imgJobs.filter(j => j.status === 'failed')" :key="job.id" class="banner banner-danger img-job-error" style="font-size: 11px">
-              <span>{{ job.label || '配图' }}生成失败：{{ job.error || '未知错误' }}</span>
-              <button class="btn btn-ghost btn-xs" :disabled="job.status === 'retrying'" @click="retryImageJob(job)">
-                {{ job.status === 'retrying' ? '重试中…' : '重试' }}
-              </button>
-            </div>
+            <n-alert
+              v-for="job in imgJobs.filter(j => j.status === 'failed' || j.status === 'retrying')"
+              :key="job.id"
+              type="error"
+              :bordered="false"
+              class="img-job-error"
+            >
+              <n-space align="center" justify="space-between" style="width: 100%">
+                <span>{{ job.label || '配图' }}生成失败：{{ job.error || '未知错误' }}</span>
+                <n-button quaternary size="tiny" :loading="job.status === 'retrying'" @click="retryImageJob(job)">
+                  重试
+                </n-button>
+              </n-space>
+            </n-alert>
           </div>
         </section>
       </aside>
@@ -1373,51 +1392,57 @@ onBeforeUnmount(() => {
       :cover-asset-id="publishCoverAssetId"
       :inline-asset-ids="publishInlineAssetIds"
       @close="publishDrawerOpen = false"
-      @published="notice = '草稿已推送到公众号草稿箱，请到后台预览并群发。'"
+      @published="() => toast('草稿已推送到公众号草稿箱，请到后台预览并群发。')"
     />
 
-    <AppModal v-if="showVariant" title="生成平台版本" description="平台版本独立可编辑，提交发布前仍需人工审核。" @close="showVariant = false">      <div class="stack">
-        <label class="field">
-          <span class="field-label">平台</span>
-          <select v-model="variantForm.platform" class="select">
-            <option v-for="p in PLATFORMS" :key="p.code" :value="p.code">{{ p.label }}</option>
-          </select>
-        </label>
-        <label class="field">
-          <span class="field-label">标题</span>
-          <input v-model="variantForm.title" class="input" />
-        </label>
-        <label class="field">
-          <span class="field-label">正文</span>
-          <textarea v-model="variantForm.body" class="textarea" style="min-height: 160px" />
-        </label>
-        <div class="row">
-          <div class="spacer" />
-          <button class="btn btn-ghost" @click="showVariant = false">取消</button>
-          <button class="btn" @click="saveVariant">保存版本</button>
-        </div>
-      </div>
-    </AppModal>
-
-    <AppModal
-      v-if="deletingItem"
-      title="删除稿件"
-      :description="`「${deletingItem.title}」将被彻底删除，且不可恢复。`"
-      @close="deletingItem = null"
+    <n-modal
+      v-model:show="showVariant"
+      preset="card"
+      title="生成平台版本"
+      style="width: 560px"
+      :bordered="false"
     >
-      <div class="stack">
-        <p class="field-hint" style="margin: 0">
-          会一并清理：所有版本、平台版本、审阅评论、发布任务与发布记录、对应的数据统计，以及日历里的排期。
-        </p>
-        <div class="row">
-          <div class="spacer" />
-          <button class="btn btn-ghost" @click="deletingItem = null">取消</button>
-          <button class="btn btn-danger" :disabled="deleting" @click="confirmDelete">
-            {{ deleting ? '删除中…' : '确认删除' }}
-          </button>
-        </div>
-      </div>
-    </AppModal>
+      <p class="field-hint" style="margin-top: 0">平台版本独立可编辑，提交发布前仍需人工审核。</p>
+      <n-form label-placement="top">
+        <n-form-item label="平台">
+          <n-select v-model:value="variantForm.platform" :options="platformOptions" />
+        </n-form-item>
+        <n-form-item label="标题">
+          <n-input v-model:value="variantForm.title" />
+        </n-form-item>
+        <n-form-item label="正文">
+          <n-input v-model:value="variantForm.body" type="textarea" :autosize="{ minRows: 6, maxRows: 14 }" />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary @click="showVariant = false">取消</n-button>
+          <n-button type="primary" @click="saveVariant">保存版本</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <n-modal
+      :show="!!deletingItem"
+      preset="card"
+      title="删除稿件"
+      style="width: 480px"
+      :bordered="false"
+      @update:show="(v) => { if (!v) deletingItem = null }"
+    >
+      <p class="field-hint" style="margin-top: 0">
+        「{{ deletingItem?.title }}」将被彻底删除，且不可恢复。
+      </p>
+      <p class="field-hint" style="margin: 0">
+        会一并清理：所有版本、平台版本、审阅评论、发布任务与发布记录、对应的数据统计，以及日历里的排期。
+      </p>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary @click="deletingItem = null">取消</n-button>
+          <n-button type="error" :loading="deleting" @click="confirmDelete">确认删除</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 

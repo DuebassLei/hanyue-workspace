@@ -28,6 +28,17 @@ class UserOut(CamelModel):
     id: str
     display_name: str
     timezone: str
+    # 身份来源：idp = 正式身份提供者；local-dev = 开发态按 subject 换的本地会话
+    auth_subject: str
+    auth_provider: str
+    created_at: datetime
+
+
+class ProfilePatch(CamelModel):
+    """只允许改用户自己维护的两项；身份、id、创建时间不可由请求体改写。"""
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class LoginResponse(CamelModel):
@@ -361,6 +372,46 @@ class PublishJobOut(CamelModel):
     # publish：对外发布；draft：推送到平台草稿箱（公众号）
     target: str = "publish"
     theme_id: str = ""
+    # manual | auto | draft（草稿箱推送），来自 payload_snapshot.mode
+    mode: str = ""
+    # 手动回填/草稿推送时记录的落地页链接（如有）
+    permalink: str = ""
+    updated_at: datetime | None = None
+
+
+class PublishRecordOut(CamelModel):
+    id: str
+    platform: str
+    remote_content_id: str | None
+    permalink: str | None
+    published_at: datetime | None
+    result_status: str
+    created_at: datetime | None = None
+
+
+class PublishJobDetailOut(PublishJobOut):
+    """任务详情：完整状态流转历史 + 每次尝试的结果记录，供详情抽屉时间线展示。"""
+
+    status_history: list[dict] = Field(default_factory=list)
+    records: list[PublishRecordOut] = Field(default_factory=list)
+
+
+class PublishJobSummaryOut(CamelModel):
+    """按状态聚合的任务计数，供队列页筛选 chips 显示。"""
+
+    total: int
+    by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class PublishJobPatchIn(CamelModel):
+    """改期 / 修改内容：仅 approved / queued 且未开始执行的任务可编辑。
+
+    字段全部可选，用 model_fields_set 区分「未传」与「显式传 null」。
+    """
+
+    scheduled_at: datetime | None = None
+    title: str | None = Field(default=None, max_length=200)
+    body: str | None = Field(default=None, max_length=4000)
 
 
 # ---------- wechat official account（草稿箱）----------

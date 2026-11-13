@@ -5,7 +5,8 @@
 
 输出契约（与所有模型路径共享，避免格式漂移）：
 - Markdown 正文：公众号排版语法（# 标题、## 小标题、> 引用、- 列表、--- 分割线、
-  :::card 强调卡、:::follow 关注引导、:::sign 署名、{{image1}} 图片占位）
+  :::card 强调卡、:::follow 关注引导、:::sign 署名、可选 :::lead / :::stat /
+  :::steps / :::compare / :::layers / :::checklist / :::quote-card、{{image1}} 图片占位）
 - 公众号排版 HTML：调用 wechat_layout.render_document 生成
 - 封面图提示词：1 条（英文，适合生图模型）
 - 正文插图提示词：若干条
@@ -19,10 +20,8 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from sqlalchemy import case, or_, select
-
 from .. import models
-from . import ai_gateway, wechat_layout
+from . import ai_gateway, skill_registry, wechat_layout
 
 # 内置默认风格（当 skill 未提供 manifest 时的兜底）
 ARTICLE_OUTPUT_CONTRACT = (
@@ -36,27 +35,16 @@ ARTICLE_OUTPUT_CONTRACT = (
     "inlinePrompts（英文正文插图提示词数组）。"
     "正文使用中文，可使用 # 标题、## 小标题、> 引用、- 列表、--- 分割线、"
     ":::card、:::follow、:::sign 和 {{imageN}} 图片占位符。"
+    "下面这些区块按内容选用，不要每篇都堆齐："
+    ":::lead 导语；:::stat 每行「数字 | 说明」；:::steps 每行「名称 | 说明」，不要自己写「1.」；"
+    ":::compare 左 / 右 再写「左 | 右」；:::layers 每行「标签 | 正文」；"
+    ":::checklist 每行「done、todo 或 warn | 事项」；"
+    ":::quote-card 出处 用来放金句，不要写成 > 引用。"
     "封面图提示词用英文，描述画面主体、风格、色调。"
     "正文中的 {{imageN}} 数量必须与 inlinePrompts 数量保持一致。"
 )
 
-DEFAULT_PROMPT_TEMPLATE = (
-    "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。"
-    "JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\","
-    "\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\","
-    "\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。"
-    "正文使用中文，{tone}，不用 emoji，不用绝对化承诺。"
-    "封面图提示词用英文，描述画面主体、风格、色调。"
-    "插图提示词数量与正文中 {{imageN}} 标记数量一致。"
-)
-DEFAULT_TONE = "语气平实有深度，结构清晰，善用小标题和引用"
-DEFAULT_STYLE_RULES = [
-    "不用 emoji",
-    "不用绝对化承诺（如「100%有效」）",
-    "善用 ## 小标题拆分段落",
-    "关键信息用 > 引用块突出",
-]
-DEFAULT_THEME_ID = "ink-green"
+DEFAULT_THEME_ID = wechat_layout.DEFAULT_THEME_ID
 
 # 输出后处理：统一清洗所有模型路径的产物，避免 emoji / 代码块漂移
 _EMOJI_RE = re.compile(
@@ -121,31 +109,11 @@ def resolve_skill(
     user_id: str,
     skill_key: str | None,
 ) -> models.SkillRegistryEntry | None:
-    """读取当前用户可见的 Skill，个人定制副本优先。"""
-    requested_key = skill_key or "article-drafting"
-    return db.scalar(
-        select(models.SkillRegistryEntry)
-        .where(
-            models.SkillRegistryEntry.skill_key == requested_key,
-            or_(
-                models.SkillRegistryEntry.owner_user_id.is_(None),
-                models.SkillRegistryEntry.owner_user_id == user_id,
-            ),
-        )
-        .order_by(
-            case(
-                (models.SkillRegistryEntry.owner_user_id == user_id, 0),
-                else_=1,
-            )
-        )
-    ) or (
-        db.scalar(
-            select(models.SkillRegistryEntry).where(
-                models.SkillRegistryEntry.skill_key == "article-drafting",
-                models.SkillRegistryEntry.owner_user_id.is_(None),
-            )
-        )
-    )
+    """读取当前账号可见且可信的 Skill，个人定制副本优先。
+
+    可见性/信任判定统一由 skill_registry 负责，避免写作路径绕过启停与信任策略。
+    """
+    return skill_registry.resolve_visible(db, user_id, skill_key)
 
 
 def resolve_skill_style(skill: models.SkillRegistryEntry | None) -> tuple[str, str, list[str], str]:
@@ -156,18 +124,22 @@ def resolve_skill_style(skill: models.SkillRegistryEntry | None) -> tuple[str, s
     manifest = (skill.manifest or {}) if skill else {}
     if not isinstance(manifest, dict):
         manifest = {}
-    prompt_template = str(manifest.get("promptTemplate") or DEFAULT_PROMPT_TEMPLATE)
-    tone = str(manifest.get("tone") or DEFAULT_TONE)
+    prompt_template = str(manifest.get("promptTemplate") or skill_registry.DEFAULT_ARTICLE_PROMPT)
+    tone = str(manifest.get("tone") or skill_registry.DEFAULT_TONE)
     rules = manifest.get("styleRules")
     if not isinstance(rules, list):
-        rules = DEFAULT_STYLE_RULES
+        rules = skill_registry.DEFAULT_STYLE_RULES
     style_rules = [str(r) for r in rules if str(r).strip()]
     theme_id = str(manifest.get("defaultTheme") or DEFAULT_THEME_ID)
     return prompt_template, tone, style_rules, theme_id
 
 
 def build_system_prompt(skill: models.SkillRegistryEntry | None) -> str:
-    """构建受保护的文章输出契约，并附加 Skill 写作风格。"""
+    """构建受保护的文章输出契约，并附加 Skill 写作风格与流程约束。
+
+    factPolicy / imagePolicy 只在这份 manifest 自己写了时才追加。
+    没有 workflow 的文风 Skill 不注入这两段。
+    """
     prompt_template, tone, style_rules, _ = resolve_skill_style(skill)
     style_prompt = prompt_template.replace("{tone}", tone).strip()
     parts = [ARTICLE_OUTPUT_CONTRACT]
@@ -179,7 +151,65 @@ def build_system_prompt(skill: models.SkillRegistryEntry | None) -> str:
     if style_rules:
         rules_text = "\n".join(f"- {r}" for r in style_rules)
         parts.append(f"必须遵守以下风格规则（不得改变以上输出契约）：\n{rules_text}")
+    manifest = (skill.manifest or {}) if skill and isinstance(getattr(skill, "manifest", None), dict) else {}
+    fact_text = _fact_policy_text(manifest.get("factPolicy"))
+    if fact_text:
+        parts.append(fact_text)
+    image_text = _image_policy_text(manifest.get("imagePolicy"))
+    if image_text:
+        parts.append(image_text)
     return "\n\n".join(parts)
+
+
+def _fact_policy_text(policy) -> str:
+    """把 factPolicy 收成一段提示词。缺字段或类型不对则不注入。"""
+    if not isinstance(policy, dict):
+        return ""
+    lines: list[str] = []
+    if policy.get("forbidUnverifiedQuotes") is True:
+        lines.append("不要编造引语；没有出处的原话不要写成引语。")
+    if policy.get("requireSources") is True:
+        lines.append("每个关键事实都要标明可核对的来源。")
+    placeholder = policy.get("placeholder")
+    if isinstance(placeholder, str) and placeholder.strip():
+        lines.append(f"还不能确认的事实，用「{placeholder.strip()}」标出，不要写成已核实。")
+    extras = policy.get("extraInstructions")
+    if isinstance(extras, list):
+        for item in extras:
+            if isinstance(item, str) and item.strip():
+                lines.append(item.strip())
+    if not lines:
+        return ""
+    body = "\n".join(f"- {line}" for line in lines)
+    return f"事实约束（不得改变以上输出契约）：\n{body}"
+
+
+def _image_policy_text(policy) -> str:
+    """把 imagePolicy 收成一段提示词。缺字段则不注入；不在这里拦截生图工具。"""
+    if not isinstance(policy, dict):
+        return ""
+    lines: list[str] = []
+    max_inline = policy.get("maxInlineImages")
+    if isinstance(max_inline, int) and not isinstance(max_inline, bool) and max_inline >= 0:
+        lines.append(
+            f"正文插图最多 {max_inline} 张：{{{{image1}}}} 到 {{{{image{max_inline}}}}} 连续编号，"
+            "条数必须与 inlinePrompts 一致。"
+        )
+    cover_ratio = policy.get("coverAspectRatio")
+    if isinstance(cover_ratio, str) and cover_ratio.strip():
+        lines.append(f"封面图比例 {cover_ratio.strip()}。")
+    inline_ratio = policy.get("inlineAspectRatio")
+    if isinstance(inline_ratio, str) and inline_ratio.strip():
+        lines.append(f"正文插图比例 {inline_ratio.strip()}。")
+    if policy.get("allowAiImages") is False:
+        lines.append("不要为封面或插图编写 AI 生图提示词；coverPrompt 留空，inlinePrompts 为空数组。")
+    suffix = policy.get("promptStyleSuffix")
+    if isinstance(suffix, str) and suffix.strip():
+        lines.append(f"生图提示词末尾附加：{suffix.strip()}")
+    if not lines:
+        return ""
+    body = "\n".join(f"- {line}" for line in lines)
+    return f"配图约束（不得改变以上输出契约）：\n{body}"
 
 
 def _repair_invalid_escapes(text: str) -> str:
@@ -238,6 +268,25 @@ def article_from_raw_output(raw: str) -> tuple[str, str]:
     if draft.ok:
         return draft.title, draft.markdown
     return "", raw
+
+
+_IMAGE_PLACEHOLDER_RE = re.compile(r"\{\{\s*image\s*(\d+)\s*(?:\|[^{}]*)?\}\}", re.IGNORECASE)
+
+
+def review_contract(draft: ArticleDraft) -> dict:
+    """纯函数契约检查：正文图片占位编号必须 1..n 连续，且与 inlinePrompts 数量一致。"""
+    numbers = [int(n) for n in _IMAGE_PLACEHOLDER_RE.findall(draft.markdown or "")]
+    inline_count = len(draft.inline_prompts or [])
+    if not numbers:
+        return {"ok": True, "issues": []} if inline_count == 0 else {
+            "ok": False,
+            "issues": ["image_count_mismatch"],
+        }
+    unique = sorted(set(numbers))
+    contiguous = unique == list(range(1, len(numbers) + 1))
+    if contiguous and len(numbers) == inline_count:
+        return {"ok": True, "issues": []}
+    return {"ok": False, "issues": ["image_count_mismatch"]}
 
 
 def _resolve_theme(theme_id: str) -> dict:

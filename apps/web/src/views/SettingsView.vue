@@ -1,7 +1,24 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import {
+  NAlert,
+  NButton,
+  NCheckbox,
+  NCheckboxGroup,
+  NEmpty,
+  NForm,
+  NFormItem,
+  NInput,
+  NModal,
+  NSelect,
+  NSpace,
+  NTab,
+  NTabs,
+  NTag,
+} from 'naive-ui'
 import { api } from '../api/client'
 import { useSessionStore } from '../stores/session'
+import { toast } from '../ui/feedback'
 import StatusTag from '../components/StatusTag.vue'
 
 const session = useSessionStore()
@@ -10,7 +27,6 @@ const tab = ref('theme')
 const connections = ref([])
 const skills = ref([])
 const error = ref('')
-const notice = ref('')
 
 const showConnection = ref(false)
 const editingId = ref('')
@@ -66,12 +82,6 @@ const agentStatus = ref(null)
 const copiedLabel = ref('')
 const copyFailed = ref(false)
 
-const MODE_TAG = {
-  ready: 'tag-success',
-  local: 'tag-warning',
-  degraded: 'tag-warning',
-}
-
 async function copyPath(item) {
   let ok = false
   try {
@@ -125,13 +135,6 @@ function checkedAtLabel(iso) {
     minute: '2-digit',
   })
 }
-
-const TABS = [
-  { key: 'theme', label: '外观与主题' },
-  { key: 'models', label: '模型与 API' },
-  { key: 'skills', label: 'Agent 与 Skills' },
-  { key: 'data', label: '数据与安全' },
-]
 
 const THEMES = [
   { value: 'system', label: '跟随系统' },
@@ -213,7 +216,7 @@ async function saveConnection() {
       if (idx >= 0) connections.value[idx] = updated
       await syncModelCode(updated, connForm.modelCode, false, connForm.capabilities)
       showConnection.value = false
-      notice.value = '连接已更新。'
+      toast('连接已更新。')
       return
     }
     const conn = await api.post('/models/connections', {
@@ -225,7 +228,7 @@ async function saveConnection() {
     await syncModelCode(conn, connForm.modelCode, true, connForm.capabilities)
     connections.value.push(conn)
     showConnection.value = false
-    notice.value = '连接已保存；密钥只在服务端加密存储，接口不会返回明文。'
+    toast('连接已保存；密钥只在服务端加密存储，接口不会返回明文。')
   } catch (err) {
     error.value = err.message
   }
@@ -273,7 +276,7 @@ async function testConnection(conn) {
     const detail = result.httpStatus
       ? `（HTTP ${result.httpStatus}${result.latencyMs ? ` · ${result.latencyMs}ms` : ''}）`
       : ''
-    notice.value = `${result.message}${detail}`
+    toast(`${result.message}${detail}`, result.verified ? 'success' : 'warning')
     if (!result.verified) error.value = '连接未通过真实连通性验证，状态已如实记录。'
   } catch (err) {
     error.value = err.message
@@ -285,12 +288,18 @@ async function removeConnection(conn) {
   connections.value = connections.value.filter((c) => c.id !== conn.id)
 }
 
+const expandedSkillId = ref('')
+
 async function toggleSkill(skill) {
   try {
+    // 只提交用户勾选的工具；未展开过时默认沿用既有授权或全部声明
+    const granted = skill.grantedToolIds?.length
+      ? skill.grantedToolIds
+      : [...(skill.allowedToolIds || [])]
     const updated = await api.patch(`/skills/${skill.id}`, {
       enabled: !skill.enabled,
-      grantedToolIds: skill.allowedToolIds,
-      approvalPolicy: 'risk_based',
+      grantedToolIds: granted,
+      approvalPolicy: skill.approvalPolicy || 'risk_based',
     })
     Object.assign(skill, updated)
   } catch (err) {
@@ -298,7 +307,20 @@ async function toggleSkill(skill) {
   }
 }
 
+function toggleGrantPanel(skill) {
+  expandedSkillId.value = expandedSkillId.value === skill.id ? '' : skill.id
+  if (!skill.grantedToolIds?.length) {
+    skill.grantedToolIds = [...(skill.allowedToolIds || [])]
+  }
+}
+
 // ---------- 写作风格（自定义 Skill）----------
+const RISK_LABELS = {
+  read_only: '只读',
+  reversible_write: '可回滚写入',
+  external_side_effect: '外部副作用',
+  forbidden: '禁止',
+}
 const THEME_OPTIONS = [
   { value: 'ink-green', label: '墨绿简约 · 知识/职场/干货' },
   { value: 'deep-blue', label: '深海蓝 · 科技/财经/分析' },
@@ -306,6 +328,10 @@ const THEME_OPTIONS = [
   { value: 'mono', label: '极简黑白 · 深度长文/访谈' },
   { value: 'terracotta-warm', label: '暖陶土 · 工具推荐/产品测评' },
   { value: 'blue-business', label: '商务蓝 · 职场干货/产品教程' },
+]
+const providerOptions = [
+  { value: 'openai_compatible', label: 'OpenAI 兼容' },
+  { value: 'vendor_native', label: '供应商原生（适配器未接入）' },
 ]
 
 const showStyle = ref(false)
@@ -322,10 +348,14 @@ const styleForm = reactive({
   promptTemplate: '',
 })
 
-/** 只展示带写作风格配置的 Skill（内置 article-drafting + 用户自定义） */
-const styleSkills = computed(() =>
-  skills.value.filter((s) => s.source === 'custom' || s.manifest?.tone),
-)
+/** 写作风格 = 自定义 Skill，或带 tone 的内置风格（与后端 styleSkills 判定保持一致） */
+function isStyle(skill) {
+  return skill.source === 'custom' || Boolean(skill.manifest?.tone)
+}
+
+const styleSkills = computed(() => skills.value.filter(isStyle))
+/** 流程型 Skill：供 Agent 编排调用，与写作风格分区展示，避免同一批条目出现两次 */
+const flowSkills = computed(() => skills.value.filter((skill) => !isStyle(skill)))
 
 function openStyleCreate() {
   styleEditingId.value = ''
@@ -380,7 +410,6 @@ function buildStyleManifest() {
 
 async function saveStyle() {
   error.value = ''
-  notice.value = ''
   if (!styleForm.displayName.trim()) {
     error.value = '请填写风格名称'
     return
@@ -394,7 +423,7 @@ async function saveStyle() {
       })
       const idx = skills.value.findIndex((s) => s.id === updated.id)
       if (idx >= 0) skills.value[idx] = updated
-      notice.value = '写作风格已更新，下次 AI 成文即生效。'
+      toast('写作风格已更新，下次 AI 成文即生效。')
     } else if (styleForkSourceId.value) {
       // 定制内置风格：创建个人副本，内置原版在列表中被副本替换
       await api.post(`/skills/${styleForkSourceId.value}/customize`, {
@@ -404,7 +433,7 @@ async function saveStyle() {
       })
       showStyle.value = false
       await load()
-      notice.value = '内置风格已定制，仅对当前账号生效；删除副本可恢复默认。'
+      toast('内置风格已定制，仅对当前账号生效；删除副本可恢复默认。')
       return
     } else {
       const key = styleForm.skillKey.trim() || `style-${Date.now()}`
@@ -419,8 +448,11 @@ async function saveStyle() {
         allowedToolIds: ['create_outline', 'generate_article'],
         manifest: buildStyleManifest(),
       })
-      skills.value.push(created)
-      notice.value = '写作风格已创建，可在创作空间的 AI 助手里选用。'
+      showStyle.value = false
+      // 创建接口返回的是服务端真实状态（归属/信任/版本），以列表重载为准
+      await load()
+      toast(`写作风格「${created.displayName}」已创建，可在创作空间的 AI 助手里选用。`)
+      return
     }
     showStyle.value = false
   } catch (err) {
@@ -435,10 +467,10 @@ async function removeStyle(skill) {
     if (skill.customized) {
       // 删除定制副本后内置原版重新可见，需重新拉取
       await load()
-      notice.value = '已恢复内置默认风格。'
+      toast('已恢复内置默认风格。')
     } else {
       skills.value = skills.value.filter((s) => s.id !== skill.id)
-      notice.value = '写作风格已删除。'
+      toast('写作风格已删除。')
     }
   } catch (err) {
     error.value = err.message
@@ -455,43 +487,37 @@ async function removeStyle(skill) {
       </div>
     </div>
 
-    <div v-if="error" class="banner banner-danger" role="alert">{{ error }}</div>
-    <div v-if="notice" class="banner banner-info" role="status">{{ notice }}</div>
+    <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
 
-    <div class="row row-tight" style="overflow-x: auto">
-      <button
-        v-for="item in TABS"
-        :key="item.key"
-        class="btn btn-sm"
-        :class="tab === item.key ? '' : 'btn-ghost'"
-        @click="tab = item.key"
-      >
-        {{ item.label }}
-      </button>
-    </div>
+    <n-tabs v-model:value="tab" type="line" animated>
+      <n-tab name="theme">外观与主题</n-tab>
+      <n-tab name="models">模型与 API</n-tab>
+      <n-tab name="skills">Agent 与 Skills</n-tab>
+      <n-tab name="data">数据与安全</n-tab>
+    </n-tabs>
 
     <section v-if="tab === 'theme'" class="card">
       <h2 class="card-title">主题</h2>
       <p class="page-sub">选择后立即生效并跨会话保存；首次加载遵循系统偏好。</p>
-      <div class="row" style="margin-top: var(--space-3)">
-        <button
+      <n-space style="margin-top: var(--space-3)">
+        <n-button
           v-for="item in THEMES"
           :key="item.value"
-          class="btn"
-          :class="session.theme === item.value ? '' : 'btn-ghost'"
+          :type="session.theme === item.value ? 'primary' : 'default'"
+          :secondary="session.theme !== item.value"
           @click="session.setTheme(item.value)"
         >
           {{ item.label }}
-        </button>
-      </div>
+        </n-button>
+      </n-space>
       <div class="card-flat" style="margin-top: var(--space-4)">
-        <div class="row">
-          <span class="tag tag-accent">主色</span>
-          <span class="tag tag-success">成功</span>
-          <span class="tag tag-warning">等待</span>
-          <span class="tag tag-danger">错误</span>
-          <span class="tag tag-info">信息</span>
-        </div>
+        <n-space>
+          <n-tag type="warning" round>主色</n-tag>
+          <n-tag type="success" round>成功</n-tag>
+          <n-tag type="warning" round>等待</n-tag>
+          <n-tag type="error" round>错误</n-tag>
+          <n-tag type="info" round>信息</n-tag>
+        </n-space>
         <p class="field-hint" style="margin-top: var(--space-2)">
           状态同时用颜色和文字表达；两种主题下均满足普通文字对比度 ≥ 4.5:1。
         </p>
@@ -502,13 +528,13 @@ async function removeStyle(skill) {
       <div class="row">
         <h2 class="card-title" style="margin: 0">模型连接</h2>
         <div class="spacer" />
-        <button class="btn btn-sm" @click="openCreate">添加连接</button>
+        <n-button type="primary" size="small" @click="openCreate">添加连接</n-button>
       </div>
-      <div v-if="!connections.length" class="empty">
-        <span class="empty-title">还没有模型连接</span>
-        <span>未配置时生成请求会明确报错（provider_unavailable），不会产生占位内容。</span>
-        <button class="btn btn-sm" @click="openCreate">添加第一个连接</button>
-      </div>
+      <n-empty v-if="!connections.length" description="未配置时生成请求会明确报错（provider_unavailable），不会产生占位内容。">
+        <template #extra>
+          <n-button type="primary" size="small" @click="openCreate">添加第一个连接</n-button>
+        </template>
+      </n-empty>
       <div v-else class="list">
         <div v-for="conn in connections" :key="conn.id" class="list-row">
           <div class="list-main">
@@ -518,39 +544,42 @@ async function removeStyle(skill) {
               密钥 {{ conn.keyMasked || '未配置' }}
             </div>
             <div v-if="conn.models.length" class="row row-tight" style="margin-top: 6px">
-              <span
+              <n-tag
                 v-for="model in conn.models"
                 :key="model.id"
-                class="tag"
-                :class="modelTagInfo(model).tagClass"
+                size="small"
+                :type="modelTagInfo(model).tagClass === 'tag-info' ? 'info' : modelTagInfo(model).tagClass === 'tag-accent' ? 'warning' : 'default'"
+                round
               >
                 {{ modelTagInfo(model).label }} · {{ model.modelCode }}
-              </span>
+              </n-tag>
             </div>
             <div v-else class="list-meta" style="margin-top: 4px">未登记模型 · 编辑后填写模型代号</div>
           </div>
           <StatusTag :status="conn.status" />
-          <button class="btn btn-ghost btn-sm" @click="testConnection(conn)">测试</button>
-          <button class="btn btn-ghost btn-sm" @click="openEdit(conn)">编辑</button>
-          <button class="btn btn-danger btn-sm" @click="removeConnection(conn)">删除</button>
+          <n-button quaternary size="small" @click="testConnection(conn)">测试</n-button>
+          <n-button quaternary size="small" @click="openEdit(conn)">编辑</n-button>
+          <n-button quaternary size="small" type="error" @click="removeConnection(conn)">删除</n-button>
         </div>
       </div>
     </section>
 
     <section v-if="tab === 'skills'" class="card">
       <h2 class="card-title">Agent 与 Skills</h2>
-      <p class="page-sub">只有已启用的 Skill 才能被 Agent 节点调用；工具授权在运行时重新校验。</p>
+      <p class="page-sub">
+        启用用于 Agent 自动调用与工具授权；写作风格在创作空间手动选用，无需启用。工具授权在运行时重新校验。
+      </p>
 
       <div v-if="agentStatus" class="stack" style="margin-top: var(--space-3)">
         <div class="card-flat">
           <div class="row" style="gap: var(--space-2)">
             <strong>Agent 运行状态</strong>
-            <span class="tag" :class="MODE_TAG[agentStatus.mode.code] || ''">
+            <n-tag :type="agentStatus.mode.code === 'ready' ? 'success' : 'warning'" round>
               {{ agentStatus.mode.label }}
-            </span>
+            </n-tag>
             <div class="spacer" />
             <span class="list-meta" style="margin: 0">检查于 {{ checkedAtLabel(agentStatus.checkedAt) }}</span>
-            <button class="btn btn-ghost btn-sm" @click="load">刷新</button>
+            <n-button quaternary size="small" @click="load">刷新</n-button>
           </div>
           <p class="field-hint" style="margin-top: var(--space-2)">{{ agentStatus.mode.detail }}</p>
           <div class="status-grid">
@@ -578,7 +607,8 @@ async function removeStyle(skill) {
                 {{ agentStatus.skills.enabled }} / {{ agentStatus.skills.total }}
               </div>
               <div class="field-hint" style="margin: 0">
-                {{ agentStatus.skills.enabled ? '已启用，可被 Agent 调用' : 'Agent 需至少启用一个' }}
+                已启用 {{ agentStatus.skills.enabled }} 个可被 Agent 调用 · 当前账号可见
+                {{ agentStatus.skills.total }} 个
               </div>
             </div>
             <div>
@@ -598,7 +628,7 @@ async function removeStyle(skill) {
           <div class="row" style="gap: var(--space-2)">
             <strong>数据路径</strong>
             <div class="spacer" />
-            <span class="tag">本机实际位置</span>
+            <n-tag size="small" round>本机实际位置</n-tag>
           </div>
           <p class="field-hint" style="margin-top: var(--space-2)">
             Agent 读取与写入的目录；路径来自服务端运行配置，不是界面推测。
@@ -607,14 +637,14 @@ async function removeStyle(skill) {
             <div v-for="item in agentStatus.paths" :key="item.kind" class="path-row">
               <div class="row" style="gap: var(--space-2)">
                 <span class="path-label">{{ item.label }}</span>
-                <span class="tag" :class="item.exists ? 'tag-success' : 'tag-warning'">
+                <n-tag size="small" :type="item.exists ? 'success' : 'warning'" round>
                   {{ item.exists ? '存在' : '未创建' }}
-                </span>
+                </n-tag>
                 <span v-if="item.exists && !item.writable" class="list-meta" style="margin: 0">只读</span>
                 <div class="spacer" />
-                <button class="btn btn-ghost btn-sm" @click="copyPath(item)">
+                <n-button quaternary size="small" @click="copyPath(item)">
                   {{ copyLabel(item) }}
-                </button>
+                </n-button>
               </div>
               <code class="path-value">{{ item.value }}</code>
               <div class="field-hint" style="margin: 0">{{ item.detail }}</div>
@@ -626,9 +656,9 @@ async function removeStyle(skill) {
       <div class="card-flat" style="margin-top: var(--space-3)">
         <div class="row" style="gap: var(--space-2)">
           <strong>写作风格</strong>
-          <span class="tag">AI 写作可选</span>
+          <n-tag size="small" round>AI 写作可选</n-tag>
           <div class="spacer" />
-          <button class="btn btn-sm" @click="openStyleCreate">新建写作风格</button>
+          <n-button type="primary" size="small" @click="openStyleCreate">新建写作风格</n-button>
         </div>
         <p class="field-hint" style="margin-top: var(--space-2)">
           写作风格决定 AI 写作时的语气、结构规则与默认排版主题；在创作空间的 AI 助手里选用。
@@ -639,9 +669,9 @@ async function removeStyle(skill) {
             <div class="list-main">
               <div class="list-title">
                 {{ skill.displayName }}
-                <span class="tag" :class="skill.source === 'custom' ? 'tag-accent' : ''">
+                <n-tag size="small" :type="skill.source === 'custom' ? 'warning' : 'default'" round>
                   {{ styleTagLabel(skill) }}
-                </span>
+                </n-tag>
               </div>
               <div class="list-meta">
                 {{ skill.description || '未填写说明' }}
@@ -654,36 +684,69 @@ async function removeStyle(skill) {
               </div>
             </div>
             <template v-if="skill.source === 'custom'">
-              <button class="btn btn-ghost btn-sm" @click="openStyleEdit(skill)">编辑</button>
-              <button class="btn btn-danger btn-sm" @click="removeStyle(skill)">
+              <n-button quaternary size="small" @click="openStyleEdit(skill)">编辑</n-button>
+              <n-button quaternary size="small" type="error" @click="removeStyle(skill)">
                 {{ skill.customized ? '恢复默认' : '删除' }}
-              </button>
+              </n-button>
             </template>
-            <button v-else class="btn btn-ghost btn-sm" @click="openStyleEdit(skill)">编辑</button>
+            <n-button v-else quaternary size="small" @click="openStyleEdit(skill)">编辑</n-button>
           </div>
         </div>
         <div v-else class="empty" style="margin-top: var(--space-2)">
-          <span class="empty-title">还没有自定义写作风格</span>
-          <span>新建后可在创作空间的 AI 助手里选用。</span>
+          <n-empty description="新建后可在创作空间的 AI 助手里选用。" size="small" />
         </div>
       </div>
 
       <div class="list" style="margin-top: var(--space-3)">
-        <div v-for="skill in skills" :key="skill.id" class="list-row">
-          <div class="list-main">
-            <div class="list-title">{{ skill.displayName }} <span class="list-meta">v{{ skill.version }}</span></div>
-            <div class="list-meta">
-              {{ skill.description }}
-              <br />
-              工具：{{ skill.allowedToolIds.join('、') || '无' }} · 风险：{{ skill.riskLevel }}
+        <div class="list-title" style="padding: var(--space-2) 0">流程 Skill</div>
+        <div v-for="skill in flowSkills" :key="skill.id" class="skill-block">
+          <div class="list-row">
+            <div class="list-main">
+              <div class="list-title">
+                {{ skill.displayName }} <span class="list-meta">v{{ skill.version }}</span>
+              </div>
+              <div class="list-meta">
+                {{ skill.description }}
+                <br />
+                工具：{{ skill.allowedToolIds.join('、') || '无' }} · 风险：{{
+                  RISK_LABELS[skill.riskLevel] || skill.riskLevel
+                }}
+              </div>
             </div>
+            <n-tag v-if="skill.trustStatus !== 'trusted'" type="warning" size="small" round>待校验</n-tag>
+            <n-tag size="small" :type="skill.enabled ? 'success' : 'default'" round>
+              {{ skill.enabled ? '已启用' : '未启用' }}
+            </n-tag>
+            <n-button
+              v-if="skill.allowedToolIds.length"
+              quaternary
+              size="small"
+              @click="toggleGrantPanel(skill)"
+            >
+              授权
+            </n-button>
+            <n-button
+              quaternary
+              size="small"
+              :disabled="skill.trustStatus !== 'trusted'"
+              @click="toggleSkill(skill)"
+            >
+              {{ skill.enabled ? '停用' : '启用' }}
+            </n-button>
           </div>
-          <span class="tag" :class="skill.enabled ? 'tag-success' : ''">
-            {{ skill.enabled ? '已启用' : '未启用' }}
-          </span>
-          <button class="btn btn-ghost btn-sm" @click="toggleSkill(skill)">
-            {{ skill.enabled ? '停用' : '启用' }}
-          </button>
+          <div v-if="expandedSkillId === skill.id" class="grant-panel">
+            <p class="field-hint" style="margin: 0">
+              勾选允许 Agent 调用的工具；只能收窄，不能超出 Skill 声明范围。
+            </p>
+            <n-checkbox-group v-model:value="skill.grantedToolIds">
+              <n-space>
+                <n-checkbox v-for="tool in skill.allowedToolIds" :key="tool" :value="tool" :label="tool" />
+              </n-space>
+            </n-checkbox-group>
+          </div>
+        </div>
+        <div v-if="!flowSkills.length" class="empty">
+          <n-empty description="流程 Skill 随服务端内置定义同步。" />
         </div>
       </div>
       <div v-if="policy" class="stack" style="margin-top: var(--space-4)">
@@ -691,7 +754,7 @@ async function removeStyle(skill) {
           <div class="row">
             <strong>工具权限分级</strong>
             <div class="spacer" />
-            <span class="tag">服务端强制</span>
+            <n-tag size="small" round>服务端强制</n-tag>
           </div>
           <p class="field-hint">
             权限由服务端按工具分级强制执行，模型无法自行提权；下表为本机实际生效的策略。
@@ -699,16 +762,13 @@ async function removeStyle(skill) {
           <div class="stack" style="margin-top: var(--space-3)">
             <div v-for="group in policy.groups" :key="group.risk">
               <div class="row" style="gap: var(--space-2)">
-                <span
-                  class="tag"
-                  :class="{
-                    'tag-danger': group.risk === 'forbidden',
-                    'tag-warning': group.requiresApproval,
-                    'tag-success': group.risk === 'read_only',
-                  }"
+                <n-tag
+                  size="small"
+                  round
+                  :type="group.risk === 'forbidden' ? 'error' : group.requiresApproval ? 'warning' : group.risk === 'read_only' ? 'success' : 'default'"
                 >
                   {{ group.label }}
-                </span>
+                </n-tag>
                 <span v-if="group.requiresApproval" class="field-hint" style="margin: 0">
                   逐次人工批准
                 </span>
@@ -755,180 +815,137 @@ async function removeStyle(skill) {
       </div>
     </section>
 
-    <Teleport to="body">
-      <div v-if="showConnection" class="modal-backdrop" @click.self="showConnection = false">
-        <div
-          class="modal"
-          role="dialog"
-          aria-modal="true"
-          :aria-label="editingId ? '编辑模型连接' : '添加模型连接'"
-        >
-          <div class="row">
-            <h2 class="modal-title" style="margin: 0">
-              {{ editingId ? '编辑模型连接' : '添加模型连接' }}
-            </h2>
-            <div class="spacer" />
-            <button class="icon-btn" aria-label="关闭" @click="showConnection = false">✕</button>
+    <n-modal
+      v-model:show="showConnection"
+      preset="card"
+      :title="editingId ? '编辑模型连接' : '添加模型连接'"
+      style="width: min(560px, calc(100vw - 32px))"
+    >
+      <n-form label-placement="top">
+        <n-form-item label="连接名称">
+          <n-input v-model:value="connForm.displayName" placeholder="例如：主力文本模型" />
+        </n-form-item>
+        <n-form-item label="供应商类型">
+          <n-select v-model:value="connForm.providerType" :options="providerOptions" />
+          <template v-if="connForm.providerType === 'vendor_native'" #feedback>
+            该协议适配器尚未实现，连接可保存，但「测试」会明确返回 adapter_unavailable，不会静默回退。
+          </template>
+        </n-form-item>
+        <n-form-item label="Base URL">
+          <n-input v-model:value="connForm.baseUrl" placeholder="https://api.example.com/v1" />
+          <template #feedback>
+            仅允许 HTTPS 公网地址：保存时校验字面量，请求前解析 DNS 并拒绝内网 / 环回 /
+            链路本地 / 云元数据地址，且逐跳校验重定向。
+          </template>
+        </n-form-item>
+        <n-form-item label="API Key">
+          <n-input
+            v-model:value="connForm.apiKey"
+            type="password"
+            show-password-on="click"
+            autocomplete="new-password"
+            :placeholder="editingId ? '留空表示不修改当前密钥' : ''"
+          />
+          <template #feedback>
+            {{ editingId ? '保存后不再回显明文；留空即保留原密钥。' : '保存后不再回显明文。' }}
+          </template>
+        </n-form-item>
+        <n-form-item v-if="editingId" :show-label="false">
+          <n-checkbox v-model:checked="clearKey">清空已有密钥（清空后该连接不可调用）</n-checkbox>
+        </n-form-item>
+        <n-form-item label="模型类型">
+          <div class="model-type-grid" role="radiogroup" aria-label="模型类型">
+            <button
+              v-for="item in MODEL_TYPES"
+              :key="item.value"
+              type="button"
+              class="model-type-card"
+              :class="{ 'is-active': connForm.modelType === item.value }"
+              role="radio"
+              :aria-checked="connForm.modelType === item.value"
+              @click="selectModelType(item.value)"
+            >
+              <span class="model-type-name">{{ item.label }}</span>
+              <span class="model-type-desc">{{ item.desc }}</span>
+            </button>
           </div>
-          <div class="stack" style="margin-top: var(--space-3)">
-            <label class="field">
-              <span class="field-label">连接名称</span>
-              <input v-model="connForm.displayName" class="input" placeholder="例如：主力文本模型" />
-            </label>
-            <label class="field">
-              <span class="field-label">供应商类型</span>
-              <select v-model="connForm.providerType" class="select">
-                <option value="openai_compatible">OpenAI 兼容</option>
-                <option value="vendor_native">供应商原生（适配器未接入）</option>
-              </select>
-              <span v-if="connForm.providerType === 'vendor_native'" class="field-hint">
-                该协议适配器尚未实现，连接可保存，但「测试」会明确返回 adapter_unavailable，不会静默回退。
-              </span>
-            </label>
-            <label class="field">
-              <span class="field-label">Base URL</span>
-              <input v-model="connForm.baseUrl" class="input" placeholder="https://api.example.com/v1" />
-              <span class="field-hint">
-                仅允许 HTTPS 公网地址：保存时校验字面量，请求前解析 DNS 并拒绝内网 / 环回 /
-                链路本地 / 云元数据地址，且逐跳校验重定向。
-              </span>
-            </label>
-            <label class="field">
-              <span class="field-label">API Key</span>
-              <input
-                v-model="connForm.apiKey"
-                class="input"
-                type="password"
-                autocomplete="off"
-                :placeholder="editingId ? '留空表示不修改当前密钥' : ''"
-              />
-              <span class="field-hint">
-                {{
-                  editingId
-                    ? '保存后不再回显明文；留空即保留原密钥。'
-                    : '保存后不再回显明文。'
-                }}
-              </span>
-            </label>
-            <label v-if="editingId" class="row" style="gap: var(--space-2)">
-              <input v-model="clearKey" type="checkbox" />
-              <span class="field-hint" style="margin: 0">清空已有密钥（清空后该连接不可调用）</span>
-            </label>
-            <div class="field">
-              <span class="field-label">模型类型</span>
-              <div class="model-type-grid" role="radiogroup" aria-label="模型类型">
-                <button
-                  v-for="item in MODEL_TYPES"
-                  :key="item.value"
-                  type="button"
-                  class="model-type-card"
-                  :class="{ 'is-active': connForm.modelType === item.value }"
-                  role="radio"
-                  :aria-checked="connForm.modelType === item.value"
-                  @click="selectModelType(item.value)"
-                >
-                  <span class="model-type-name">{{ item.label }}</span>
-                  <span class="model-type-desc">{{ item.desc }}</span>
-                </button>
-              </div>
-              <span class="field-hint">
-                {{ currentModelType()?.desc }}；能力随类型自动登记（{{ currentModelType()?.caps }}），不会被调用未登记的能力。
-              </span>
-            </div>
-            <label class="field">
-              <span class="field-label">模型代号{{ editingId ? '' : '（可选）' }}</span>
-              <input
-                v-model="connForm.modelCode"
-                class="input"
-                :placeholder="connForm.modelType === 'image' ? '例如：gemini-2.5-flash-image' : '例如：gpt-4o-mini'"
-              />
-              <span v-if="editingId" class="field-hint">留空将删除该连接下已登记的模型。</span>
-            </label>
-            <div class="row">
-              <div class="spacer" />
-              <button class="btn btn-ghost" @click="showConnection = false">取消</button>
-              <button class="btn" @click="saveConnection">保存</button>
-            </div>
-          </div>
-        </div>
-      </div>
+          <template #feedback>
+            {{ currentModelType()?.desc }}；能力随类型自动登记（{{ currentModelType()?.caps }}），不会被调用未登记的能力。
+          </template>
+        </n-form-item>
+        <n-form-item :label="`模型代号${editingId ? '' : '（可选）'}`">
+          <n-input
+            v-model:value="connForm.modelCode"
+            :placeholder="connForm.modelType === 'image' ? '例如：gemini-2.5-flash-image' : '例如：gpt-4o-mini'"
+          />
+          <template v-if="editingId" #feedback>留空将删除该连接下已登记的模型。</template>
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary @click="showConnection = false">取消</n-button>
+          <n-button type="primary" @click="saveConnection">保存</n-button>
+        </n-space>
+      </template>
+    </n-modal>
 
-      <!-- 写作风格编辑弹窗 -->
-      <div v-if="showStyle" class="modal-backdrop" @click.self="showStyle = false">
-        <div
-          class="modal"
-          role="dialog"
-          aria-modal="true"
-          :aria-label="styleModalTitle"
-        >
-          <div class="row">
-            <h2 class="modal-title" style="margin: 0">{{ styleModalTitle }}</h2>
-            <div class="spacer" />
-            <button class="icon-btn" aria-label="关闭" @click="showStyle = false">✕</button>
-          </div>
-          <div class="stack" style="margin-top: var(--space-3)">
-            <label class="field">
-              <span class="field-label">风格名称</span>
-              <input v-model="styleForm.displayName" class="input" placeholder="例如：犀利锐评" />
-            </label>
-            <label v-if="!styleEditingId && !styleForkSourceId" class="field">
-              <span class="field-label">标识（可选）</span>
-              <input v-model="styleForm.skillKey" class="input" placeholder="例如：sharp-review" />
-              <span class="field-hint">留空自动生成；只能用小写字母、数字、连字符。</span>
-            </label>
-            <label class="field">
-              <span class="field-label">说明</span>
-              <input v-model="styleForm.description" class="input" placeholder="这个风格适合什么场景" />
-            </label>
-            <label class="field">
-              <span class="field-label">语气风格</span>
-              <textarea
-                v-model="styleForm.tone"
-                class="textarea"
-                style="min-height: 72px"
-                placeholder="例如：语气犀利直接，多用短句和反问，观点鲜明，不绕弯子"
-              />
-              <span class="field-hint">会填入写作 prompt 的 {tone} 占位符，直接影响文章语气。</span>
-            </label>
-            <label class="field">
-              <span class="field-label">风格规则（每行一条）</span>
-              <textarea
-                v-model="styleForm.styleRules"
-                class="textarea"
-                style="min-height: 96px"
-                placeholder="不用 emoji&#10;每段不超过 3 行&#10;关键结论前置"
-              />
-              <span class="field-hint">这些规则会作为「必须遵守」附加到写作指令中。</span>
-            </label>
-            <label class="field">
-              <span class="field-label">默认排版主题</span>
-              <select v-model="styleForm.defaultTheme" class="select">
-                <option v-for="theme in THEME_OPTIONS" :key="theme.value" :value="theme.value">
-                  {{ theme.label }}
-                </option>
-              </select>
-            </label>
-            <label class="field">
-              <span class="field-label">高级：完整 Prompt 模板（可选）</span>
-              <textarea
-                v-model="styleForm.promptTemplate"
-                class="textarea"
-                style="min-height: 110px"
-                placeholder="留空使用系统内置模板；可用 {tone} 占位符引用上面的语气风格"
-              />
-              <span class="field-hint">
-                留空时沿用内置模板（输出严格 JSON）。填写后需保留 JSON 输出结构，否则会导致解析失败。
-              </span>
-            </label>
-            <div class="row">
-              <div class="spacer" />
-              <button class="btn btn-ghost" @click="showStyle = false">取消</button>
-              <button class="btn" @click="saveStyle">保存</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <n-modal
+      v-model:show="showStyle"
+      preset="card"
+      :title="styleModalTitle"
+      style="width: min(560px, calc(100vw - 32px))"
+    >
+      <n-form label-placement="top">
+        <n-form-item label="风格名称">
+          <n-input v-model:value="styleForm.displayName" placeholder="例如：犀利锐评" />
+        </n-form-item>
+        <n-form-item v-if="!styleEditingId && !styleForkSourceId" label="标识（可选）">
+          <n-input v-model:value="styleForm.skillKey" placeholder="例如：sharp-review" />
+          <template #feedback>留空自动生成；只能用小写字母、数字、连字符。</template>
+        </n-form-item>
+        <n-form-item label="说明">
+          <n-input v-model:value="styleForm.description" placeholder="这个风格适合什么场景" />
+        </n-form-item>
+        <n-form-item label="语气风格">
+          <n-input
+            v-model:value="styleForm.tone"
+            type="textarea"
+            :autosize="{ minRows: 3, maxRows: 6 }"
+            placeholder="例如：语气犀利直接，多用短句和反问，观点鲜明，不绕弯子"
+          />
+          <template #feedback>会填入写作 prompt 的 {tone} 占位符，直接影响文章语气。</template>
+        </n-form-item>
+        <n-form-item label="风格规则（每行一条）">
+          <n-input
+            v-model:value="styleForm.styleRules"
+            type="textarea"
+            :autosize="{ minRows: 4, maxRows: 8 }"
+            placeholder="不用 emoji&#10;每段不超过 3 行&#10;关键结论前置"
+          />
+          <template #feedback>这些规则会作为「必须遵守」附加到写作指令中。</template>
+        </n-form-item>
+        <n-form-item label="默认排版主题">
+          <n-select v-model:value="styleForm.defaultTheme" :options="THEME_OPTIONS" />
+        </n-form-item>
+        <n-form-item label="高级：完整 Prompt 模板（可选）">
+          <n-input
+            v-model:value="styleForm.promptTemplate"
+            type="textarea"
+            :autosize="{ minRows: 4, maxRows: 10 }"
+            placeholder="留空使用系统内置模板；可用 {tone} 占位符引用上面的语气风格"
+          />
+          <template #feedback>
+            留空时沿用内置模板（输出严格 JSON）。填写后需保留 JSON 输出结构，否则会导致解析失败。
+          </template>
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary @click="showStyle = false">取消</n-button>
+          <n-button type="primary" @click="saveStyle">保存</n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -963,6 +980,37 @@ async function removeStyle(skill) {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
+}
+
+.skill-block {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.skill-block:last-child {
+  border-bottom: none;
+}
+
+.skill-block .list-row {
+  border-bottom: none;
+}
+
+.grant-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-2);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.grant-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-xs);
 }
 
 .path-label {
