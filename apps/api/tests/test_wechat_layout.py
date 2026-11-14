@@ -191,6 +191,23 @@ def test_row_blocks_keep_content_and_stay_wechat_safe():
     )
 
 
+def test_follow_block_has_layered_call_to_action_and_escapes_content():
+    from app.services import wechat_layout
+
+    result = wechat_layout.render_document(
+        ":::follow\n喜欢 <这类> 内容。\n点个关注，后续更新不迷路。\n:::",
+        None,
+        [],
+    )
+    html = result["html"]
+    assert "关注我们" in html
+    assert "点个关注，不错过更新" in html
+    assert "喜欢 &lt;这类&gt; 内容。<br/>点个关注" in html
+    assert "border-left:3px solid" in html
+    assert result["warnings"] == []
+    assert wechat_layout.lint_html(html) == []
+
+
 def test_new_heading_styles_and_presets_normalize():
     from app.services import wechat_layout
 

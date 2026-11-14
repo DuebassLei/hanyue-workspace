@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { NAlert, NButton, NInput, NModal } from 'naive-ui'
+import { NAlert, NButton, NCheckbox, NInput, NModal } from 'naive-ui'
 import { apiUrl, downloadAuthenticated } from '../../api/client'
 
 const props = defineProps({
@@ -16,6 +16,7 @@ const emit = defineEmits([
   'finalize',
   'append',
   'update-caption',
+  'update-prompt',
   'download-error',
 ])
 
@@ -77,6 +78,44 @@ function saveCaption(image) {
   editingId.value = ''
 }
 
+// —— 单张提示词：第 3 步原地查看/修改，必要时只重画这一张 ——
+const promptOpen = ref(false)
+const promptImage = ref(null)
+const promptText = ref('')
+const promptRegenerate = ref(false)
+const promptCaption = ref('')
+
+const promptChanged = computed(
+  () =>
+    Boolean(promptImage.value) &&
+    promptText.value.trim() !== (promptImage.value.framePrompt || '').trim(),
+)
+const captionChanged = computed(
+  () =>
+    Boolean(promptImage.value) &&
+    promptCaption.value.trim() !== (promptImage.value.caption || '').trim(),
+)
+
+function openPrompt(image) {
+  promptImage.value = image
+  promptText.value = image.framePrompt || ''
+  promptCaption.value = image.caption || ''
+  promptRegenerate.value = false
+  promptOpen.value = true
+}
+
+function submitPrompt() {
+  const image = promptImage.value
+  if (!image || !promptText.value.trim()) return
+  emit('update-prompt', {
+    id: image.id,
+    framePrompt: promptText.value.trim(),
+    caption: promptCaption.value.trim(),
+    regenerate: promptRegenerate.value && promptChanged.value,
+  })
+  promptOpen.value = false
+}
+
 // —— 再补一张 ——
 const appendOpen = ref(false)
 const appendRow = ref({ caption: '', framePrompt: '', slotType: 'info' })
@@ -129,6 +168,7 @@ async function downloadArchive() {
           <template v-if="image.status === 'succeeded'">
             <img :src="imageSrc(image)" :alt="image.caption || `第 ${index + 1} 张贴图`" loading="lazy" />
             <div class="review-hover">
+              <n-button size="tiny" secondary @click.stop="openPrompt(image)">提示词</n-button>
               <n-input
                 v-if="editingId === image.id"
                 v-model:value="editCaption"
@@ -152,6 +192,9 @@ async function downloadArchive() {
           <!-- 失败：中文错误说明 + 单张重试 -->
           <div v-else-if="image.status === 'failed'" class="review-failed">
             <span class="review-failed-text">{{ errorText(image.errorCode) }}</span>
+            <n-button size="tiny" quaternary :disabled="busy" @click="openPrompt(image)">
+              查看/改提示词
+            </n-button>
             <!-- 有任务在跑时后端会拒绝单张重试（同集合不许双开生成），按钮先锁住 -->
             <n-button
               size="tiny"
@@ -171,7 +214,16 @@ async function downloadArchive() {
         </div>
         <figcaption class="review-caption">
           <b>{{ index + 1 }}</b>
-          <span :title="image.framePrompt">{{ image.caption || image.framePrompt }}</span>
+          <button type="button" class="review-prompt-link" :title="image.framePrompt" @click="openPrompt(image)">
+            {{ image.caption || image.framePrompt }}
+          </button>
+          <span
+            v-if="!image.promptApplied"
+            class="review-prompt-stale"
+            title="画面描述已改，但还没有按新描述重画"
+          >
+            待重画
+          </span>
           <span class="tag" :class="image.slotType === 'pace' ? 'tag-warning' : 'tag-info'">
             {{ image.slotType === 'pace' ? '节奏' : '信息' }}
           </span>
@@ -257,6 +309,50 @@ async function downloadArchive() {
         <n-button secondary @click="appendOpen = false">取消</n-button>
         <n-button type="primary" :disabled="!appendRow.framePrompt.trim() || busy" @click="submitAppend">
           追加
+        </n-button>
+      </div>
+    </n-modal>
+
+    <n-modal
+      v-model:show="promptOpen"
+      preset="card"
+      :title="promptImage ? `第 ${promptImage.sortOrder + 1} 张 · 提示词` : '提示词'"
+      style="width: min(620px, calc(100vw - 32px))"
+    >
+      <div class="stack-2">
+        <label class="field">
+          <span class="field-label">画面描述（会拼进生图提示词）</span>
+          <n-input
+            v-model:value="promptText"
+            type="textarea"
+            :autosize="{ minRows: 6, maxRows: 16 }"
+            placeholder="具体的画面：场景、主体、构图、色调"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">配文</span>
+          <n-input v-model:value="promptCaption" placeholder="一句话配文（可选）" />
+        </label>
+        <n-checkbox v-model:checked="promptRegenerate" :disabled="!promptChanged || busy">
+          保存后用新描述重画这一张（旧图作废，消耗 1 次生图）
+        </n-checkbox>
+        <span v-if="!promptChanged" class="field-hint">没有改动，保存只会同步文案。</span>
+        <span v-else-if="!promptRegenerate" class="field-hint">
+          只保存描述：当前图片保留；要在这里用新描述出图，勾选上方选项再保存。
+        </span>
+        <span v-else class="field-hint">
+          其余张不受影响；锚点图重画后，其余张的一致性参考会换成新锚点。
+        </span>
+      </div>
+      <div class="row" style="margin-top: var(--space-3)">
+        <div class="spacer" />
+        <n-button secondary @click="promptOpen = false">取消</n-button>
+        <n-button
+          type="primary"
+          :disabled="!promptText.trim() || (!promptChanged && !captionChanged) || busy"
+          @click="submitPrompt"
+        >
+          {{ promptRegenerate && promptChanged ? '保存并重画这张' : '保存' }}
         </n-button>
       </div>
     </n-modal>
@@ -379,12 +475,32 @@ async function downloadArchive() {
   color: var(--color-text-secondary);
   min-width: 0;
 }
-.review-caption > span:nth-child(2) {
+.review-prompt-link {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.review-prompt-link:hover {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+.review-prompt-stale {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 16px;
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
 }
 .review-caption b {
   font-variant-numeric: tabular-nums;
@@ -393,5 +509,11 @@ async function downloadArchive() {
 .review-foot {
   padding-top: var(--space-2);
   border-top: 1px dashed var(--color-border);
+}
+@media (hover: none) {
+  /* 触屏没有 hover：提示词按钮常显，否则手机上永远点不到 */
+  .review-hover {
+    opacity: 1;
+  }
 }
 </style>

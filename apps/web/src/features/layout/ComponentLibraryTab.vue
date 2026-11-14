@@ -1,9 +1,8 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { NButton, NEmpty } from 'naive-ui'
+import { NButton, NEmpty, NInput } from 'naive-ui'
 import { api } from '../../api/client'
 import { toast } from '../../ui/feedback'
-import PhonePreview from './PhonePreview.vue'
 import { useLayoutComponents } from '../../composables/useLayoutComponents'
 
 /**
@@ -17,6 +16,7 @@ const props = defineProps({
 
 const { components, load: loadComponents } = useLayoutComponents()
 const themeId = ref('')
+const searchQuery = ref('')
 const htmlMap = ref({})
 const busy = ref(false)
 const copyId = ref('')
@@ -28,14 +28,55 @@ const themeOptions = computed(() =>
     .map((t) => ({ value: t.id, label: t.name })),
 )
 
-const grouped = computed(() => {
+const filteredComponents = computed(() => {
+  const query = searchQuery.value.trim().toLocaleLowerCase()
+  if (!query) return components.value
+  return components.value.filter((item) =>
+    [item.label, item.id, item.description, item.category]
+      .some((value) => String(value || '').toLocaleLowerCase().includes(query)),
+  )
+})
+
+/** 保持分类顺序的扁平列表：所有卡片流进同一网格，避免单卡分类留下大片空位 */
+const orderedItems = computed(() => {
   const map = new Map()
-  for (const item of components.value) {
+  for (const item of filteredComponents.value) {
     if (!map.has(item.category)) map.set(item.category, [])
     map.get(item.category).push(item)
   }
-  return [...map.entries()]
+  return [...map.values()].flat()
 })
+
+const categories = computed(() => [...new Set(orderedItems.value.map((item) => item.category))])
+
+/** 分类 → 首个组件 id，供快速跳转定位 */
+const categoryAnchors = computed(() => {
+  const anchors = new Map()
+  for (const item of orderedItems.value) {
+    if (!anchors.has(item.category)) anchors.set(item.category, item.id)
+  }
+  return anchors
+})
+
+function jumpToCategory(category) {
+  const target = document.getElementById(`component-card-${categoryAnchors.value.get(category)}`)
+  if (!target) return
+  // 页面外层是 n-scrollbar 容器，scrollIntoView 在嵌套布局里不可靠，直接找最近的可滚动祖先
+  let scroller = target.parentElement
+  while (scroller && scroller.scrollHeight <= scroller.clientHeight + 1) scroller = scroller.parentElement
+  if (scroller) {
+    const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+    scroller.scrollTo({ top: scroller.scrollTop + top - 16, behavior: 'smooth' })
+  }
+  target.classList.add('component-card-flash')
+  setTimeout(() => target.classList.remove('component-card-flash'), 1200)
+}
+
+/** 与 PhonePreview 白底包裹层同一内联样式，保证脱离手机壳后字号/行高一致 */
+function wrappedSample(html) {
+  if (!html) return ''
+  return `<div style="padding:14px 16px;background:#ffffff;color:#333;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;">${html}</div>`
+}
 
 async function renderAll() {
   const token = ++renderToken
@@ -105,35 +146,59 @@ async function copySnippet(item) {
       >{{ theme.label }}</n-button>
       <div class="spacer" />
       <span v-if="busy" class="field-hint">渲染中…</span>
-      <span v-else class="field-hint">{{ components.length }} 个组件</span>
+      <span v-else class="field-hint">{{ filteredComponents.length }} / {{ components.length }} 个组件</span>
+    </div>
+
+    <div class="component-discovery">
+      <n-input
+        v-model:value="searchQuery"
+        class="component-search"
+        clearable
+        size="small"
+        placeholder="搜索组件名称、语法或描述"
+        aria-label="搜索小组件"
+      >
+        <template #prefix><span class="component-search-icon" aria-hidden="true" /></template>
+      </n-input>
+      <nav v-if="categories.length > 1" class="component-jump" aria-label="组件分类快速导航">
+        <span class="component-jump-label">快速跳转</span>
+        <button
+          v-for="category in categories"
+          :key="category"
+          type="button"
+          class="component-jump-button"
+          @click="jumpToCategory(category)"
+        >{{ category }}</button>
+      </nav>
     </div>
 
     <n-empty v-if="!components.length && !busy" description="组件清单加载失败，稍后重试" />
+    <n-empty v-else-if="components.length && !filteredComponents.length" description="没有匹配的小组件" />
 
-    <section v-for="[category, items] in grouped" :key="category" class="component-group">
-      <h3 class="component-group-title">{{ category }}</h3>
-      <div class="component-grid">
-        <article v-for="item in items" :key="item.id" class="component-card">
-          <header class="component-card-head">
-            <strong>{{ item.label }}</strong>
-            <code class="component-fence">:::{{ item.id }}</code>
-            <div class="spacer" />
-            <n-button size="tiny" tertiary @click="copySnippet(item)">
-              {{ copyId === item.id ? '已复制' : '复制语法' }}
-            </n-button>
-          </header>
-          <p class="component-desc">{{ item.description }}</p>
-          <div class="component-preview">
-            <PhonePreview
-              :html="htmlMap[item.id] || ''"
-              :busy="busy && !htmlMap[item.id]"
-              :height="360"
-              :scale="0.74"
-            />
-          </div>
-        </article>
-      </div>
-    </section>
+    <div class="component-grid">
+      <article
+        v-for="item in orderedItems"
+        :id="`component-card-${item.id}`"
+        :key="item.id"
+        class="component-card"
+      >
+        <header class="component-card-head">
+          <span class="component-category-tag">{{ item.category }}</span>
+          <strong>{{ item.label }}</strong>
+          <code class="component-fence">:::{{ item.id }}</code>
+          <div class="spacer" />
+          <n-button size="tiny" tertiary @click="copySnippet(item)">
+            {{ copyId === item.id ? '已复制' : '复制语法' }}
+          </n-button>
+        </header>
+        <p class="component-desc">{{ item.description }}</p>
+        <!-- 组件库不套手机壳：正文按微信字号直接渲染，超长时卡内滚动 -->
+        <div v-if="busy && !htmlMap[item.id]" class="component-sample component-sample-busy">
+          排版渲染中…
+        </div>
+        <div v-else class="component-sample" v-html="wrappedSample(htmlMap[item.id])" />
+      </article>
+    </div>
   </div>
 </template>
 
@@ -154,28 +219,116 @@ async function copySnippet(item) {
   color: var(--color-text-secondary, #888);
   margin-right: 4px;
 }
-.component-group-title {
-  font-size: var(--font-section, 15px);
-  margin: 0 0 var(--space-3, 12px);
+.component-discovery {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, #e5e5e5);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--color-surface-raised, #f8f9fa);
+}
+.component-search {
+  flex: 0 1 280px;
+  min-width: 180px;
+}
+.component-search-icon {
+  position: relative;
+  display: block;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.component-search-icon::after {
+  content: '';
+  position: absolute;
+  right: -4px;
+  bottom: -2px;
+  width: 5px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: rotate(45deg);
+  transform-origin: left center;
+}
+.component-jump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.component-jump::-webkit-scrollbar {
+  display: none;
+}
+.component-jump-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--color-text-secondary, #888);
+}
+.component-jump-button {
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: var(--color-text-secondary, #666);
+  background: var(--color-surface, #fff);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease;
+}
+.component-jump-button:hover,
+.component-jump-button:focus-visible {
+  color: var(--color-primary, #18a058);
+  background: var(--color-primary-soft, #e8f6ee);
+  outline: none;
 }
 .component-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
   gap: var(--space-4, 16px);
+  scroll-margin-top: 16px;
 }
 .component-card {
+  scroll-margin-top: 72px;
   border: 1px solid var(--color-border, #e5e5e5);
-  border-radius: var(--radius-lg, 10px);
+  border-radius: var(--radius-lg, 12px);
   background: var(--color-surface, #fff);
-  padding: 14px 16px;
+  padding: 14px 16px 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transition: box-shadow 200ms ease, border-color 200ms ease, transform 200ms ease;
+}
+.component-card:hover {
+  border-color: color-mix(in srgb, var(--color-primary, #18a058) 35%, var(--color-border, #e5e5e5));
+  box-shadow: 0 10px 28px -18px rgba(23, 28, 42, 0.35);
+  transform: translateY(-1px);
+}
+@keyframes component-card-flash {
+  0%, 60% { box-shadow: 0 0 0 2px var(--color-primary, #18a058); }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}
+.component-card-flash {
+  animation: component-card-flash 1200ms ease-out;
 }
 .component-card-head {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.component-category-tag {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: var(--color-primary, #18a058);
+  background: var(--color-primary-soft, #e8f6ee);
 }
 .component-fence {
   font-size: 11px;
@@ -189,9 +342,45 @@ async function copySnippet(item) {
   font-size: 12px;
   color: var(--color-text-secondary, #888);
 }
-.component-preview {
-  display: flex;
-  justify-content: center;
-  padding-top: 4px;
+/* 正文样张：白底即微信正文底色，超长卡内滚动 */
+.component-sample {
+  margin-top: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--radius-md, 6px);
+  box-shadow: inset 0 0 0 1px var(--color-border, #ececf1);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+}
+.component-sample::-webkit-scrollbar {
+  width: 4px;
+}
+.component-sample::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 4px;
+}
+.component-sample :deep(img) {
+  max-width: 100%;
+}
+.component-sample-busy {
+  display: grid;
+  place-items: center;
+  min-height: 96px;
+  color: var(--color-text-muted, #999);
+  font-size: 13px;
+}
+@media (max-width: 720px) {
+  .component-discovery {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .component-search {
+    flex-basis: auto;
+    width: 100%;
+  }
+  .component-jump {
+    width: 100%;
+  }
 }
 </style>

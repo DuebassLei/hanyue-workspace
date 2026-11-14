@@ -68,12 +68,32 @@ const promptCategoryOptions = computed(() => [
 const selectedProvider = computed(
   () => providers.value.find((item) => (item.modelId || '') === selectedModelId.value) || null,
 )
+// null 表示尚未探测过：按「可能不支持」提示，避免承诺做不到的事
+const providerEditsUnsupported = computed(
+  () => selectedProvider.value?.supportsEdits === false,
+)
+// 手绘风格会在服务端隐式附一张参考图，界面上要把它算进「是否走图生图」
+const willSendReference = computed(
+  () =>
+    referenceFiles.value.length > 0 ||
+    Boolean(handdrawCompose.value?.needReference),
+)
 const canAddReference = computed(() => referenceFiles.value.length < REFERENCE_LIMIT)
 const referenceHint = computed(() =>
   referenceFiles.value.length
     ? `已选 ${referenceFiles.value.length}/${REFERENCE_LIMIT} 张`
     : '未选择文件',
 )
+const referenceModeHint = computed(() => {
+  if (providerEditsUnsupported.value) {
+    return willSendReference.value
+      ? '该供应商不支持参考图编辑，本次将按纯文生图生成，画风仅由文字描述决定。'
+      : '该供应商不支持参考图编辑，选了也会按纯文生图生成。'
+  }
+  return willSendReference.value
+    ? '将走图生图；若供应商不支持参考图编辑，会自动降级为纯文生图。'
+    : '不选走文生图。'
+})
 
 const currentGenJob = computed(() => {
   if (genJobId.value) return jobs.value.find((job) => job.id === genJobId.value) || null
@@ -717,7 +737,7 @@ onBeforeUnmount(() => {
         <div class="gen-block">
           <div class="gen-block-head">
             <label class="field-label" for="gen-prompt">提示词</label>
-            <n-button secondary size="small" @click="openPromptPicker">从提示词库填入</n-button>
+            <n-button size="small" @click="openPromptPicker">从提示词库填入</n-button>
           </div>
           <n-input
             id="gen-prompt"
@@ -737,7 +757,7 @@ onBeforeUnmount(() => {
         <div class="gen-block">
           <div class="gen-block-head">
             <span class="field-label">手绘风格</span>
-            <n-button v-if="!handdrawStyle" secondary size="small" @click="openStylePicker">选择风格</n-button>
+            <n-button v-if="!handdrawStyle" size="small" @click="openStylePicker">选择风格</n-button>
           </div>
           <div v-if="handdrawStyle" class="handdraw-chip">
             <img v-if="handdrawThumb" :src="handdrawThumb" :alt="handdrawStyle.generationName" />
@@ -745,7 +765,9 @@ onBeforeUnmount(() => {
               <span class="handdraw-chip-title">{{ handdrawStyle.generationName }}</span>
               <span class="field-hint">
                 {{ handdrawStyle.number }} · {{ handdrawStyle.referenceAuthor }}
-                <template v-if="handdrawCompose?.needReference"> · 出图时自动附加参考图</template>
+                <template v-if="handdrawCompose?.needReference">
+                  · {{ providerEditsUnsupported ? '该供应商不支持参考图，将仅用文字描述画风' : '出图时自动附加参考图' }}
+                </template>
               </span>
             </div>
             <n-button quaternary size="small" @click="clearHanddrawStyle">移除</n-button>
@@ -760,7 +782,6 @@ onBeforeUnmount(() => {
           </div>
           <div class="row row-tight">
             <n-button
-              secondary
               size="small"
               :disabled="!canAddReference"
               @click="referenceInput?.click()"
@@ -776,7 +797,7 @@ onBeforeUnmount(() => {
               :disabled="!canAddReference"
               @change="onReferencePick"
             />
-            <span class="field-hint">不选走文生图；选了走图生图，需要供应商支持 /images/edits。</span>
+            <span class="field-hint">{{ referenceModeHint }}</span>
           </div>
           <div v-if="referenceFiles.length" class="ref-grid">
             <figure v-for="(item, index) in referenceFiles" :key="item.url" class="ref-item">
@@ -827,23 +848,27 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="gen-submit">
-          <label class="field" style="width: 130px">
-            <span class="field-label">比例</span>
-            <n-select v-model:value="form.aspectRatio" :options="ASPECT_OPTIONS" />
-          </label>
-          <label class="field" style="width: 110px">
-            <span class="field-label">数量</span>
-            <n-select v-model:value="form.count" :options="COUNT_OPTIONS" />
-          </label>
-          <div class="spacer" />
-          <n-button quaternary :disabled="busy" @click="resetForm">清空</n-button>
-          <n-button
-            type="primary"
-            :disabled="!provider.available || !form.prompt.trim() || busy"
-            @click="generate"
-          >
-            {{ busy ? '提交中…' : '生成图片' }}
-          </n-button>
+          <div class="gen-submit-options">
+            <label class="field">
+              <span class="field-label">比例</span>
+              <n-select v-model:value="form.aspectRatio" :options="ASPECT_OPTIONS" />
+            </label>
+            <label class="field">
+              <span class="field-label">数量</span>
+              <n-select v-model:value="form.count" :options="COUNT_OPTIONS" />
+            </label>
+          </div>
+          <div class="gen-submit-actions">
+            <n-button quaternary :disabled="busy" @click="resetForm">清空</n-button>
+            <n-button
+              type="primary"
+              block
+              :disabled="!provider.available || !form.prompt.trim() || busy"
+              @click="generate"
+            >
+              {{ busy ? '提交中…' : '生成图片' }}
+            </n-button>
+          </div>
         </div>
 
         <n-alert v-if="!provider.available" type="warning" :bordered="false">
@@ -926,6 +951,9 @@ onBeforeUnmount(() => {
           </template>
         </div>
         <div v-if="genAssets.length" class="result-foot">
+          <p v-if="currentGenJob?.result?.notice" class="field-hint">
+            {{ currentGenJob.result.notice }}
+          </p>
           <p class="result-prompt">{{ genPrompt || '本次生成的提示词' }}</p>
           <n-button
             quaternary
@@ -1256,6 +1284,28 @@ onBeforeUnmount(() => {
 .gen-prompt {
   flex: 1;
   min-height: 140px;
+}
+/* 左栏操作区：比例/数量收成一行，主按钮单独占底，避免和说明挤在一起 */
+.gen-submit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: auto;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+.gen-submit-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-3);
+}
+.gen-submit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.gen-submit-actions .n-button:last-child {
+  flex: 1;
 }
 .ref-grid {
   display: flex;

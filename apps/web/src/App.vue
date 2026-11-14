@@ -40,7 +40,14 @@ const collapsed = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
 const expandedKeys = ref(readOpenKeys())
 const { theme, themeOverrides, isDark } = useNaiveTheme(session)
 bindShellAppearance(isDark)
-const { tabs, activeKey: tabActiveKey, open: openTab, close: closeTab } = usePageTabs(route, router)
+const {
+  tabs,
+  activeKey: tabActiveKey,
+  open: openTab,
+  close: closeTab,
+  closeOthers: closeOtherTabs,
+  closeAll: closeAllTabs,
+} = usePageTabs(route, router)
 const paletteOpen = ref(false)
 const accountOpen = ref(false)
 const isFullscreen = ref(false)
@@ -226,7 +233,9 @@ onBeforeUnmount(() => {
             </div>
           </n-layout-sider>
 
-          <n-layout class="main" :native-scrollbar="false">
+          <!-- flex-height + native：main 高度固定不滚动，滚动全部交给 .main-content，
+               避免出现第二个原生滚动容器抢滚轮（wheel 链被 overflow:hidden 截断的根因） -->
+          <n-layout class="main" :native-scrollbar="true" flex-height>
             <n-layout-header bordered class="topbar">
               <div class="topbar-start">
                 <button
@@ -299,6 +308,8 @@ onBeforeUnmount(() => {
               :active-key="tabActiveKey"
               @open="openTab"
               @close="closeTab"
+              @close-others="closeOtherTabs"
+              @close-all="closeAllTabs"
             />
 
             <div
@@ -314,7 +325,9 @@ onBeforeUnmount(() => {
               </n-button>
             </div>
 
-            <n-layout-content>
+            <!-- 不加 has-sider 时 n-layout-content 默认 overflow:hidden，会把页面撑破 main
+                 （main 同为 hidden）→ 滚轮链截断、整页滚不动。这里让它成为唯一原生滚动器。 -->
+            <n-layout-content class="main-content">
               <RouterView v-if="session.ready && !session.needsLogin" />
               <div v-else-if="session.needsLogin" class="page">
                 <div class="card">
@@ -399,6 +412,12 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+.main-content {
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .topbar {
   height: 52px;
   display: flex;
@@ -406,9 +425,7 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 16px;
   padding: 0 16px 0 12px;
-  position: sticky;
-  top: 0;
-  z-index: 20;
+  flex: none;
 }
 
 .topbar-start {

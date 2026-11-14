@@ -12,6 +12,7 @@ from sqlalchemy import func, or_, select
 from .. import models
 from ..core.deps import ApiError, CurrentUser, DbSession, not_found
 from ..services import handdraw as handdraw_service
+from ..services import image_provider
 
 router = APIRouter(prefix="/handdraw", tags=["handdraw"])
 
@@ -85,8 +86,6 @@ def _find_color(db: DbSession, color_id: str | None) -> models.HanddrawColor | N
 
 def _model_code(db: DbSession, user: models.User, model_id: str | None, model: str | None) -> str:
     """优先用供应商登记的模型代号，其次用调用方显式传入的模型名。"""
-    from ..services import image_provider
-
     provider = image_provider.resolve_image_provider(db, user.id, model_id)
     if provider and provider.get("modelCode"):
         return str(provider["modelCode"])
@@ -230,7 +229,13 @@ def compose(payload: ComposeIn, user: CurrentUser, db: DbSession) -> dict:
     accent = _find_color(db, payload.accentColorId)
     model_code = _model_code(db, user, payload.modelId, payload.model)
     activation = handdraw_service.resolve_activation(style, model_code)
-    prompts = handdraw_service.compose_prompt(style, activation, theme, color, accent)
+    # 供应商已确认不支持参考图时，提示词不能再写「随请求自动附加参考图」——
+    # 那张图根本不会发出去，承诺会误导模型也误导用户。
+    edits_supported = image_provider.provider_supports_edits(db, user.id, payload.modelId)
+    attach_reference = activation.need_reference and edits_supported is not False
+    prompts = handdraw_service.compose_prompt(
+        style, activation, theme, color, accent, attach_reference=attach_reference
+    )
     return {
         "style": _style_out(style, activation),
         "color": (

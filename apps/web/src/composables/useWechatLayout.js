@@ -127,6 +127,54 @@ export function useWechatLayout() {
     previewTimer = setTimeout(() => renderPreview(body, tokens, themeId), delay)
   }
 
+  // ── 主题卡片样张：一次渲染多套主题，按 id+tokens 缓存 ────────────────────
+  // 卡片缩略图必须走同一个渲染函数，否则展示效果会和推送出去的排版漂移。
+  const sampleHtml = ref({})
+  const sampleBusy = ref(false)
+  let sampleToken = 0
+
+  /** 主题卡片样文：一眼能看出标题样式 + 正文密度，不占太多高度 */
+  const THEME_SAMPLE = `# 一篇文章的骨架\n\n正文排版的关键是字号、行高与留白。这里展示**加粗**与==高亮==的真实效果。`
+
+  function sampleKey(theme) {
+    return `${theme.id}:${JSON.stringify(theme.tokens || {})}`
+  }
+
+  async function loadThemeSamples(themes) {
+    const keyed = themes.map((theme) => [sampleKey(theme), theme])
+    const missing = keyed.filter(([key]) => !(key in sampleHtml.value))
+    if (!missing.length) {
+      // 已有缓存：仍要把新键映射进结果（旧键不动，避免卡片闪白）
+      const next = { ...sampleHtml.value }
+      for (const [key, theme] of keyed) {
+        if (!(key in next)) next[key] = ''
+      }
+      sampleHtml.value = next
+      return
+    }
+    const token = ++sampleToken
+    sampleBusy.value = true
+    try {
+      const entries = await Promise.all(
+        missing.map(async ([key, theme]) => {
+          const result = await api.post('/wechat-mp/drafts/render', {
+            body: THEME_SAMPLE,
+            themeId: theme.id,
+          })
+          return [key, result.html]
+        }),
+      )
+      if (token !== sampleToken) return
+      const next = { ...sampleHtml.value }
+      for (const [key, html] of entries) next[key] = html
+      sampleHtml.value = next
+    } catch (err) {
+      if (token === sampleToken) error.value = `主题样张渲染失败：${err.message}`
+    } finally {
+      if (token === sampleToken) sampleBusy.value = false
+    }
+  }
+
   // ── 导入 / 导出 ────────────────────────────────────────────────────────────
 
   function exportTheme(theme) {
@@ -184,6 +232,11 @@ export function useWechatLayout() {
     previewError,
     renderPreview,
     schedulePreview,
+    sampleHtml,
+    sampleBusy,
+    THEME_SAMPLE,
+    sampleKey,
+    loadThemeSamples,
     exportTheme,
     importTheme,
   }

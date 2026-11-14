@@ -28,9 +28,11 @@ SIZE_MAP = {
 }
 MAX_PIXELS = 16_000_000
 MAX_BYTES = 20 * 1024 * 1024
-# 这些状态码配参考图出现，说明供应商根本没实现 /images/edits
-# 404 端点不存在 / 405 方法不支持 / 501 未实现；400/415 视网关而定，也算
-EDIT_UNSUPPORTED_STATUS = frozenset({400, 404, 405, 415, 501})
+# 这些状态码配参考图出现，说明供应商根本没实现 /images/edits：
+# 404 端点不存在 / 405 方法不支持 / 501 未实现。
+# 400/415 不在其中：它们更可能是参考图格式、尺寸或参数不合规，
+# 一律当成「不支持」会把可修复的请求误判成永久降级。
+EDIT_UNSUPPORTED_STATUS = frozenset({404, 405, 501})
 
 
 class ImageProviderUnavailable(RuntimeError):
@@ -47,6 +49,38 @@ def _env_provider() -> dict | None:
     if env_base and env_key and env_model:
         return {"modelId": None, "baseUrl": env_base.rstrip("/"), "apiKey": env_key, "modelCode": env_model}
     return None
+
+
+def provider_supports_edits(db, owner_user_id: str, model_id: str | None) -> bool | None:
+    """该供应商是否支持参考图编辑（/images/edits）。
+
+    True 明确支持 / False 探测后确认不支持 / None 还没探测过。
+    环境变量供应商没有可写的 catalog 行，永远返回 None（每次现探）。
+    """
+    if not model_id:
+        return None
+    entry = db.get(models.ModelCatalogEntry, model_id)
+    if entry is None:
+        return None
+    connection = db.get(models.ModelConnection, entry.connection_id)
+    if not connection or connection.owner_user_id != owner_user_id:
+        return None
+    value = (entry.options or {}).get("supportsEdits")
+    return value if isinstance(value, bool) else None
+
+
+def mark_edits_unsupported(db, model_id: str | None) -> None:
+    """把「不支持 /images/edits」记到模型的 options 上，后续任务直接跳过注定失败的请求。
+
+    环境变量供应商（model_id 为空）无处可记，调用方按每次现探处理。
+    """
+    if not model_id:
+        return
+    entry = db.get(models.ModelCatalogEntry, model_id)
+    if entry is None:
+        return
+    entry.options = {**(entry.options or {}), "supportsEdits": False}
+    db.commit()
 
 
 def list_providers(db, owner_user_id: str) -> list[dict]:
@@ -78,6 +112,8 @@ def list_providers(db, owner_user_id: str) -> list[dict]:
             {
                 "modelId": entry.id,
                 "modelCode": entry.model_code,
+                # None 表示尚未探测；前端据此决定参考图提示文案
+                "supportsEdits": (entry.options or {}).get("supportsEdits"),
                 "label": f"{connection.display_name} · {entry.display_name or entry.model_code}",
                 "source": "connection",
             }

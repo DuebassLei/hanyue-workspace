@@ -115,10 +115,10 @@ LAYOUT_COMPONENTS: tuple[dict, ...] = (
     {
         "id": "follow",
         "label": "引导关注",
-        "description": "灰底居中卡片，适合放在文末",
+        "description": "文末关注签：主题色标记、关注提示与读者互动文案",
         "category": "互动",
-        "snippet": "\n\n:::follow\n点右上角「关注」，第一时间看到更新。\n:::\n",
-        "sampleBody": ":::follow\n如果这篇有用，点个「在看」或分享给需要的朋友。\n:::",
+        "snippet": "\n\n:::follow\n点个关注，后续更新就不会错过。\n:::\n",
+        "sampleBody": ":::follow\n喜欢这样的内容，就点个关注。\n后续更新与实用技巧，我们会继续整理分享。\n:::",
     },
     {
         "id": "sign",
@@ -958,18 +958,27 @@ def _render_blockquote_like(kind: str, block: Block, tokens: dict, warnings: lis
             head + inner,
         )
     if kind == "follow":
+        badge = (
+            f'<span style="{_style({"display": "inline-block", "margin": "0 0 10px", "padding": "3px 10px", "border": "1px solid " + tokens["primaryColor"], "border-radius": 999, "color": tokens["primaryColor"], "font-size": 12, "font-weight": 600, "line-height": 1.5})}">关注我们</span>'
+        )
+        message = (
+            f'<span style="{_style({"display": "block", "color": tokens["textColor"], "font-size": tokens["bodySize"] - 1, "line-height": tokens["bodyLineHeight"]})}">{inner}</span>'
+        )
+        action = (
+            f'<strong style="{_style({"display": "inline-block", "margin": "12px 0 0", "padding": "6px 14px", "background": tokens["primaryColor"], "border-radius": 4, "color": "#FFFFFF", "font-size": 13, "font-weight": 600, "line-height": 1.5})}">点个关注，不错过更新</strong>'
+        )
         return _section(
             {
                 "margin": "2em 0 1em",
-                "padding": "16px",
+                "padding": "18px 16px",
                 "background": tokens["quoteBg"],
+                "border-left": f'3px solid {tokens["primaryColor"]}',
                 "border-radius": tokens["imageRadius"],
                 "text-align": "center",
-                "font-size": tokens["bodySize"] - 1,
                 "line-height": tokens["bodyLineHeight"],
                 "color": tokens["mutedColor"],
             },
-            inner,
+            badge + message + action,
         )
     if kind == "lead":
         bar = (

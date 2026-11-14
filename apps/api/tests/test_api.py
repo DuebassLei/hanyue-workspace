@@ -658,6 +658,32 @@ def test_asset_upload_and_image_job(client):
     assert still_there.status_code == 200
 
 
+def test_asset_raw_inline_mode_opens_in_browser(client):
+    """原图直链默认下载；inline=1 时应在新标签直接显示，而不是又下载一次。"""
+    from PIL import Image
+
+    headers = login(client, "asset-inline")
+    buffer = io.BytesIO()
+    Image.new("RGB", (20, 20), (10, 20, 30)).save(buffer, format="PNG")
+    buffer.seek(0)
+    res = client.post(
+        "/api/v1/assets",
+        files={"file": ("shot.png", buffer, "image/png")},
+        headers=headers,
+    )
+    assert res.status_code == 201, res.text
+    url = res.json()["url"]
+
+    download = client.get(url)
+    assert download.status_code == 200
+    assert "attachment" in download.headers.get("content-disposition", "")
+
+    inline = client.get(f"{url}&inline=1")
+    assert inline.status_code == 200
+    assert inline.headers.get("content-type", "").startswith("image/")
+    assert "attachment" not in inline.headers.get("content-disposition", "")
+
+
 def test_asset_search_by_keyword(client):
     from PIL import Image
 

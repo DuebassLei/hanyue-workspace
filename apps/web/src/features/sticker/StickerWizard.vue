@@ -249,6 +249,21 @@ function onUpdateCaption({ id, caption }) {
   }, '配文保存失败')
 }
 
+function onUpdatePrompt({ id, framePrompt, caption, regenerate }) {
+  runAction(async () => {
+    const updated = await api.patch(`/stickers/${detail.value.id}/images/${id}`, {
+      framePrompt,
+      caption,
+      regenerate,
+    })
+    detail.value = updated
+    if (regenerate) {
+      const target = updated.images?.find((item) => item.id === id)
+      if (target) markQueued([target.id])
+    }
+  }, '提示词保存失败')
+}
+
 function onAppend(row) {
   // 「再补一张」：带着当前分镜 + 新行回到 Step2 编辑确认
   outlineRows.value = [
@@ -330,6 +345,7 @@ onBeforeUnmount(stopPolling)
       @retry-image="onRetryImage"
       @retry-failed="onRetryFailed"
       @update-caption="onUpdateCaption"
+      @update-prompt="onUpdatePrompt"
       @download-error="error = $event"
       @append="onAppend"
       @finalize="onFinalize"

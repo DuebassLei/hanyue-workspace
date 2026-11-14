@@ -160,6 +160,7 @@ def get_asset_raw(
     user: OptionalUser = None,
     exp: int | None = Query(default=None),
     sig: str | None = Query(default=None),
+    inline: int | None = Query(default=None),
 ):
     """素材原图。
 
@@ -184,7 +185,9 @@ def get_asset_raw(
     return FileResponse(
         path,
         media_type=asset.mime_type,
-        filename=asset.original_name,
+        # 默认带 filename => attachment，链接可直接下载且保留原始文件名；
+        # inline=1 时不声明下载，供「打开原图」在新标签里直接显示图片。
+        filename=None if inline else asset.original_name,
         # 签名 URL 可长缓存；鉴权访问每次都要重新校验
         headers={"Cache-Control": "private, max-age=86400"} if signed else None,
     )

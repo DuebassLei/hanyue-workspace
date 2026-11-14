@@ -107,5 +107,24 @@ export function usePageTabs(route, router) {
     else router.push({ name: 'overview' })
   }
 
-  return { tabs, activeKey, open, close }
+  /** 只留这一个。从总览发起就等于全关，但人留在总览。 */
+  function closeOthers(key) {
+    if (key === 'overview' || !opened.value.some((tab) => tab.key === key)) {
+      opened.value = []
+      if (activeKey.value !== 'overview') router.push({ name: 'overview' })
+      return
+    }
+    const keep = opened.value.find((tab) => tab.key === key)
+    opened.value = [keep]
+    if (activeKey.value !== key) open(keep)
+  }
+
+  /** 总览是常驻的，不会被关掉，所以这里只清空打开的页面。 */
+  function closeAll() {
+    if (!opened.value.length) return
+    opened.value = []
+    router.push({ name: 'overview' })
+  }
+
+  return { tabs, activeKey, open, close, closeOthers, closeAll }
 }

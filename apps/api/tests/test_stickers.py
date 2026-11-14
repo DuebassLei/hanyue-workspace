@@ -678,6 +678,161 @@ def test_retry_failed_chain_starts_at_anchor(client, captured_jobs):
         assert "referenceAssetIds" not in call["payload"], "锚点未成功时不得拿旧 asset 当参考"
 
 
+def test_patch_image_prompt_keeps_other_rows_and_asset(client, captured_jobs):
+    """第 3 步改单张描述：只动这一行；不勾重画时旧素材保留、不入队。"""
+    from app import models
+    from app.core.db import SessionLocal
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(3), headers=headers)
+    db = SessionLocal()
+    try:
+        rows = db.query(models.StickerImage).filter_by(set_id=sid).order_by(models.StickerImage.sort_order).all()
+        rows[0].status, rows[0].asset_id = "succeeded", "anchor-asset"
+        rows[1].status, rows[1].asset_id = "succeeded", "second-asset"
+        # 模拟真实链路：这行确实按当前描述生成过
+        rows[1].generated_prompt = rows[1].frame_prompt
+        target_id = rows[1].id
+        db.commit()
+    finally:
+        db.close()
+    captured_jobs.clear()
+    res = client.patch(
+        f"/api/v1/stickers/{sid}/images/{target_id}",
+        json={"framePrompt": "新的画面描述", "caption": "新配文"},
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+    images = {img["id"]: img for img in res.json()["images"]}
+    assert images[target_id]["framePrompt"] == "新的画面描述"
+    assert images[target_id]["caption"] == "新配文"
+    assert images[target_id]["promptApplied"] is False, "改了描述未重画必须显式标记"
+    assert images[target_id]["assetId"] == "second-asset", "不重画不得丢掉已出素材"
+    assert captured_jobs == [], "只保存描述不应入队"
+    # 其他行原样保留
+    untouched = [img for img in res.json()["images"] if img["id"] != target_id]
+    assert [img["framePrompt"] for img in untouched] == ["画面描述 0", "画面描述 2"]
+
+
+def test_patch_image_prompt_regenerate_requeues_only_that_row(client, captured_jobs):
+    """改描述并勾重画：只该行入队，旧 asset 摘掉，其余张不动。"""
+    from app import models
+    from app.core.db import SessionLocal
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(3), headers=headers)
+    db = SessionLocal()
+    try:
+        rows = db.query(models.StickerImage).filter_by(set_id=sid).order_by(models.StickerImage.sort_order).all()
+        rows[0].status, rows[0].asset_id = "succeeded", "anchor-asset"
+        rows[2].status, rows[2].asset_id = "succeeded", "third-asset"
+        target_id = rows[1].id
+        db.commit()
+    finally:
+        db.close()
+    captured_jobs.clear()
+    res = client.patch(
+        f"/api/v1/stickers/{sid}/images/{target_id}",
+        json={"framePrompt": "换成雨夜街口", "regenerate": True},
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "generating"
+    images = {img["id"]: img for img in body["images"]}
+    assert images[target_id]["status"] == "queued"
+    assert images[target_id]["assetId"] is None, "描述变了的旧素材必须作废"
+    assert images[target_id]["framePrompt"] == "换成雨夜街口"
+    assert images[target_id]["promptApplied"] is True
+    assert len(captured_jobs) == 1
+    payload = captured_jobs[0]["payload"]
+    assert payload["prompt"] == "换成雨夜街口"
+    assert payload["referenceAssetIds"] == ["anchor-asset"]
+    # 其余行保持原状态
+    assert images[rows[0].id]["status"] == "succeeded"
+    assert images[rows[2].id]["status"] == "succeeded"
+
+
+def test_patch_image_prompt_rejects_while_generating(client):
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(2), headers=headers)
+    anchor = client.post(f"/api/v1/stickers/{sid}/generate-anchor", headers=headers).json()
+    target_id = anchor["images"][0]["id"]
+    res = client.patch(
+        f"/api/v1/stickers/{sid}/images/{target_id}",
+        json={"framePrompt": "改不了"},
+        headers=headers,
+    )
+    assert res.status_code == 409
+    assert res.json()["code"] == "invalid_transition"
+
+
+def test_patch_image_regenerate_requires_anchor(client):
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(2), headers=headers)
+    detail = client.get(f"/api/v1/stickers/{sid}", headers=headers).json()
+    target_id = detail["images"][1]["id"]
+    res = client.patch(
+        f"/api/v1/stickers/{sid}/images/{target_id}",
+        json={"framePrompt": "锚点还没出图就重画", "regenerate": True},
+        headers=headers,
+    )
+    assert res.status_code == 409
+    assert res.json()["message"] == "需先生成锚点图"
+
+
+def test_retry_after_prompt_edit_uses_latest_prompt(client, captured_jobs):
+    """改了描述暂未重画：之后的单张重试会按最新描述入队（不是旧 payload）。"""
+    from app import models
+    from app.core.db import SessionLocal
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(2), headers=headers)
+    db = SessionLocal()
+    try:
+        rows = db.query(models.StickerImage).filter_by(set_id=sid).order_by(models.StickerImage.sort_order).all()
+        rows[0].status, rows[0].asset_id = "succeeded", "anchor-asset"
+        rows[1].status = "failed"
+        rows[1].generated_prompt = rows[1].frame_prompt
+        db.commit()
+        target_id = rows[1].id
+    finally:
+        db.close()
+    patched = client.patch(
+        f"/api/v1/stickers/{sid}/images/{target_id}",
+        json={"framePrompt": "只改描述不重画"},
+        headers=headers,
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["images"][1]["promptApplied"] is False
+    captured_jobs.clear()
+    res = client.post(f"/api/v1/stickers/{sid}/images/{target_id}/retry", headers=headers)
+    assert res.status_code == 200, res.text
+    assert len(captured_jobs) == 1
+    assert captured_jobs[0]["payload"]["prompt"] == "只改描述不重画"
+    assert res.json()["images"][1]["promptApplied"] is True
+
+
+def test_patch_image_prompt_owned_by_other_user_404(client):
+    headers = login(client, "sticker-owner-patch")
+    other = login(client, "sticker-other-patch")
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(2), headers=headers)
+    detail = client.get(f"/api/v1/stickers/{sid}", headers=headers).json()
+    target_id = detail["images"][0]["id"]
+    res = client.patch(
+        f"/api/v1/stickers/{sid}/images/{target_id}",
+        json={"framePrompt": "越权"},
+        headers=other,
+    )
+    assert res.status_code == 404
+
+
 def test_stalled_chain_is_resumed_not_deadlocked(client):
     """链只剩排队成员（接力断了）时：守卫不能永久 409，应把链头补投起来。"""
     from app import models

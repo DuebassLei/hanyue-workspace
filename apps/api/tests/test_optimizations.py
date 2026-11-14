@@ -184,6 +184,134 @@ def test_ai_image_task_fails_explicitly_without_provider(client):
     assert job["errorCode"] == "image_provider_unavailable"
 
 
+def _image_catalog(db, owner_id, model_code="agnes-image-2.1-flash"):
+    """登记一个带 image.generate 能力的供应商，凭据为占位密文。"""
+    from app import models
+    from app.core.security import encrypt_secret
+
+    connection = models.ModelConnection(
+        owner_user_id=owner_id,
+        display_name="测试图像供应商",
+        base_url="https://images.example.test/v1",
+        credential_ciphertext=encrypt_secret("test-key"),
+    )
+    db.add(connection)
+    db.flush()
+    entry = models.ModelCatalogEntry(
+        connection_id=connection.id,
+        model_code=model_code,
+        display_name=model_code,
+        capabilities=["image.generate"],
+    )
+    db.add(entry)
+    db.commit()
+    return entry
+
+
+def test_image_generation_degrades_to_text_when_edits_unsupported(client, monkeypatch):
+    """参考图供应商返回 404 时降级为纯文生图，而不是让任务失败，并记住这家供应商。"""
+    from app.core.db import SessionLocal
+    from app.services import image_provider
+
+    headers = _login(client, "edits-user")
+    db = SessionLocal()
+    try:
+        from app import models
+
+        owner_id = db.query(models.User).filter_by(auth_subject="edits-user").one().id
+        entry = _image_catalog(db, owner_id)
+        model_id = entry.id
+    finally:
+        db.close()
+
+    calls = []
+
+    def fake_generate(db, owner, **kwargs):
+        calls.append(kwargs.get("reference_images"))
+        if kwargs.get("reference_images"):
+            raise image_provider.ImageProviderUnavailable(
+                "edits_unsupported", "供应商不支持参考图编辑（HTTP 404）"
+            )
+        return [(b"png-bytes", "image/png")]
+
+    monkeypatch.setattr(image_provider, "generate_images", fake_generate)
+    monkeypatch.setattr(
+        "app.services.job_runner._store_asset",
+        lambda *args, **kwargs: type("Asset", (), {"id": "asset-1"})(),
+    )
+    monkeypatch.setattr(
+        "app.services.job_runner._load_reference_images",
+        lambda db, job, payload: [(b"ref", "image/png", "ref.png")],
+    )
+
+    res = client.post(
+        "/api/v1/ai/image-generations",
+        json={"prompt": "一张封面", "count": 1, "modelId": model_id},
+        headers=headers,
+    )
+    assert res.status_code == 202, res.text
+    job = _wait_job(client, headers, res.json()["jobId"])
+    assert job["status"] == "succeeded", job
+    assert job["result"]["degradedToText"] is True
+    assert "不支持参考图" in job["result"]["notice"]
+    # 先带参考图失败一次，再无参考图重试一次
+    assert calls == [[(b"ref", "image/png", "ref.png")], None]
+
+    db = SessionLocal()
+    try:
+        from app import models
+
+        saved = db.get(models.ModelCatalogEntry, model_id)
+        assert saved.options.get("supportsEdits") is False
+    finally:
+        db.close()
+
+
+def test_known_unsupported_provider_skips_edits_request(client, monkeypatch):
+    """已经确认不支持 edits 的供应商，后续任务不再发出注定失败的参考图请求。"""
+    from app.core.db import SessionLocal
+    from app.services import image_provider
+
+    headers = _login(client, "edits-known-user")
+    db = SessionLocal()
+    try:
+        from app import models
+
+        owner_id = db.query(models.User).filter_by(auth_subject="edits-known-user").one().id
+        entry = _image_catalog(db, owner_id)
+        entry.options = {"supportsEdits": False}
+        db.commit()
+        model_id = entry.id
+    finally:
+        db.close()
+
+    calls = []
+    monkeypatch.setattr(
+        image_provider,
+        "generate_images",
+        lambda db, owner, **kwargs: calls.append(kwargs.get("reference_images"))
+        or [(b"png-bytes", "image/png")],
+    )
+    monkeypatch.setattr(
+        "app.services.job_runner._store_asset",
+        lambda *args, **kwargs: type("Asset", (), {"id": "asset-2"})(),
+    )
+    monkeypatch.setattr(
+        "app.services.job_runner._load_reference_images",
+        lambda db, job, payload: [(b"ref", "image/png", "ref.png")],
+    )
+
+    res = client.post(
+        "/api/v1/ai/image-generations",
+        json={"prompt": "一张封面", "count": 1, "modelId": model_id},
+        headers=headers,
+    )
+    job = _wait_job(client, headers, res.json()["jobId"])
+    assert job["status"] == "succeeded", job
+    assert calls == [None], "已知不支持时不得再发带参考图的请求"
+    assert job["result"]["degradedToText"] is True
+
+
 def test_jobs_list_supports_cursor(client):
     headers = _login(client, "jobs-user")
     body = client.get("/api/v1/jobs?limit=1", headers=headers).json()

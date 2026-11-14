@@ -316,9 +316,12 @@ def compose_prompt(
     theme: str,
     color: models.HanddrawColor | None = None,
     accent: models.HanddrawColor | None = None,
+    attach_reference: bool | None = None,
 ) -> dict:
     theme_text = (theme or "").strip()
     color_zh, color_en = resolve_color_sentence(color, accent)
+    # 调用方知道供应商能力时显式传入；缺省保持旧行为（按风格自身决定）
+    will_attach = activation.need_reference if attach_reference is None else attach_reference
     zh_parts = [f"风格名称：{style.generation_name}。"]
     if color_zh:
         zh_parts.append(color_zh)
@@ -326,8 +329,10 @@ def compose_prompt(
     zh_parts.append(f"参考作者/风格名称：{style.reference_author}。")
     if activation.include_traits and activation.traits:
         zh_parts.append(f"核心风格特征：{activation.traits}。")
-    if activation.need_reference:
+    if will_attach:
         zh_parts.append(f"参考图：随请求自动附加本风格参考图。{REFERENCE_ISOLATION_ZH}")
+    elif activation.need_reference:
+        zh_parts.append("当前图像供应商不支持参考图，请仅依据以上文字描述还原画风。")
 
     en_parts = [f"Style name: {style.generation_name}."]
     if color_en:
@@ -336,8 +341,12 @@ def compose_prompt(
     en_parts.append(f"Reference author/style name: {style.reference_author}.")
     if activation.include_traits and activation.traits:
         en_parts.append(f"Core style traits: {activation.traits}.")
-    if activation.need_reference:
+    if will_attach:
         en_parts.append(f"Reference image: attached automatically with this style. {REFERENCE_ISOLATION_EN}")
+    elif activation.need_reference:
+        en_parts.append(
+            "The image provider cannot accept a reference image; match the style from this text alone."
+        )
 
     return {
         "promptZh": "".join(zh_parts),
