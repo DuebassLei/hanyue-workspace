@@ -470,6 +470,8 @@ class WeChatRenderIn(CamelModel):
     title: str = ""
     body: str = ""
     theme_id: str = ""
+    # 主题编辑器里未保存草稿的实时预览：非空时优先于 themeId，同样过 normalize_tokens
+    tokens: dict[str, Any] = Field(default_factory=dict)
     # 直接用已有图片 URL 预览（前端本地已有上传结果时）；为空时用 assetIds 的占位
     image_urls: list[str] = Field(default_factory=list)
     asset_ids: list[str] = Field(default_factory=list)
@@ -489,6 +491,17 @@ class WeChatThemeOut(CamelModel):
     description: str = ""
     tokens: dict[str, Any]
     editable: bool = True
+    # 用户展示偏好（仅预设有意义）：收藏置顶、隐藏后不出现在发布抽屉
+    favorite: bool = False
+    hidden: bool = False
+
+
+class WeChatThemePrefsIn(CamelModel):
+    """排版偏好：PUT 全量替换，三个字段都随请求发送。"""
+
+    default_theme_id: str = ""
+    favorite_preset_ids: list[str] = Field(default_factory=list)
+    hidden_preset_ids: list[str] = Field(default_factory=list)
 
 
 # ---------- agent ----------

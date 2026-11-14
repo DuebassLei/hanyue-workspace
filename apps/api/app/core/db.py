@@ -52,6 +52,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("content_items", "draft_body", "TEXT"),
     # 贴图：锚点反推描述缓存（Q10-B 一致性兜底）
     ("sticker_sets", "meta_json", "JSON"),
+    # 微信排版页：用户级默认主题 / 收藏 / 隐藏
+    ("user_preferences", "wechat_layout", "JSON"),
 ]
 
 # keyset 分页与队列恢复都按时间列做 seek，缺索引会退化成全表排序。

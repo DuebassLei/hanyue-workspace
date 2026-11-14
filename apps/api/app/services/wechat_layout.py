@@ -44,6 +44,92 @@ ROW_BLOCKS = {
 FREE_BLOCKS = {"card", "follow", "sign", "lead", "quote-card"}
 FENCE_BLOCKS = ROW_BLOCKS.keys() | FREE_BLOCKS
 
+#: 小组件注册表：排版页「组件库」与发布抽屉的区块按钮都从这里取。
+#: id 必须与 FENCE_BLOCKS 一一对应（tests/test_wechat_layout.py 有漂移守卫）；
+#: snippet 为作者视角的插入语法，sampleBody 为可直接渲染的完整示例（必须零告警）。
+LAYOUT_COMPONENTS: tuple[dict, ...] = (
+    {
+        "id": "lead",
+        "label": "导语",
+        "description": "主色短条 + 大号开篇，先给结论再展开",
+        "category": "开篇",
+        "snippet": "\n\n:::lead\n先把结论写在这里。\n:::\n",
+        "sampleBody": ":::lead\n排版的尽头是克制：字号、行高、留白定好，内容自然好看。\n:::",
+    },
+    {
+        "id": "card",
+        "label": "强调卡",
+        "description": "浅主色底卡片，适合本段小结与注意事项",
+        "category": "强调",
+        "snippet": "\n\n:::card 小结\n把重点收在这里。\n:::\n",
+        "sampleBody": ":::card 本节小结\n重点不是花哨，而是稳定与克制：全文样式只由主题 tokens 决定。\n:::",
+    },
+    {
+        "id": "stat",
+        "label": "数据",
+        "description": "大号数字 + 灰色说明，每行 `数字 | 说明`",
+        "category": "数据与对比",
+        "snippet": "\n\n:::stat\n12% | 说明\n:::\n",
+        "sampleBody": ":::stat\n42% | 平均打开率提升\n3.1 倍 | 转发数增长\n:::",
+    },
+    {
+        "id": "steps",
+        "label": "步骤",
+        "description": "主色圆圈自动编号，每行 `名称 | 说明`",
+        "category": "结构",
+        "snippet": "\n\n:::steps\n第一步 | 说明\n第二步 | 说明\n:::\n",
+        "sampleBody": ":::steps\n定选题 | 先确认写给谁看\n搭骨架 | 结论放在第一段\n补证据 | 每个判断给出处\n:::",
+    },
+    {
+        "id": "compare",
+        "label": "对比",
+        "description": "左右两列卡片；标题行写在围栏名后：`:::compare 左 / 右`",
+        "category": "数据与对比",
+        "snippet": "\n\n:::compare 左边 / 右边\n旧做法 | 新做法\n:::\n",
+        "sampleBody": ":::compare 手动排版 / 主题排版\n改样式翻遍全文 | 换个主题整篇换装\n:::",
+    },
+    {
+        "id": "layers",
+        "label": "分层",
+        "description": "叠放的圆角卡片，每行 `标签 | 正文`",
+        "category": "结构",
+        "snippet": "\n\n:::layers\n标签 | 说明\n:::\n",
+        "sampleBody": ":::layers\n表层 | 读者看到的字号与配色\n中层 | 主题 tokens 决定的骨架\n底层 | 微信白名单约束的渲染\n:::",
+    },
+    {
+        "id": "checklist",
+        "label": "清单",
+        "description": "✓ / ○ / ! 状态标记，每行 `done|todo|warn | 事项`",
+        "category": "结构",
+        "snippet": "\n\n:::checklist\ndone | 已完成的事\ntodo | 还没做的事\n:::\n",
+        "sampleBody": ":::checklist\ndone | 核对正文数字\ndone | 选好排版主题\ntodo | 补一张封面图\n:::",
+    },
+    {
+        "id": "quote-card",
+        "label": "金句",
+        "description": "大引号 + 大字重，出处写在围栏名后",
+        "category": "强调",
+        "snippet": "\n\n:::quote-card 出处\n把金句写在这里。\n:::\n",
+        "sampleBody": ":::quote-card 一位资深编辑\n公众号排版的尽头，是把读者的注意力当回事。\n:::",
+    },
+    {
+        "id": "follow",
+        "label": "引导关注",
+        "description": "灰底居中卡片，适合放在文末",
+        "category": "互动",
+        "snippet": "\n\n:::follow\n点右上角「关注」，第一时间看到更新。\n:::\n",
+        "sampleBody": ":::follow\n如果这篇有用，点个「在看」或分享给需要的朋友。\n:::",
+    },
+    {
+        "id": "sign",
+        "label": "文末署名",
+        "description": "细分割线 + 灰色小字，落在最后一屏",
+        "category": "互动",
+        "snippet": "\n\n:::sign\n作者 | 你的公众号名\n:::\n",
+        "sampleBody": ":::sign\n狸知 · 公众号排版样文\n:::",
+    },
+)
+
 _COLOR_KEYS = (
     "textColor",
     "mutedColor",
@@ -300,6 +386,78 @@ def _check_color(key: str, value: str) -> str:
 
 def known_token_keys() -> set[str]:
     return {"fontFamily", *NUMERIC_RANGES, *ENUMS, *_COLOR_KEYS}
+
+
+#: 前端主题编辑器展示的中文名、控件参数与分组。校验范围仍以 NUMERIC_RANGES/ENUMS 为准，
+#: 这里只是描述元数据——新增 token 时如果漏配标签，测试会抓住（token_schema 必须覆盖全部键）。
+_TOKEN_LABELS: dict[str, dict] = {
+    "fontFamily": {"label": "字体栈", "group": "文字", "kind": "text"},
+    "bodySize": {"label": "正文字号", "group": "文字", "kind": "number", "step": 1},
+    "bodyLineHeight": {"label": "行高", "group": "文字", "kind": "number", "step": 0.05},
+    "letterSpacing": {"label": "字距", "group": "文字", "kind": "number", "step": 0.1},
+    "paragraphGap": {"label": "段间距", "group": "版式", "kind": "number", "step": 0.1},
+    "indent": {"label": "首行缩进", "group": "版式", "kind": "number", "step": 0.5},
+    "imageRadius": {"label": "图片圆角", "group": "版式", "kind": "number", "step": 1},
+    "textColor": {"label": "正文颜色", "group": "配色", "kind": "color"},
+    "mutedColor": {"label": "辅助色", "group": "配色", "kind": "color"},
+    "primaryColor": {"label": "主色", "group": "配色", "kind": "color"},
+    "primarySoft": {"label": "浅主色底", "group": "配色", "kind": "color"},
+    "quoteBg": {"label": "引用底色", "group": "配色", "kind": "color"},
+    "dividerColor": {"label": "分割线色", "group": "配色", "kind": "color"},
+    "strongColor": {"label": "加粗色", "group": "配色", "kind": "color"},
+    "align": {"label": "对齐", "group": "版式", "kind": "enum"},
+    "h1Style": {"label": "一级标题样式", "group": "标题样式", "kind": "enum"},
+    "h2Style": {"label": "二级标题样式", "group": "标题样式", "kind": "enum"},
+    "listMarker": {"label": "列表符号", "group": "版式", "kind": "enum"},
+}
+
+_ENUM_OPTION_LABELS: dict[str, dict[str, str]] = {
+    "align": {"left": "左对齐", "justify": "两端对齐", "center": "居中"},
+    "h1Style": {
+        "bar": "左侧竖线",
+        "block": "色块标签",
+        "number": "序号编号",
+        "center": "居中大字",
+        "underline": "下划线",
+        "number-divider": "大号编号+分割线",
+        "capsule": "胶囊标题",
+    },
+    "h2Style": {
+        "tag": "标签底色",
+        "underline": "下划线",
+        "plain": "纯加粗",
+        "bar": "左侧竖线",
+        "strong": "强调加粗",
+        "capsule": "胶囊标题",
+        "hairline": "发丝线",
+    },
+    "listMarker": {"dot": "圆点", "square": "方块", "number": "数字", "circle": "空心圆"},
+}
+
+
+def token_schema() -> list[dict]:
+    """主题编辑器的字段描述：key/label/group/kind + 范围或选项 + 默认值。
+
+    数值范围与枚举选项从校验源（NUMERIC_RANGES/ENUMS）派生，不重复维护；
+    前端只渲染，不再写第二套校验。
+    """
+    base = _base_tokens()
+    fields: list[dict] = []
+    # 保持「配色 → 文字 → 标题样式 → 版式」的分组顺序，组内按注册顺序
+    for key, spec in _TOKEN_LABELS.items():
+        field: dict = {"key": key, **spec}
+        if key in NUMERIC_RANGES:
+            low, high = NUMERIC_RANGES[key]
+            field["min"], field["max"] = low, high
+        elif key in ENUMS:
+            option_labels = _ENUM_OPTION_LABELS.get(key, {})
+            field["options"] = [
+                {"value": value, "label": option_labels.get(value, value)}
+                for value in sorted(ENUMS[key])
+            ]
+        field["default"] = base[key]
+        fields.append(field)
+    return fields
 
 
 def normalize_tokens(raw: dict | None) -> dict:

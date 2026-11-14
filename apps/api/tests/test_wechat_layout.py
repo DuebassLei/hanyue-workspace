@@ -294,6 +294,183 @@ def test_render_endpoint_rejects_unknown_theme(client):
     assert res.json()["code"] == "theme_not_found"
 
 
+# ---------- 小组件注册表与 token schema ----------
+
+
+def test_layout_components_cover_all_fences():
+    from app.services import wechat_layout
+
+    ids = {item["id"] for item in wechat_layout.LAYOUT_COMPONENTS}
+    assert ids == set(wechat_layout.FENCE_BLOCKS)
+    for item in wechat_layout.LAYOUT_COMPONENTS:
+        assert item["label"] and item["snippet"] and item["sampleBody"]
+        # snippet 是正文中间插入的围栏块：前后空行包裹，以 ::: 开头的围栏合法
+        assert item["snippet"].startswith("\n\n:::") and item["snippet"].endswith(":::\n")
+        result = wechat_layout.render_document(item["sampleBody"], None, [])
+        assert result["html"], item["id"]
+        assert result["warnings"] == [], f"{item['id']} 示例应零告警：{result['warnings']}"
+        assert wechat_layout.lint_html(result["html"]) == []
+
+
+def test_components_endpoint(client):
+    headers = _headers(client)
+    res = client.get("/api/v1/wechat-mp/components", headers=headers)
+    assert res.status_code == 200, res.text
+    components = res.json()["components"]
+    assert {item["id"] for item in components} == {
+        "lead", "card", "stat", "steps", "compare", "layers", "checklist",
+        "quote-card", "follow", "sign",
+    }
+
+
+def test_theme_schema_covers_known_keys():
+    from app.services import wechat_layout
+
+    fields = wechat_layout.token_schema()
+    assert {item["key"] for item in fields} == wechat_layout.known_token_keys()
+    for item in fields:
+        assert item["label"] and item["group"] and item["kind"]
+        if item["kind"] == "number":
+            low, high = wechat_layout.NUMERIC_RANGES[item["key"]]
+            assert (item["min"], item["max"]) == (low, high)
+        if item["kind"] == "enum":
+            assert {opt["value"] for opt in item["options"]} == wechat_layout.ENUMS[item["key"]]
+
+
+def test_theme_schema_endpoint(client):
+    headers = _headers(client)
+    res = client.get("/api/v1/wechat-mp/themes/schema", headers=headers)
+    assert res.status_code == 200, res.text
+    assert len(res.json()["fields"]) == 18
+
+
+# ---------- 排版偏好（默认 / 收藏 / 隐藏） ----------
+
+
+def test_theme_prefs_round_trip_and_flags(client):
+    headers = _headers(client, "layout-prefs")
+    listing = client.get("/api/v1/wechat-mp/themes", headers=headers)
+    data = listing.json()
+    assert data["defaultThemeId"] == "ink-green"
+    assert data["favoritePresetIds"] == [] and data["hiddenPresetIds"] == []
+    assert all(not item["favorite"] and not item["hidden"] for item in data["presets"])
+
+    saved = client.put(
+        "/api/v1/wechat-mp/themes/preferences",
+        json={
+            "defaultThemeId": "blue-business",
+            "favoritePresetIds": ["blue-business", "ink-green"],
+            "hiddenPresetIds": ["mono"],
+        },
+        headers=headers,
+    )
+    assert saved.status_code == 200, saved.text
+    data = saved.json()
+    assert data["defaultThemeId"] == "blue-business"
+    flags = {item["id"]: (item["favorite"], item["hidden"]) for item in data["presets"]}
+    assert flags["blue-business"] == (True, False)
+    assert flags["mono"] == (False, True)
+
+    # 全量替换语义：重发时省略的字段回到空
+    again = client.put(
+        "/api/v1/wechat-mp/themes/preferences",
+        json={"defaultThemeId": "ink-green"},
+        headers=headers,
+    ).json()
+    assert again["favoritePresetIds"] == [] and again["hiddenPresetIds"] == []
+    # 偏好不影响外观主题（theme 列）：/preferences 仍能正常读
+    pref = client.get("/api/v1/preferences", headers=headers)
+    assert pref.status_code == 200 and pref.json()["theme"] == "system"
+
+
+def test_theme_prefs_validation_and_invariants(client):
+    headers = _headers(client, "layout-prefs-bad")
+    bad = client.put(
+        "/api/v1/wechat-mp/themes/preferences",
+        json={"favoritePresetIds": ["nope"]},
+        headers=headers,
+    )
+    assert bad.status_code == 422 and bad.json()["code"] == "invalid_prefs"
+
+    # 别人的自定义主题不能当默认
+    other = _headers(client, "layout-prefs-other")
+    created = client.post(
+        "/api/v1/wechat-mp/themes",
+        json={"name": "他人主题", "baseThemeId": "deep-blue"},
+        headers=other,
+    )
+    foreign_id = created.json()["id"]
+    res = client.put(
+        "/api/v1/wechat-mp/themes/preferences",
+        json={"defaultThemeId": foreign_id},
+        headers=headers,
+    )
+    assert res.status_code == 422 and res.json()["code"] == "invalid_prefs"
+
+    # 默认 ∈ 隐藏 → 默认获胜，从 hidden 剔除
+    res = client.put(
+        "/api/v1/wechat-mp/themes/preferences",
+        json={"defaultThemeId": "mono", "hiddenPresetIds": ["mono"]},
+        headers=headers,
+    ).json()
+    assert res["defaultThemeId"] == "mono"
+    assert res["hiddenPresetIds"] == []
+
+    # 默认主题被删除 → 读时回退系统默认（不写库、不报错）
+    mine = client.post(
+        "/api/v1/wechat-mp/themes",
+        json={"name": "临时默认", "baseThemeId": "mono"},
+        headers=headers,
+    ).json()
+    client.put(
+        "/api/v1/wechat-mp/themes/preferences",
+        json={"defaultThemeId": mine["id"]},
+        headers=headers,
+    )
+    assert client.delete(f"/api/v1/wechat-mp/themes/{mine['id']}", headers=headers).status_code == 204
+    data = client.get("/api/v1/wechat-mp/themes", headers=headers).json()
+    assert data["defaultThemeId"] == "ink-green"
+
+
+def test_theme_import_export_round_trip(client):
+    """导出的全量 tokens 不带 baseThemeId 重新 POST，应精确还原（导入零后端代码）。"""
+    headers = _headers(client, "layout-import")
+    created = client.post(
+        "/api/v1/wechat-mp/themes",
+        json={"name": "待导出", "baseThemeId": "terracotta-warm"},
+        headers=headers,
+    ).json()
+    exported = next(item for item in client.get("/api/v1/wechat-mp/themes", headers=headers).json()["custom"] if item["id"] == created["id"])
+    assert exported["tokens"] == created["tokens"]
+
+    imported = client.post(
+        "/api/v1/wechat-mp/themes",
+        json={"name": "导入副本", "tokens": exported["tokens"]},
+        headers=headers,
+    )
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["tokens"] == exported["tokens"]
+
+
+def test_render_accepts_raw_tokens_for_editor_preview(client):
+    headers = _headers(client, "layout-raw-tokens")
+    res = client.post(
+        "/api/v1/wechat-mp/drafts/render",
+        json={"body": "# 标题", "tokens": {"bodySize": 17, "primaryColor": "#123456"}},
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+    assert "font-size:20" in res.json()["html"]  # h1 = bodySize + 3（normalize 后是 float）
+    assert "#123456" in res.json()["html"]
+
+    bad = client.post(
+        "/api/v1/wechat-mp/drafts/render",
+        json={"body": "正文", "tokens": {"bodySize": 99}},
+        headers=headers,
+    )
+    assert bad.status_code == 422 and bad.json()["code"] == "invalid_theme"
+
+
 # ---------- 推送与快照 ----------
 
 

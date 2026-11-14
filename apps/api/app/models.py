@@ -66,6 +66,9 @@ class UserPreference(Base, TimestampMixin):
     )
     # system | light | dark
     theme: Mapped[str] = mapped_column(String(16), default="system")
+    # 公众号排版偏好：{"defaultThemeId", "favoritePresetIds", "hiddenPresetIds"}
+    # 读时兜底，写时整包替换（JSON 列必须赋新 dict，原地改不会被 SQLAlchemy 感知）
+    wechat_layout: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Workspace(Base, TimestampMixin):
