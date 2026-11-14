@@ -94,6 +94,45 @@ export async function fetchBlobUrl(path) {
   return URL.createObjectURL(await response.blob())
 }
 
+/**
+ * 下载需要鉴权的二进制文件（如打包 zip）。
+ *
+ * `<a href>` 直接跳转带不了 Authorization 头，后端只会回 401「缺少登录会话」；
+ * 所以必须先 fetch 成 blob 再触发下载。filename 缺省时从 Content-Disposition 取。
+ * 非 2xx 会把后端的中文错误信息抛出来（而不是静默下一个坏文件）。
+ */
+export async function downloadAuthenticated(path, fallbackName = 'download') {
+  const response = await fetch(`${BASE}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (response.status === 401) notifyUnauthorized(path)
+  if (!response.ok) {
+    let message = `下载失败（HTTP ${response.status}）`
+    try {
+      const payload = await response.json()
+      message = errorMessage(payload?.detail || payload, message)
+    } catch {
+      /* 非 JSON 错误体：沿用状态码文案 */
+    }
+    throw new ApiError(message, 'download_failed', undefined, response.status)
+  }
+  const disposition = response.headers.get('content-disposition') || ''
+  const matched = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+  const filename = matched ? decodeURIComponent(matched[1]) : fallbackName
+  const url = URL.createObjectURL(await response.blob())
+  try {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    // 立刻 revoke 会让部分浏览器来不及取数据，延后一拍
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+}
+
 /** SSE：文本生成流；返回中止函数 */
 export function streamGeneration(payload, handlers) {
   const controller = new AbortController()

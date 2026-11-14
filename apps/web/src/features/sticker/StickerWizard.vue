@@ -330,6 +330,7 @@ onBeforeUnmount(stopPolling)
       @retry-image="onRetryImage"
       @retry-failed="onRetryFailed"
       @update-caption="onUpdateCaption"
+      @download-error="error = $event"
       @append="onAppend"
       @finalize="onFinalize"
     />

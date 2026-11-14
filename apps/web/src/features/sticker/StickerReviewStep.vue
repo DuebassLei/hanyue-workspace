@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { NAlert, NButton, NInput, NModal } from 'naive-ui'
-import { apiUrl } from '../../api/client'
+import { apiUrl, downloadAuthenticated } from '../../api/client'
 
 const props = defineProps({
   detail: { type: Object, required: true }, // StickerSetOut（含 images，容器负责 2s 轮询刷新）
@@ -16,6 +16,7 @@ const emit = defineEmits([
   'finalize',
   'append',
   'update-caption',
+  'download-error',
 ])
 
 // 生图错误码 → 人话。映射不到的原样显示，方便按 errorCode 去查供应商日志。
@@ -95,8 +96,23 @@ function submitAppend() {
   appendOpen.value = false
 }
 
-function archiveUrl() {
-  return apiUrl(`/stickers/${props.detail.id}/archive.zip`)
+// 打包下载：必须走带 Authorization 的 fetch。<a href> 直接跳转没有令牌，
+// 后端只会回 401「缺少登录会话」——这就是之前「下载全部」点了报 unauthorized 的原因。
+const downloading = ref(false)
+
+async function downloadArchive() {
+  if (downloading.value) return
+  downloading.value = true
+  try {
+    await downloadAuthenticated(
+      `/stickers/${props.detail.id}/archive.zip`,
+      `stickers-${props.detail.id}.zip`,
+    )
+  } catch (err) {
+    emit('download-error', err.message)
+  } finally {
+    downloading.value = false
+  }
 }
 </script>
 
@@ -202,7 +218,9 @@ function archiveUrl() {
         </n-button>
       </template>
       <template v-else-if="allDone">
-        <n-button secondary tag="a" :href="archiveUrl()">下载全部</n-button>
+        <n-button secondary :loading="downloading" :disabled="downloading" @click="downloadArchive">
+          下载全部
+        </n-button>
         <n-button secondary :disabled="busy" @click="openAppend">再补一张</n-button>
         <n-button type="primary" :disabled="busy" @click="emit('finalize')">完成归档</n-button>
       </template>
