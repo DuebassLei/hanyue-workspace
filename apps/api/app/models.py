@@ -735,4 +735,6 @@ class StickerImage(Base, TimestampMixin):
     # pending|queued|generating|succeeded|failed
     status: Mapped[str] = mapped_column(String(16), default="pending")
     error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
-
+    # 最近一次入队时的画面描述。与 frame_prompt 不一致 = 用户改了描述但还没重画，
+    # 此时不能直接 retry（会把旧文案再跑一遍），必须走「保存并重画这张」。
+    generated_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)

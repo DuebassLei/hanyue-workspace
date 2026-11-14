@@ -822,11 +822,23 @@ class StickerOutlineIn(CamelModel):
     items: list[StickerOutlineItemIn] = Field(min_length=1, max_length=20)
 
 
+class StickerImagePatchIn(CamelModel):
+    """第 3 步的单张编辑：只改这一行的画面描述/配文/类型，不动图序与已出素材。"""
+
+    caption: str | None = Field(default=None, max_length=500)
+    frame_prompt: str | None = Field(default=None, min_length=1, max_length=2000)
+    slot_type: str | None = Field(default=None, max_length=8)
+    # True 且画面描述确实变了：保存后立刻用新描述重画这一张（旧素材作废）
+    regenerate: bool = False
+
+
 class StickerImageOut(CamelModel):
     id: str
     sort_order: int
     caption: str
     frame_prompt: str
+    # 生成提示词已按最新描述应用；False = 改了描述但还没重画
+    prompt_applied: bool = True
     slot_type: str
     status: str
     asset_id: str | None = None
@@ -859,5 +871,3 @@ class StickerStylesOut(CamelModel):
     styles: list[dict] = []
     track_defaults: dict[str, str] = {}
     narratives: list[dict] = []
-
-

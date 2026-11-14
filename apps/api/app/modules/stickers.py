@@ -7,6 +7,7 @@
     PATCH  /stickers/{id}                               改标题/主题/风格/叙事
     DELETE /stickers/{id}                               软删
     PUT    /stickers/{id}/outline                       整体替换图序
+    PATCH  /stickers/{id}/images/{img_id}               单张改画面描述/配文
     POST   /stickers/{id}/generate-anchor               生成锚点（第 1 张）
     POST   /stickers/{id}/generate-rest                 以锚点为参考生成其余
     POST   /stickers/{id}/images/{img_id}/retry         单张重试
@@ -38,6 +39,10 @@ router = APIRouter(tags=["stickers"])
 # 可编辑图序的状态；generating/deleted 不允许改 outline。
 # done 放行是给「再补一张」闭环用的——put_outline 内部会拒绝仍有在跑任务的归档集合。
 _EDITABLE_OUTLINE_STATUS = {"draft", "outlined", "review", "done"}
+# 单张改画面描述的状态：generating 期间图序与 job 已绑定，改描述会与在跑任务错位。
+_EDITABLE_IMAGE_STATUS = {"draft", "outlined", "review", "done"}
+# 可原地重画的图行状态：queued/generating 不许再入队，其余都能换一发。
+_REGENERATABLE_IMAGE_STATUS = {"pending", "failed", "succeeded"}
 # 已终结的图行状态（不再需要向 job 表对账）
 _IMAGE_TERMINAL = {"succeeded", "failed"}
 
@@ -151,6 +156,7 @@ def _image_out(img: models.StickerImage) -> schemas.StickerImageOut:
         sort_order=img.sort_order,
         caption=img.caption,
         frame_prompt=img.frame_prompt,
+        prompt_applied=_prompt_applied(img),
         slot_type=img.slot_type,
         status=img.status,
         asset_id=img.asset_id,
@@ -158,6 +164,45 @@ def _image_out(img: models.StickerImage) -> schemas.StickerImageOut:
         job_id=img.job_id,
         error_code=img.error_code,
     )
+
+
+def _reference_asset_ids(images, target, is_anchor: bool) -> list[str]:
+    """重画时的参考图：锚点自己不带；其余张优先带已成功的锚点。"""
+    if is_anchor:
+        return []
+    anchor = images[0] if images else None
+    if anchor is not None and anchor.status == "succeeded" and anchor.asset_id:
+        return [anchor.asset_id]
+    return []
+
+
+def _prompt_applied(img: models.StickerImage) -> bool:
+    """是否没有「改了描述但还没重画」。
+
+    generated_prompt 为空 = 没有入队记录（老数据/测试直写 asset），
+    不能凭空值判定成未应用；有记录且与当前描述不同才算。
+    """
+    return not img.generated_prompt or img.frame_prompt == img.generated_prompt
+
+
+def _requeue_image(db, user, row, images, target, *, clear_asset: bool) -> None:
+    """把单张图重新入队（调用方负责状态/空闲校验）。
+
+    clear_asset 用于「描述变了」：旧素材与新描述不对应，必须摘掉，
+    否则 generate-rest 会把旧 asset 当复用结果秒过，用户等不到新图。
+    锚点换图还会作废 anchor_desc 缓存——由执行器成功回写时统一处理。
+    """
+    _reject_if_chain_active(db, user, row.id)
+    is_anchor = target.sort_order == 0
+    references = _reference_asset_ids(images, target, is_anchor)
+    if clear_asset:
+        target.asset_id = None
+    job_id = _enqueue_image_job(db, user, row, target, references)
+    target.status = "queued"
+    target.job_id = job_id
+    target.error_code = None
+    if row.status != "done":
+        row.status = "generating"
 
 
 @router.get("/sticker-styles", response_model=schemas.StickerStylesOut)
@@ -271,6 +316,72 @@ def patch_sticker_set(
     return _set_out(db, row, _images(db, row.id), with_images=True)
 
 
+@router.patch("/stickers/{set_id}/images/{image_id}", response_model=schemas.StickerSetOut)
+def patch_sticker_image(
+    set_id: str,
+    image_id: str,
+    payload: schemas.StickerImagePatchIn,
+    user: CurrentUser,
+    db: DbSession,
+) -> schemas.StickerSetOut:
+    """第 3 步单张编辑：看/改画面描述，必要时只重画这一张。
+
+    只改当前行，不重排整组——避免像 put_outline 那样删行重建，把别张的
+    job 回写、复用池和归档标记一起打乱。
+    """
+    row = _load_set(db, user, set_id)
+    if row.status not in _EDITABLE_IMAGE_STATUS:
+        raise ApiError(
+            "invalid_transition", f"当前状态 {row.status} 不能改画面描述", status_code=409
+        )
+    images = _images(db, row.id)
+    if _sync_images_from_jobs(db, images):
+        db.refresh(row)
+        images = _images(db, row.id)
+    target = next((img for img in images if img.id == image_id), None)
+    if target is None:
+        raise not_found("贴图")
+    prompt_changed = (
+        payload.frame_prompt is not None and payload.frame_prompt.strip() != target.frame_prompt
+    )
+    if target.status in ("queued", "generating") or (
+        payload.regenerate and target.status not in _REGENERATABLE_IMAGE_STATUS
+    ):
+        raise ApiError(
+            "invalid_transition", "这张还在生成中，等它落定后再改", status_code=409
+        )
+    if payload.regenerate:
+        # 单张重画也不能与别的在跑任务并发：供应商配额与整组画风都要等前一张落定
+        if any(
+            img.id != target.id and img.status in ("queued", "generating") for img in images
+        ):
+            raise ApiError(
+                "invalid_transition", "还有图片在生成中，等它们结束再重画这张", status_code=409
+            )
+        anchor = images[0] if images else None
+        if (
+            target.sort_order != 0
+            and (anchor is None or anchor.status != "succeeded" or not anchor.asset_id)
+        ):
+            raise ApiError("invalid_transition", "需先生成锚点图", status_code=409)
+    if payload.caption is not None:
+        target.caption = payload.caption.strip()
+    if payload.slot_type is not None:
+        target.slot_type = "pace" if payload.slot_type == "pace" else "info"
+    if payload.frame_prompt is not None:
+        target.frame_prompt = payload.frame_prompt.strip()
+    # 描述变了但暂不重画：有旧素材的 pending/failed 行会被 generate-rest 当成
+    # 可复用秒过；succeeded 行保留当前图，等用户勾选重画。
+    if prompt_changed and not payload.regenerate and target.status in ("pending", "failed"):
+        target.asset_id = None
+    if prompt_changed and payload.regenerate:
+        _requeue_image(db, user, row, images, target, clear_asset=True)
+    db.commit()
+    detail = _set_out(db, row, _images(db, row.id), with_images=True)
+    detail.images = [_image_out(img) for img in _images(db, row.id)]
+    return detail
+
+
 @router.delete("/stickers/{set_id}", status_code=204)
 def delete_sticker_set(set_id: str, user: CurrentUser, db: DbSession) -> Response:
     row = _load_set(db, user, set_id)
@@ -327,6 +438,9 @@ def put_outline(
                 frame_prompt=item.frame_prompt,
                 slot_type=item.slot_type,
                 asset_id=reusable,
+                # 复用的 asset 是按这份描述生成的；新行也需要记下来，
+                # 否则「改了描述但没重画」的守卫会把它误判成未应用。
+                generated_prompt=item.frame_prompt if reusable else None,
                 status="pending",
             )
         )
@@ -371,13 +485,16 @@ def _job_payload(
 def _enqueue_image_job(
     db, user, row: models.StickerSet, img: models.StickerImage, reference_asset_ids: list[str]
 ) -> str:
-    return queue.enqueue(
+    job_id = queue.enqueue(
         db,
         owner_user_id=user.id,
         queue="ai-image",
         kind="image-generation",
         payload=_job_payload(row, img, reference_asset_ids, chain=False),
     )
+    # 记下这一刻的文案：之后改描述但未重画时，retry 不能拿旧 payload 再跑一遍
+    img.generated_prompt = img.frame_prompt
+    return job_id
 
 
 @router.post("/stickers/{set_id}/generate-anchor", response_model=schemas.StickerSetOut)
@@ -456,6 +573,7 @@ def generate_rest(
             img.status = "queued"
             img.job_id = job_id
             img.error_code = None
+            img.generated_prompt = img.frame_prompt
     enqueued = len(batch)
     siblings = images
     if reused and enqueued == 0 and all(row_img.status == "succeeded" for row_img in siblings):
@@ -542,6 +660,7 @@ def retry_failed(set_id: str, user: CurrentUser, db: DbSession) -> schemas.Stick
         img.status = "queued"
         img.job_id = job_id
         img.error_code = None
+        img.generated_prompt = img.frame_prompt
     if row.status != "done":
         row.status = "generating"
     db.commit()
