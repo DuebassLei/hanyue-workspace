@@ -90,10 +90,6 @@ watch([draftTitle, draftBody], () => {
   scheduleAutoSave()
 })
 
-watch(writingStyleKey, () => {
-  if (rightTab.value === 'flow' && detail.value) loadWritingFlow()
-})
-
 // AI 面板
 const aiOpen = ref(true)
 const aiTask = ref('article')
@@ -112,6 +108,11 @@ const usesWritingStyle = computed(() => STYLE_TASKS.has(aiTask.value))
 const writingStyleOptions = computed(() => {
   if (!writingStyles.value.length) return [{ value: 'article-drafting', label: '使用默认风格' }]
   return writingStyles.value.map((style) => ({ value: style.skillKey, label: style.displayName }))
+})
+
+// 写作风格切换后刷新右侧流程（监听必须放在 writingStyleKey 声明之后，否则 setup 期 TDZ 报错）
+watch(writingStyleKey, () => {
+  if (rightTab.value === 'flow' && detail.value) loadWritingFlow()
 })
 const editorRef = ref(null)  // MarkdownEditor 暴露的 editor 实例
 let abortStream = null
