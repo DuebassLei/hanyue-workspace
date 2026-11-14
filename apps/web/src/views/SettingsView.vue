@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
@@ -162,7 +162,135 @@ async function load() {
 onMounted(() => {
   load()
   loadThemeOptions()
+  refreshLogSummary()
 })
+
+/* ---------------- 系统日志（运维查看器） ---------------- */
+
+const LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+const logService = ref('api')
+const logMinLevel = ref('')
+const logKeyword = ref('')
+const logRequestId = ref('')
+const logEntries = ref([])
+const logOffset = ref(null) // null = tail 模式；数字 = 增量轮询偏移
+const logLoading = ref(false)
+const logError = ref('')
+const logAuto = ref(true)
+const logTruncated = ref(false)
+const logSummary = ref({})
+const logStreamRef = ref(null)
+let logTimer = null
+
+// 用户向上翻阅历史时暂停自动滚底，回到底部后恢复
+const logPinnedToBottom = ref(true)
+
+function onLogStreamScroll() {
+  const el = logStreamRef.value
+  if (!el) return
+  logPinnedToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+}
+
+async function scrollLogToBottom(force = false) {
+  await nextTick()
+  const el = logStreamRef.value
+  if (el && (force || logPinnedToBottom.value)) el.scrollTop = el.scrollHeight
+}
+
+const logErrorCount = computed(() =>
+  Object.values(logSummary.value).reduce((sum, item) => sum + (item.errorCount || 0), 0),
+)
+
+function logQuery(extra = {}) {
+  const params = new URLSearchParams()
+  params.set('service', extra.service ?? logService.value)
+  if (extra.offset != null) params.set('offset', String(extra.offset))
+  if (logMinLevel.value) params.set('level', logMinLevel.value)
+  if (logKeyword.value.trim()) params.set('keyword', logKeyword.value.trim())
+  if (logRequestId.value.trim()) params.set('requestId', logRequestId.value.trim())
+  return `/logs?${params.toString()}`
+}
+
+async function loadLogsTail() {
+  logLoading.value = true
+  logError.value = ''
+  try {
+    const data = await api.get(logQuery({ offset: null }))
+    logEntries.value = data.entries || []
+    logOffset.value = data.nextOffset ?? 0
+    logTruncated.value = Boolean(data.hasMore)
+    await scrollLogToBottom(true)
+    if (data.services && !data.services.includes(logService.value)) {
+      // 该服务暂无日志文件：保持空列表即可，不强制切换
+    }
+  } catch (err) {
+    logError.value = err.message
+  } finally {
+    logLoading.value = false
+  }
+}
+
+async function pollLogs() {
+  if (document.hidden || logLoading.value) return
+  logLoading.value = true
+  try {
+    if (logOffset.value == null) {
+      await loadLogsTail()
+      return
+    }
+    const data = await api.get(logQuery({ offset: logOffset.value }))
+    if (data.entries?.length) {
+      logEntries.value = [...logEntries.value, ...data.entries].slice(-2000)
+      await scrollLogToBottom()
+    }
+    // nextOffset 归零说明日志轮转/清空：重置为 tail 重新拉尾部
+    logOffset.value = data.nextOffset === 0 ? null : data.nextOffset
+    if (data.truncated) await loadLogsTail()
+  } catch {
+    // 轮询失败静默重试，不打断页面；连续失败由下一次手动刷新暴露
+  } finally {
+    logLoading.value = false
+  }
+}
+
+function startLogPolling() {
+  stopLogPolling()
+  if (logAuto.value) logTimer = setInterval(pollLogs, 2500)
+}
+
+function stopLogPolling() {
+  if (logTimer) {
+    clearInterval(logTimer)
+    logTimer = null
+  }
+}
+
+function toggleLogAuto() {
+  logAuto.value = !logAuto.value
+  startLogPolling()
+}
+
+async function refreshLogSummary() {
+  try {
+    const data = await api.get('/logs/summary')
+    logSummary.value = data.services || {}
+  } catch {
+    /* 概览失败不影响主功能 */
+  }
+}
+
+watch(tab, (value) => {
+  if (value === 'logs') {
+    loadLogsTail()
+    refreshLogSummary()
+    startLogPolling()
+  } else {
+    stopLogPolling()
+  }
+})
+
+onBeforeUnmount(stopLogPolling)
+
 
 function resetForm() {
   editingId.value = ''
@@ -513,6 +641,9 @@ async function removeStyle(skill) {
       <n-tab name="models">模型与 API</n-tab>
       <n-tab name="skills">Agent 与 Skills</n-tab>
       <n-tab name="data">数据与安全</n-tab>
+      <n-tab name="logs">
+        <span class="log-tab-label">系统日志<span v-if="logErrorCount" class="log-dot" :title="`最近日志含 ${logErrorCount} 条错误`" /></span>
+      </n-tab>
     </n-tabs>
 
     <section v-if="tab === 'theme'" class="card">
@@ -969,6 +1100,115 @@ async function removeStyle(skill) {
 </template>
 
 <style scoped>
+.log-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.log-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-danger);
+}
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+.log-service-select {
+  width: 120px;
+}
+.log-level-select {
+  width: 130px;
+}
+.log-keyword-input {
+  width: 180px;
+}
+.log-rid-input {
+  width: 160px;
+}
+.log-summary-chip {
+  font-size: var(--font-xs);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.log-summary-chip.is-error {
+  color: var(--color-danger);
+  background: rgba(208, 48, 80, 0.1);
+}
+.log-summary-chip.is-warn {
+  color: var(--color-warning);
+  background: rgba(240, 160, 32, 0.12);
+}
+.log-alert {
+  margin-bottom: var(--space-2);
+}
+.log-truncated-hint {
+  font-size: var(--font-xs);
+  color: var(--color-warning);
+  margin-bottom: var(--space-2);
+}
+.log-stream {
+  max-height: 480px;
+  overflow: auto;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: var(--space-2) var(--space-3);
+  font-family: 'JetBrains Mono', Consolas, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.log-empty {
+  color: var(--color-text-muted);
+  padding: var(--space-4);
+  text-align: center;
+}
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-ts {
+  color: var(--color-text-muted);
+  margin-right: 6px;
+}
+.log-level {
+  display: inline-block;
+  min-width: 58px;
+  font-weight: 600;
+  margin-right: 6px;
+}
+.level-error .log-level,
+.level-critical .log-level,
+.level-error .log-msg,
+.level-critical .log-msg {
+  color: var(--color-danger);
+}
+.level-warning .log-level,
+.level-warning .log-msg {
+  color: var(--color-warning);
+}
+.level-debug .log-msg {
+  color: var(--color-text-muted);
+}
+.log-logger {
+  color: var(--color-info);
+  margin-right: 6px;
+}
+.log-rid {
+  color: var(--color-text-muted);
+  margin-right: 6px;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+.log-line.level-continuation {
+  padding-left: 18px;
+  color: var(--color-text-muted);
+}
+
 .status-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
