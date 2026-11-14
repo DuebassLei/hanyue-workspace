@@ -19,6 +19,7 @@ import { NAlert, NButton, NInput, NSelect } from 'naive-ui'
 import MarkdownEditor from '../../components/MarkdownEditor.vue'
 import { apiUrl, fetchBlobUrl } from '../../api/client'
 import { useWechatPublish } from '../../composables/useWechatPublish'
+import { useLayoutComponents } from '../../composables/useLayoutComponents'
 import { usePublishFlow } from './flow/usePublishFlow.js'
 import { toast } from '../../ui/feedback'
 
@@ -59,16 +60,8 @@ const {
   initForm,
 } = useWechatPublish()
 
-// 插入到当前草稿正文末尾。语法与 wechat_layout 的围栏一致，不要求每篇都用。
-const BLOCK_SNIPPETS = [
-  { id: 'lead', label: '导语', snippet: '\n\n:::lead\n先把结论写在这里。\n:::\n' },
-  { id: 'stat', label: '数据', snippet: '\n\n:::stat\n12% | 说明\n:::\n' },
-  { id: 'steps', label: '步骤', snippet: '\n\n:::steps\n第一步 | 说明\n第二步 | 说明\n:::\n' },
-  { id: 'compare', label: '对比', snippet: '\n\n:::compare 左边 / 右边\n旧做法 | 新做法\n:::\n' },
-  { id: 'layers', label: '分层', snippet: '\n\n:::layers\n标签 | 说明\n:::\n' },
-  { id: 'checklist', label: '清单', snippet: '\n\n:::checklist\ndone | 已完成的事\ntodo | 还没做的事\n:::\n' },
-  { id: 'quote-card', label: '金句', snippet: '\n\n:::quote-card 出处\n把金句写在这里。\n:::\n' },
-]
+// 区块按钮来自后端小组件注册表（与「微信排版 → 组件库」同一份），不要求每篇都用。
+const { components: BLOCK_COMPONENTS, load: loadBlockComponents } = useLayoutComponents()
 
 function syncDraftAdapter(account, form) {
   wechatAccountId.value = account.id
@@ -246,6 +239,7 @@ const accountSelectOptions = computed(() =>
 // 抽屉打开时初始化（每次打开都刷新素材，刚生成的配图才能立刻选到）
 watch(() => props.open, async (val) => {
   if (!val) return
+  loadBlockComponents().catch(() => { /* 区块按钮缺失不阻塞发布 */ })
   await Promise.all([loadWechat(), loadThemes(), loadAssets()])
   // 每次打开都用最新的 title/body 初始化表单
   initForm({ title: props.title, body: props.body, contentId: props.contentId })
@@ -406,7 +400,7 @@ function handleClose() {
                 <label class="pub-label">插入区块</label>
                 <div class="pub-theme-list">
                   <button
-                    v-for="block in BLOCK_SNIPPETS"
+                    v-for="block in BLOCK_COMPONENTS"
                     :key="block.id"
                     type="button"
                     class="pub-theme-btn"

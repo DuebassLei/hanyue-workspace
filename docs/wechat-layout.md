@@ -1,6 +1,6 @@
 # 微信公众号排版设计
 
-> 状态：P0 + P1 已实现（2026-11-06），P2 未开始
+> 状态：P0 + P1 已实现（2026-11-06）；P2 的「主题导入导出 + 独立排版管理页」已实现（2026-11-14），一键排版未开始
 > 关联：`docs/design.md` §7 平台连接器、`apps/api/app/services/wechat_article.py`、`apps/api/app/modules/wechat_mp.py`
 > 前置能力：公众号草稿箱接入（已完成）
 
@@ -149,15 +149,23 @@ class WeChatTheme(Base, TimestampMixin):
 
 > 快照是必须的：主题后续被改，历史任务仍能复现当时的排版。
 
+用户排版偏好（默认主题 / 收藏 / 隐藏的预设 id）存在 `UserPreference.wechat_layout` JSON 列，
+沿用 `sticker_sets.meta_json` 的加列迁移先例；不建新表——三个小字段总是整读整写。
+导入/导出没有专用端点：自定义主题的 tokens 恒为 `normalize_tokens` 后的完整键集，
+导出文件（`{app, version, name, tokens}`）不带 `baseThemeId` 重新 POST 即精确还原。
+
 ## 6. API
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/wechat-mp/themes` | 预设 + 我的主题列表 |
+| GET | `/wechat-mp/themes` | 预设 + 我的主题列表；附带用户偏好 `defaultThemeId` / `favoritePresetIds` / `hiddenPresetIds` 与每个预设的 `favorite`/`hidden` 标记（默认主题指向已删除的自定义主题时读时回退，不写库） |
 | POST | `/wechat-mp/themes` | 基于预设复制或新建自定义主题（校验 token 范围） |
 | PATCH | `/wechat-mp/themes/{id}` | 更新自定义主题（预设拒绝 403） |
 | DELETE | `/wechat-mp/themes/{id}` | 删除自定义主题（预设拒绝 403） |
-| POST | `/wechat-mp/drafts/render` | 渲染预览：`{title, body, themeId, assetIds}` → `{html, warnings, stats}` |
+| POST | `/wechat-mp/drafts/render` | 渲染预览：`{title, body, themeId, assetIds}` → `{html, warnings, stats}`；`tokens` 非空时优先（编辑器未保存主题实时预览，校验同建主题） |
+| GET | `/wechat-mp/themes/schema` | 主题编辑器字段描述（范围/选项派生自校验源，前端不重复维护） |
+| GET | `/wechat-mp/components` | 小组件注册表（`LAYOUT_COMPONENTS`：id/label/description/category/snippet/sampleBody） |
+| PUT | `/wechat-mp/themes/preferences` | 排版偏好全量替换：默认主题 / 收藏预设 / 隐藏预设（必须 PUT：PATCH 会被 `/themes/{theme_id}` 抢先匹配） |
 | POST | `/wechat-mp/drafts/preview` | 扩展：加 `themeId`，issues 增加排版类告警 |
 | POST | `/wechat-mp/drafts` | 扩展：加 `themeId`（缺省用默认预设） |
 
@@ -182,13 +190,23 @@ class WeChatTheme(Base, TimestampMixin):
 **内容**：标题 / 摘要 / 作者 / 正文 / 封面 / 正文图 / 原文链接（现有字段）
 
 **排版**
-- 主题选择：4 张预设卡片（缩略图用同一段示例文字实时渲染）
+- 主题选择：预设 + 自定义主题 chips（隐藏预设不出现，收藏置顶，默认跟随用户偏好）
 - 微调：字号滑块、行高滑块、段距滑块、主色选择、对齐切换、首行缩进
 - 区块插入工具条：标题 / 引用 / 列表 / 分割线 / 强调卡 / 图注
 - 右侧手机预览（375px 宽，真机宽度），懒渲染（输入停止 300ms）
 - 底部统计：字数 / 图数 / 预计阅读时长 / 兼容性告警数
 
 推送按钮旁显示「将使用：墨绿简约 · 16px · 行高 1.8」，让用户明确知道推出去长什么样。
+
+### 「微信排版」管理页（2026-11-14）
+
+运营分组下的独立页面（`/wechat-layout`，`views/LayoutView.vue`），三个 Tab：
+
+- **排版主题**：预设卡片（色卡条 + 收藏★ / 隐藏◌ / 复制为自定义 / 导出）+ 自定义卡片（编辑 / 删除 / 导出 / 设为默认）+ 新建 / 导入 JSON。编辑器（`ThemeEditorModal.vue`）按 `themes/schema` 渲染控件（色板/滑块/下拉），右侧手机壳用 raw tokens 实时预览——校验与渲染都只信服务端。
+- **小组件库**：清单来自 `GET /wechat-mp/components`（后端 `LAYOUT_COMPONENTS` 注册表，新增围栏类型前端自动可见），每个组件在选中主题下渲染 `sampleBody` 真实预览 + 一键复制语法。
+- **样文预览**：编辑样文 → 选主题 → 375px 手机壳实时渲染 + 字数统计 + warnings/issues 分级展示。本页不做真实推送（推送仍在创作空间抽屉完成）。
+
+消费方联动：`useWechatPublish.allThemes` 过滤隐藏预设、收藏置顶、默认主题跟随偏好；抽屉的区块按钮同样改读注册表（7 → 10 个）；设置页写作风格的「默认排版主题」下拉改为服务端拉取（只列预设，manifest 校验不认自定义）。
 
 ## 8. 兼容性检查（Lint）
 
@@ -218,11 +236,12 @@ class WeChatTheme(Base, TimestampMixin):
 |---|---|---|
 | P0 | 解析器重构 + 主题 tokens + 4 套预设 + 内联样式渲染 + 手机预览 + `render` 端点 | ✅ 已实现 |
 | P1 | 区块库（强调卡 / 引导关注 / 图注 / 分割线）+ 自定义主题 CRUD + `layout_snapshot` | ✅ 已实现 |
-| P2 | 一键排版（自动分段、标点统一、空行规范）、主题导入导出 | ⬜ 未开始 |
+| P2 | 一键排版（自动分段、标点统一、空行规范） | ⬜ 未开始 |
+| P2 | 主题导入导出 + 「微信排版」管理页（主题 CRUD/默认/收藏/隐藏、组件库、样文预览） | ✅ 已实现（2026-11-14） |
 
 实现对照（P0 + P1，代码在 `apps/api/app/services/wechat_layout.py`）：
 
-- 主题：`PRESET_THEMES` 四套 + `wechat_themes` 表自定义；`normalize_tokens` 校验区间/颜色/枚举，**未知参数直接报错并列出可用项**（不静默丢弃）。
+- 主题：`PRESET_THEMES` 十套 + `wechat_themes` 表自定义；`normalize_tokens` 校验区间/颜色/枚举，**未知参数直接报错并列出可用项**（不静默丢弃）。
 - 区块：`parse_blocks` 支持标题三级 / 引用 / 有序无序列表 / 分割线 / 代码块 / `:::card`、`:::follow`、`:::sign`；未闭合区块按原样输出并给告警，不吞内容。
 - 渲染：`render_document` 返回 `html` / `tokens` / `stats` / `warnings`；`lint_html` 单独做兼容性检查；预览与推送共用同一函数。
 - API：`GET/POST/PATCH/DELETE /wechat-mp/themes`、`POST /wechat-mp/drafts/render`；`POST /wechat-mp/drafts` 接受 `themeId` 并把 tokens 写入 `PublishJob.layout_snapshot`。

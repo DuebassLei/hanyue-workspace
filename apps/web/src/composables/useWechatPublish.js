@@ -39,13 +39,15 @@ export function useWechatPublish() {
     })),
   )
 
-  // 排版主题
+  // 排版主题：偏好（默认/收藏/隐藏）由「微信排版」页维护，这里消费
   const themes = ref({ presets: [], custom: [], defaultThemeId: 'ink-green' })
   const wechatThemeId = ref('ink-green')
-  const allThemes = computed(() => [
-    ...(themes.value.presets || []),
-    ...(themes.value.custom || []),
-  ])
+  const allThemes = computed(() => {
+    const presets = (themes.value.presets || []).filter((t) => !t.hidden)
+    // 收藏置顶，其余保持预设声明顺序
+    const sorted = [...presets].sort((a, b) => Number(b.favorite) - Number(a.favorite))
+    return [...sorted, ...(themes.value.custom || [])]
+  })
 
   // 实时排版预览
   const layoutResult = ref(null)

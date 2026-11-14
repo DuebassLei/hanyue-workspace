@@ -159,7 +159,10 @@ async function load() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadThemeOptions()
+})
 
 function resetForm() {
   editingId.value = ''
@@ -321,7 +324,9 @@ const RISK_LABELS = {
   external_side_effect: '外部副作用',
   forbidden: '禁止',
 }
-const THEME_OPTIONS = [
+// 写作风格的默认排版主题：从 /wechat-mp/themes 拉取系统预设
+// （manifest 校验只认预设，自定义主题不能出现在这里）；拉取失败退回内置快照。
+const THEME_FALLBACK = [
   { value: 'ink-green', label: '墨绿简约 · 知识/职场/干货' },
   { value: 'deep-blue', label: '深海蓝 · 科技/财经/分析' },
   { value: 'warm-orange', label: '暖橙生活 · 生活/情感/美食' },
@@ -329,6 +334,20 @@ const THEME_OPTIONS = [
   { value: 'terracotta-warm', label: '暖陶土 · 工具推荐/产品测评' },
   { value: 'blue-business', label: '商务蓝 · 职场干货/产品教程' },
 ]
+const THEME_OPTIONS = ref(THEME_FALLBACK)
+async function loadThemeOptions() {
+  try {
+    const data = await api.get('/wechat-mp/themes')
+    if (data.presets?.length) {
+      THEME_OPTIONS.value = data.presets.map((t) => ({
+        value: t.id,
+        label: t.description ? `${t.name} · ${t.description}` : t.name,
+      }))
+    }
+  } catch {
+    // 排版服务不可达时用内置快照，不阻塞设置页
+  }
+}
 const providerOptions = [
   { value: 'openai_compatible', label: 'OpenAI 兼容' },
   { value: 'vendor_native', label: '供应商原生（适配器未接入）' },

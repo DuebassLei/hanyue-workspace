@@ -25,7 +25,10 @@ export const NAV_GROUPS = [
   {
     key: 'ops',
     label: '运营',
-    items: [{ name: 'publishing', label: '发布管理', short: '发布' }],
+    items: [
+      { name: 'publishing', label: '发布管理', short: '发布' },
+      { name: 'wechat-layout', label: '微信排版', short: '排版' },
+    ],
   },
   {
     key: 'system',
