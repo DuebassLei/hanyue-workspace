@@ -993,3 +993,103 @@ class StoryboardProjectOut(CamelModel):
     created_at: datetime
     updated_at: datetime
     scenes: list[StoryboardSceneOut] = Field(default_factory=list)
+
+
+# ---------- novels ----------
+
+
+def _empty_novel_facts() -> dict:
+    return {"characterChanges": [], "itemHoldings": [], "events": [], "openHooks": []}
+
+
+class NovelRules(CamelModel):
+    person: str = ""
+    style: str = ""
+    banned: str = ""
+
+
+class NovelProjectCreate(CamelModel):
+    title: str | None = Field(default=None, max_length=200)
+    source_text: str
+    rights_confirmed: bool = False
+
+
+class NovelProjectPatch(CamelModel):
+    title: str | None = Field(default=None, max_length=200)
+    rules: NovelRules | None = None
+
+
+class NovelChapterPatch(CamelModel):
+    title: str | None = Field(default=None, max_length=200)
+    source_text: str | None = None
+
+
+class NovelFacts(CamelModel):
+    character_changes: list[Any] = Field(default_factory=list)
+    item_holdings: list[Any] = Field(default_factory=list)
+    events: list[Any] = Field(default_factory=list)
+    open_hooks: list[Any] = Field(default_factory=list)
+
+
+class NovelChapterOut(CamelModel):
+    id: str
+    sort_order: int
+    source: str
+    title: str
+    source_text: str
+    rewrite_text: str
+    draft_text: str
+    accepted_text: str
+    draft_version: int
+    status: str
+    facts: NovelFacts = Field(default_factory=NovelFacts)
+    stale: bool
+    impact: dict[str, Any] = Field(default_factory=dict)
+    pending_candidate: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class NovelCharacterOut(CamelModel):
+    id: str
+    original_name: str
+    new_name: str
+    relations: str
+    speech_style: str
+    state: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class NovelAliasOut(CamelModel):
+    id: str
+    kind: str
+    original_name: str
+    new_name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class NovelProjectOut(CamelModel):
+    id: str
+    workspace_id: str
+    title: str
+    source_text: str
+    rights_confirmed_at: datetime | None = None
+    rules: NovelRules = Field(default_factory=NovelRules)
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    chapters: list[NovelChapterOut] = Field(default_factory=list)
+    characters: list[NovelCharacterOut] = Field(default_factory=list)
+    aliases: list[NovelAliasOut] = Field(default_factory=list)
+
+
+class NovelProjectListItem(CamelModel):
+    id: str
+    title: str
+    status: str
+    chapter_count: int
+    updated_at: datetime
+
+

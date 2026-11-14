@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import time
@@ -233,6 +234,7 @@ def _execute(db, job: models.BackgroundJob) -> dict:
         "image-processing": _handle_image_processing,
         "platform-sync": _handle_platform_sync,
         "platform-publish": _handle_platform_publish,
+        "novel": _handle_novel,
     }
     handler = handlers.get(job.queue)
     if not handler:
@@ -833,6 +835,133 @@ def _handle_platform_publish(db, job: models.BackgroundJob) -> dict:
     db.commit()
     return {"remoteContentId": remote_id}
 
+
+def _novel_complete(db, user_id: str, prompt: str) -> str:
+    """同步拼一次模型文本。测试 monkeypatch 这个函数，避免打网。"""
+    from . import ai_gateway, novel_rewrite
+
+    connection, model_code = novel_rewrite.get_default_connection(db, user_id)
+    if connection is None:
+        raise JobFailure("provider_unavailable", "尚未配置可用的模型连接", retryable=False)
+
+    async def _collect() -> str:
+        parts: list[str] = []
+        async for event in ai_gateway.stream_text(
+            db,
+            connection=connection,
+            model_code=model_code,
+            task_type="novel",
+            prompt=prompt,
+            system_prompt="",
+        ):
+            name = event.get("event")
+            data = event.get("data") or {}
+            if name == "generation.delta":
+                parts.append(data.get("text") or "")
+            elif name == "generation.error":
+                code = data.get("code") or "provider_unavailable"
+                retryable = False if code == "provider_unavailable" else bool(data.get("retryable"))
+                raise JobFailure(code, data.get("message") or "模型调用失败", retryable=retryable)
+        return "".join(parts)
+
+    return asyncio.run(_collect())
+
+
+def _handle_novel(db, job: models.BackgroundJob) -> dict:
+    kind = job.kind
+    if kind == "novel.extract":
+        return _handle_novel_extract(db, job)
+    if kind == "novel.rewrite":
+        return _handle_novel_rewrite(db, job)
+    if kind == "novel.continue":
+        return _handle_novel_continue(db, job)
+    raise JobFailure("unknown_kind", f"未注册的小说任务：{kind}")
+
+
+def _handle_novel_extract(db, job: models.BackgroundJob) -> dict:
+    from . import novel_rewrite
+
+    payload = job.payload or {}
+    project = db.get(models.NovelProject, payload.get("novelProjectId"))
+    if not project or project.owner_user_id != job.owner_user_id:
+        raise JobFailure("not_found", "小说项目不存在", retryable=False)
+    raw = _novel_complete(db, job.owner_user_id, novel_rewrite.build_extract_prompt(project.source_text))
+    characters, aliases = novel_rewrite.parse_extract(raw)
+    novel_rewrite.apply_extract(db, project, characters, aliases)
+    db.commit()
+    return {"characters": len(characters), "aliases": len(aliases)}
+
+
+def _handle_novel_rewrite(db, job: models.BackgroundJob) -> dict:
+    from . import novel_rewrite
+
+    payload = job.payload or {}
+    chapter = db.get(models.NovelChapter, payload.get("novelChapterId"))
+    if not chapter:
+        raise JobFailure("not_found", "章节不存在", retryable=False)
+    project = db.get(models.NovelProject, chapter.project_id)
+    if not project or project.owner_user_id != job.owner_user_id:
+        raise JobFailure("not_found", "小说项目不存在", retryable=False)
+    aliases = db.scalars(
+        select(models.NovelAlias).where(models.NovelAlias.project_id == project.id)
+    ).all()
+    characters = db.scalars(
+        select(models.NovelCharacter).where(models.NovelCharacter.project_id == project.id)
+    ).all()
+    prompt = novel_rewrite.build_rewrite_prompt(chapter, aliases, characters, project.rules or {})
+    text = _novel_complete(db, job.owner_user_id, prompt)
+    if not str(text or "").strip():
+        raise JobFailure("empty_model_output", "模型没有返回正文", retryable=False)
+    outcome = novel_rewrite.apply_rewrite_result(
+        db, chapter, text, expected_version=payload["expectedVersion"]
+    )
+    db.commit()
+    return {"outcome": outcome}
+
+
+def _handle_novel_continue(db, job: models.BackgroundJob) -> dict:
+    from . import novel_continue, novel_rewrite
+
+    payload = job.payload or {}
+    chapter = db.get(models.NovelChapter, payload.get("novelChapterId"))
+    if not chapter:
+        raise JobFailure("not_found", "章节不存在", retryable=False)
+    project = db.get(models.NovelProject, chapter.project_id)
+    if not project or project.owner_user_id != job.owner_user_id:
+        raise JobFailure("not_found", "小说项目不存在", retryable=False)
+    accepted = db.scalars(
+        select(models.NovelChapter)
+        .where(
+            models.NovelChapter.project_id == project.id,
+            models.NovelChapter.status == "accepted",
+            models.NovelChapter.id != chapter.id,
+        )
+        .order_by(models.NovelChapter.sort_order)
+    ).all()
+    previous = accepted[-1] if accepted else None
+    aliases = db.scalars(
+        select(models.NovelAlias).where(models.NovelAlias.project_id == project.id)
+    ).all()
+    characters = db.scalars(
+        select(models.NovelCharacter).where(models.NovelCharacter.project_id == project.id)
+    ).all()
+    prompt = novel_continue.build_continue_prompt(
+        accepted,
+        previous.accepted_text if previous else "",
+        characters,
+        aliases,
+        project.rules or {},
+    )
+    text = _novel_complete(db, job.owner_user_id, prompt)
+    if not str(text or "").strip():
+        raise JobFailure("empty_model_output", "模型没有返回正文", retryable=False)
+    outcome = novel_rewrite.apply_rewrite_result(
+        db, chapter, text, expected_version=payload["expectedVersion"]
+    )
+    scanned = chapter.draft_text if outcome == "applied" else ""
+    warnings = novel_continue.scan_warnings(scanned, characters, aliases)
+    db.commit()
+    return {"outcome": outcome, "warnings": warnings}
 
 
 def _read_asset_bytes(asset: models.Asset) -> bytes:

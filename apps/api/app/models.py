@@ -793,3 +793,70 @@ class StoryboardShot(Base, TimestampMixin):
     final_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     generation_version: Mapped[int] = mapped_column(Integer, default=0)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+def _empty_facts() -> dict:
+    return {"characterChanges": [], "itemHoldings": [], "events": [], "openHooks": []}
+
+
+# ---------------- 小说 ----------------
+
+
+class NovelProject(Base, TimestampMixin):
+    __tablename__ = "novel_projects"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="未命名小说")
+    source_text: Mapped[str] = mapped_column(Text, default="")
+    rights_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rules: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+
+
+class NovelChapter(Base, TimestampMixin):
+    __tablename__ = "novel_chapters"
+    __table_args__ = (UniqueConstraint("project_id", "sort_order", name="uq_novel_chapter_order"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("novel_projects.id"), index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(16), default="rewrite")
+    title: Mapped[str] = mapped_column(String(200), default="")
+    source_text: Mapped[str] = mapped_column(Text, default="")
+    rewrite_text: Mapped[str] = mapped_column(Text, default="")
+    draft_text: Mapped[str] = mapped_column(Text, default="")
+    accepted_text: Mapped[str] = mapped_column(Text, default="")
+    draft_version: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    facts: Mapped[dict] = mapped_column(JSON, default=_empty_facts)
+    stale: Mapped[bool] = mapped_column(Boolean, default=False)
+    impact: Mapped[dict] = mapped_column(JSON, default=dict)
+    pending_candidate: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class NovelCharacter(Base, TimestampMixin):
+    __tablename__ = "novel_characters"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("novel_projects.id"), index=True)
+    original_name: Mapped[str] = mapped_column(String(120))
+    new_name: Mapped[str] = mapped_column(String(120), default="")
+    relations: Mapped[str] = mapped_column(Text, default="")
+    speech_style: Mapped[str] = mapped_column(Text, default="")
+    state: Mapped[str] = mapped_column(String(24), default="present")
+
+
+class NovelAlias(Base, TimestampMixin):
+    __tablename__ = "novel_aliases"
+    __table_args__ = (
+        UniqueConstraint("project_id", "kind", "original_name", name="uq_novel_alias"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("novel_projects.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    original_name: Mapped[str] = mapped_column(String(120))
+    new_name: Mapped[str] = mapped_column(String(120), default="")
+

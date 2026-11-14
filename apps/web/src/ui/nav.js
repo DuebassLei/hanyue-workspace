@@ -19,6 +19,7 @@ export const NAV_GROUPS = [
       { name: 'images', label: '图片生成', short: '图片' },
       { name: 'stickers', label: '贴图创作', short: '贴图' },
       { name: 'storyboards', label: '漫画分镜', short: '分镜' },
+      { name: 'novels', label: '小说创作', short: '小说' },
       { name: 'prompts', label: '提示词库', short: '提示词', aliases: ['handdraw'] },
       { name: 'assets', label: '素材图库', short: '图库' },
     ],

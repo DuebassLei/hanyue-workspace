@@ -28,6 +28,7 @@ from .modules import (
     prompts,
     publishing,
     skills,
+    novels,
     stickers,
     storyboards,
     topics,
@@ -95,6 +96,7 @@ for module in (
     dashboard,
     jobs,
     cards,
+    novels,
     stickers,
     storyboards,
 ):
