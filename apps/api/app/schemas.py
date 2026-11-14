@@ -871,3 +871,125 @@ class StickerStylesOut(CamelModel):
     styles: list[dict] = []
     track_defaults: dict[str, str] = {}
     narratives: list[dict] = []
+
+
+# ---------- storyboards（漫画分镜） ----------
+
+
+class StoryboardAssetItem(CamelModel):
+    id: str = Field(min_length=1, max_length=32)
+    name: str = Field(min_length=1, max_length=80)
+    asset_id: str | None = Field(default=None, max_length=32)
+    description: str = Field(default="", max_length=500)
+
+
+class StoryboardAssets(CamelModel):
+    characters: list[StoryboardAssetItem] = Field(default_factory=list, max_length=24)
+    locations: list[StoryboardAssetItem] = Field(default_factory=list, max_length=24)
+    styles: list[StoryboardAssetItem] = Field(default_factory=list, max_length=12)
+
+
+class StoryboardProjectCreate(CamelModel):
+    title: str = Field(default="未命名分镜", min_length=1, max_length=200)
+    summary: str = Field(default="", max_length=4000)
+    assets: StoryboardAssets = Field(default_factory=StoryboardAssets)
+
+
+class StoryboardProjectPatch(CamelModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    summary: str | None = Field(default=None, max_length=4000)
+    assets: StoryboardAssets | None = None
+
+
+class StoryboardSceneCreate(CamelModel):
+    title: str = Field(default="新场景", min_length=1, max_length=200)
+    summary: str = Field(default="", max_length=4000)
+    chapter: str = Field(default="第一章", max_length=200)
+
+
+class StoryboardScenePatch(CamelModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    summary: str | None = Field(default=None, max_length=4000)
+    chapter: str | None = Field(default=None, max_length=200)
+
+
+class StoryboardShotCreate(CamelModel):
+    frame_description: str = Field(default="", max_length=8000)
+    action: str = Field(default="", max_length=4000)
+    dialogue: str = Field(default="", max_length=4000)
+    shot_size: str = Field(default="medium", max_length=24)
+    view_angle: str = Field(default="eye_level", max_length=24)
+    camera_motion: str = Field(default="static", max_length=24)
+    duration_seconds: int = Field(default=3, ge=1, le=120)
+    prompt: str = Field(default="", max_length=12000)
+    asset_refs: list[str] = Field(default_factory=list, max_length=12)
+
+
+class StoryboardShotPatch(StoryboardShotCreate):
+    pass
+
+
+class StoryboardBreakdownIn(CamelModel):
+    source_text: str = Field(min_length=1, max_length=12000)
+    model_id: str | None = None
+
+
+class StoryboardOrderIn(CamelModel):
+    ids: list[str] = Field(min_length=1, max_length=300)
+
+
+class StoryboardGenerateIn(CamelModel):
+    model_id: str | None = None
+    reference_asset_ids: list[str] = Field(default_factory=list, max_length=4)
+
+
+class StoryboardShotOut(CamelModel):
+    id: str
+    sort_order: int
+    deleted_at: datetime | None = None
+    frame_description: str
+    action: str
+    dialogue: str
+    shot_size: str
+    view_angle: str
+    camera_motion: str
+    duration_seconds: int
+    prompt: str
+    asset_refs: list[str] = Field(default_factory=list)
+    sketch_asset_id: str | None = None
+    sketch_url: str | None = None
+    sketch_job_id: str | None = None
+    sketch_status: str
+    sketch_error: str | None = None
+    # 实际入队生图时使用的完整提示词（含参考图标注与角色一致性文案），供前端查看/复制
+    sketch_prompt: str | None = None
+    final_asset_ids: list[str] = Field(default_factory=list)
+    final_urls: list[str] = Field(default_factory=list)
+    final_job_id: str | None = None
+    final_status: str
+    final_error: str | None = None
+    final_prompt: str | None = None
+    generation_version: int
+
+
+class StoryboardSceneOut(CamelModel):
+    id: str
+    sort_order: int
+    deleted_at: datetime | None = None
+    title: str
+    summary: str
+    chapter: str
+    shots: list[StoryboardShotOut] = Field(default_factory=list)
+
+
+class StoryboardProjectOut(CamelModel):
+    id: str
+    workspace_id: str
+    title: str
+    summary: str
+    deleted_at: datetime | None = None
+    assets: StoryboardAssets
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    scenes: list[StoryboardSceneOut] = Field(default_factory=list)

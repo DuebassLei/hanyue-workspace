@@ -29,6 +29,7 @@ from .modules import (
     publishing,
     skills,
     stickers,
+    storyboards,
     topics,
     wechat_mp,
     workspaces,
@@ -95,6 +96,7 @@ for module in (
     jobs,
     cards,
     stickers,
+    storyboards,
 ):
     app.include_router(module.router, prefix=settings.api_prefix)
 

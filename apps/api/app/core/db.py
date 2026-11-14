@@ -56,6 +56,10 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("sticker_images", "generated_prompt", "TEXT"),
     # 微信排版页：用户级默认主题 / 收藏 / 隐藏
     ("user_preferences", "wechat_layout", "JSON"),
+    ("storyboard_shots", "asset_refs", "JSON"),
+    ("storyboard_projects", "deleted_at", "TIMESTAMP"),
+    ("storyboard_scenes", "deleted_at", "TIMESTAMP"),
+    ("storyboard_shots", "deleted_at", "TIMESTAMP"),
 ]
 
 # keyset 分页与队列恢复都按时间列做 seek，缺索引会退化成全表排序。
@@ -76,6 +80,9 @@ _INDEXES: list[tuple[str, str]] = [
     # 贴图列表按「最近改动」取；集合内图片按图序读
     ("ix_sticker_sets_owner_updated", "sticker_sets (owner_user_id, updated_at DESC, id DESC)"),
     ("ix_sticker_images_set_order", "sticker_images (set_id, sort_order)"),
+    ("ix_storyboard_projects_owner_updated", "storyboard_projects (owner_user_id, updated_at DESC, id DESC)"),
+    ("ix_storyboard_scenes_project_order", "storyboard_scenes (project_id, sort_order)"),
+    ("ix_storyboard_shots_scene_order", "storyboard_shots (scene_id, sort_order)"),
 ]
 
 

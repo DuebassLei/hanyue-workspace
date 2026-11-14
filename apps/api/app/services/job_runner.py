@@ -190,6 +190,8 @@ def _on_failure(db, job: models.BackgroundJob) -> None:
             publish_job.error_message = job.error_message
             _advance_publish_job_on_failure(db, publish_job, job.error_code or "")
             db.commit()
+    if payload.get("storyboardShotId"):
+        _apply_storyboard_failure(db, job)
 
 
 def _advance_publish_job_on_failure(db, publish_job: models.PublishJob, error_code: str) -> None:
@@ -359,22 +361,31 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
         prompt = f"{prompt} {style['prompt_suffix']}".strip()
     user = db.get(models.User, job.owner_user_id)
     workspace = default_workspace(db, user)
+    if payload.get("storyboardProjectId"):
+        project = db.get(models.StoryboardProject, payload["storyboardProjectId"])
+        if not project or project.owner_user_id != job.owner_user_id:
+            raise JobFailure("storyboard_not_found", "分镜项目不存在")
+        workspace = db.get(models.Workspace, project.workspace_id)
+        if not workspace or workspace.owner_user_id != job.owner_user_id:
+            raise JobFailure("workspace_not_found", "分镜工作区不存在")
     payload = _fill_late_anchor_reference(db, payload)
     references = _load_reference_images(db, job, payload)
     provider = image_provider.resolve_image_provider(db, job.owner_user_id, payload.get("modelId"))
     model_code = provider.get("modelCode") if provider else None
-    # 贴图批量：该供应商已被证实不支持 /images/edits 时直接走文生图+画风签名，
-    # 不再每张白烧一发注定 404 的 edits 请求。探测结果记在集合 meta_json。
-    sticker_set_row = None
-    if payload.get("stickerSetId") and references:
-        sticker_set_row = db.get(models.StickerSet, payload["stickerSetId"])
-        if sticker_set_row is not None and (sticker_set_row.meta_json or {}).get(
-            "edits_unsupported"
-        ):
-            anchor_desc = _sticker_anchor_desc(db, payload)
-            if anchor_desc:
-                prompt = f"{prompt}, consistent with: {anchor_desc}"
-            references = []
+    model_id = payload.get("modelId")
+    # 该供应商已被证实不支持 /images/edits 时直接走文生图，不再白烧一发注定失败的请求。
+    # 探测结果记在模型 catalog 的 options.supportsEdits 上，图片生成与贴图共用一份。
+    # 环境变量供应商没有 catalog 行，provider_supports_edits 返回 None，每次现探。
+    edits_known_unsupported = (
+        bool(references)
+        and image_provider.provider_supports_edits(db, job.owner_user_id, model_id) is False
+    )
+    if edits_known_unsupported and payload.get("stickerSetId"):
+        anchor_desc = _sticker_anchor_desc(db, payload)
+        if anchor_desc:
+            prompt = f"{prompt}, consistent with: {anchor_desc}"
+    if edits_known_unsupported:
+        references = []
     builtin = _builtin_reference(
         payload.get("builtinReferenceStyleNumber"),
         model_code,
@@ -382,6 +393,7 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
     )
     if builtin is not None:
         references = [builtin, *references]
+    degraded_to_text = edits_known_unsupported
     try:
         images = image_provider.generate_images(
             db,
@@ -389,17 +401,16 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             prompt=prompt,
             aspect_ratio=payload.get("aspectRatio") or "3:4",
             count=int(payload.get("count") or 1),
-            model_id=payload.get("modelId"),
+            model_id=model_id,
             reference_images=references or None,
         )
     except image_provider.ImageProviderUnavailable as exc:
-        # 贴图批量：供应商不支持 /images/edits（典型表现 404）时降级为纯文生图。
-        # 一致性走 Q10-B：把锚点图反推成英文描述拼进 prompt（每集合只反推一次，
-        # 结果缓存在集合行上），让「同一画风、同一主体」落到文字层面；
-        # 反推不可用时退回仅风格句。其他错误照常上抛。
+        # 供应商不支持 /images/edits（典型表现 404）时降级为纯文生图重试，
+        # 图片生成与贴图批量都适用：丢弃参考图不该让整次任务失败。
+        # 贴图的一致性走 Q10-B：把锚点图反推成英文描述拼进 prompt（每集合只反推一次，
+        # 结果缓存在集合行上）；反推不可用时退回仅风格句。其他错误照常上抛。
         if not (
-            payload.get("stickerSetId")
-            and references
+            references
             and (
                 exc.code == "edits_unsupported"
                 # 兼容旧路径：网关吞掉状态码只回通用错误时仍按文案兜底识别
@@ -407,19 +418,20 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             )
         ):
             raise JobFailure(exc.code, exc.message, exc.code in RETRYABLE_CODES) from exc
-        # 记住这家供应商不支持 edits（按集合缓存），后续任务直接跳过白烧的一发
-        _merge_set_meta(db, payload["stickerSetId"], edits_unsupported=True)
-        anchor_desc = _sticker_anchor_desc(db, payload)
-        fallback_prompt = prompt
-        if anchor_desc:
-            fallback_prompt = f"{prompt}, consistent with: {anchor_desc}"
+        # 记住这家供应商不支持 edits，后续任务直接跳过白烧的一发
+        image_provider.mark_edits_unsupported(db, model_id)
+        if payload.get("stickerSetId"):
+            anchor_desc = _sticker_anchor_desc(db, payload)
+            if anchor_desc:
+                prompt = f"{prompt}, consistent with: {anchor_desc}"
+        degraded_to_text = True
         images = image_provider.generate_images(
             db,
             job.owner_user_id,
-            prompt=fallback_prompt,
+            prompt=prompt,
             aspect_ratio=payload.get("aspectRatio") or "3:4",
             count=int(payload.get("count") or 1),
-            model_id=payload.get("modelId"),
+            model_id=model_id,
             reference_images=None,
         )
     asset_ids: list[str] = []
@@ -446,12 +458,61 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
     # 不会把 job_id 写回图行，用 job_id 匹配会永远找不到行（真实批量路径踩过的坑）。
     if payload.get("stickerImageId"):
         _apply_sticker_success(db, job, asset_ids, payload["stickerImageId"])
+    if payload.get("storyboardShotId"):
+        _apply_storyboard_success(db, job, asset_ids, payload)
     return {
         "assetIds": asset_ids,
         "count": len(asset_ids),
         # 前端要把结果直接写进正文，这里顺带给出可匿名访问的签名直链
         "assetUrls": [_signed_asset_url(aid) for aid in asset_ids],
+        # 参考图被丢弃时如实告知：画风只剩文字描述，不是静默降级
+        "degradedToText": degraded_to_text,
+        "notice": (
+            "该供应商不支持参考图编辑，已按纯文生图生成，画风仅由文字描述决定"
+            if degraded_to_text
+            else ""
+        ),
     }
+
+
+def _apply_storyboard_success(db, job, asset_ids: list[str], payload: dict) -> None:
+    shot = db.get(models.StoryboardShot, payload.get("storyboardShotId"))
+    stage = payload.get("generationStage")
+    if not shot or shot.deleted_at is not None or stage not in ("sketch", "final"):
+        return
+    scene = db.get(models.StoryboardScene, shot.scene_id)
+    project = db.get(models.StoryboardProject, scene.project_id) if scene else None
+    if not scene or scene.deleted_at is not None or not project or project.deleted_at is not None:
+        return
+    if shot.generation_version != payload.get("generationVersion"):
+        return
+    if getattr(shot, f"{stage}_job_id") != job.id:
+        return
+    if stage == "sketch":
+        shot.sketch_asset_id = asset_ids[0] if asset_ids else None
+        shot.sketch_status = "succeeded"
+        shot.sketch_error = None
+    else:
+        shot.final_asset_ids = asset_ids
+        shot.final_status = "succeeded"
+        shot.final_error = None
+    db.commit()
+
+
+def _apply_storyboard_failure(db, job: models.BackgroundJob) -> None:
+    payload = job.payload or {}
+    shot = db.get(models.StoryboardShot, payload.get("storyboardShotId"))
+    if not shot or shot.deleted_at is not None or shot.generation_version != payload.get("generationVersion"):
+        return
+    scene = db.get(models.StoryboardScene, shot.scene_id)
+    project = db.get(models.StoryboardProject, scene.project_id) if scene else None
+    if not scene or scene.deleted_at is not None or not project or project.deleted_at is not None:
+        return
+    stage = payload.get("generationStage")
+    if stage in ("sketch", "final") and getattr(shot, f"{stage}_job_id") == job.id:
+        setattr(shot, f"{stage}_status", "failed")
+        setattr(shot, f"{stage}_error", job.error_message or job.error_code or "生成失败")
+        db.commit()
 
 
 def _merge_set_meta(db, set_id: str, **updates) -> dict:
@@ -771,6 +832,7 @@ def _handle_platform_publish(db, job: models.BackgroundJob) -> dict:
     )
     db.commit()
     return {"remoteContentId": remote_id}
+
 
 
 def _read_asset_bytes(asset: models.Asset) -> bytes:

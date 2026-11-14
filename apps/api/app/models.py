@@ -738,3 +738,58 @@ class StickerImage(Base, TimestampMixin):
     # 最近一次入队时的画面描述。与 frame_prompt 不一致 = 用户改了描述但还没重画，
     # 此时不能直接 retry（会把旧文案再跑一遍），必须走「保存并重画这张」。
     generated_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# ---------------- 漫画分镜 ----------------
+
+
+class StoryboardProject(Base, TimestampMixin):
+    __tablename__ = "storyboard_projects"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="未命名分镜")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    assets: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class StoryboardScene(Base, TimestampMixin):
+    __tablename__ = "storyboard_scenes"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("storyboard_projects.id"), index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    title: Mapped[str] = mapped_column(String(200), default="新场景")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    chapter: Mapped[str] = mapped_column(String(200), default="第一章")
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class StoryboardShot(Base, TimestampMixin):
+    __tablename__ = "storyboard_shots"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    scene_id: Mapped[str] = mapped_column(ForeignKey("storyboard_scenes.id"), index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    frame_description: Mapped[str] = mapped_column(Text, default="")
+    action: Mapped[str] = mapped_column(Text, default="")
+    dialogue: Mapped[str] = mapped_column(Text, default="")
+    shot_size: Mapped[str] = mapped_column(String(24), default="medium")
+    view_angle: Mapped[str] = mapped_column(String(24), default="eye_level")
+    camera_motion: Mapped[str] = mapped_column(String(24), default="static")
+    duration_seconds: Mapped[int] = mapped_column(Integer, default=3)
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    asset_refs: Mapped[list] = mapped_column(JSON, default=list)
+    sketch_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sketch_job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    sketch_status: Mapped[str] = mapped_column(String(16), default="pending")
+    sketch_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_asset_ids: Mapped[list] = mapped_column(JSON, default=list)
+    final_job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    final_status: Mapped[str] = mapped_column(String(16), default="pending")
+    final_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generation_version: Mapped[int] = mapped_column(Integer, default=0)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
