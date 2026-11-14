@@ -711,6 +711,8 @@ class StickerSet(Base, TimestampMixin):
     # draft|outlined|generating|review|done|deleted
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 内部元数据 JSON（如锚点反推描述缓存），不下发给前端
+    meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class StickerImage(Base, TimestampMixin):

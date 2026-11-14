@@ -18,17 +18,24 @@ def no_auto_dispatch(monkeypatch):
 
 @pytest.fixture
 def captured_jobs(monkeypatch):
-    """记录每次 enqueue 的 payload；仍走真实 enqueue 落库拿 jobId。"""
+    """记录每次入队的 payload（单发 enqueue 与链式 enqueue_chain 都算一单）。"""
     from app.core import queue
 
     calls: list[dict] = []
     original = queue.enqueue
+    original_chain = queue.enqueue_chain
 
     def spy(db, **kwargs):
         calls.append(kwargs)
         return original(db, **kwargs)
 
+    def chain_spy(db, *, payloads, **kwargs):
+        for item in payloads:
+            calls.append({"payload": item})
+        return original_chain(db, payloads=payloads, **kwargs)
+
     monkeypatch.setattr(queue, "enqueue", spy)
+    monkeypatch.setattr(queue, "enqueue_chain", chain_spy)
     return calls
 
 
@@ -461,7 +468,9 @@ def test_archive_zip_streams_images(client):
 
     db = SessionLocal()
     try:
-        user = db.query(models.User).first()
+        # 必须取集合 owner：全量跑时库里有别的测试用户，取 first() 会让 zip 的归属校验全跳过
+        owner_id = db.get(models.StickerSet, sid).owner_user_id
+        user = db.get(models.User, owner_id)
         ws = db.query(models.Workspace).first()
         rows = db.query(models.StickerImage).filter_by(set_id=sid).order_by(models.StickerImage.sort_order).all()
         for img in rows:
@@ -490,3 +499,338 @@ def test_archive_zip_streams_images(client):
     with zipfile.ZipFile(io.BytesIO(res.content)) as archive:
         names = sorted(archive.namelist())
     assert names == ["01.png", "02.png"]
+
+
+# ---------- serial chain (queue.enqueue_chain) ----------
+def _chain_jobs(db, group_key):
+    from app import models
+    from sqlalchemy import select
+
+    rows = db.scalars(
+        select(models.BackgroundJob)
+        .where(models.BackgroundJob.queue == "ai-image")
+        .order_by(models.BackgroundJob.created_at, models.BackgroundJob.id)
+    ).all()
+    return [r for r in rows if (r.payload or {}).get("stickerChainKey") == group_key]
+
+
+def test_enqueue_chain_dispatches_first_only(client):
+    """链式入队只立即投递首单，其余保持 queued 等接力。"""
+    from app.core import queue
+    from app.core.db import SessionLocal
+
+    dispatched: list[str] = []
+    original = queue.dispatch
+    queue.dispatch = lambda job_id, **kw: dispatched.append(job_id) or True
+    try:
+        headers = login(client)
+        sid = make_set(client, headers)["id"]
+        client.put(f"/api/v1/stickers/{sid}/outline", json=outline(4), headers=headers)
+        db = SessionLocal()
+        try:
+            payloads = [
+                {"prompt": f"p{i}", "count": 1, "stickerSetId": sid, "stickerChainKey": f"sticker:{sid}"}
+                for i in range(3)
+            ]
+            ids = queue.enqueue_chain(
+                db, owner_user_id=user_id_of(db), queue="ai-image",
+                kind="image-generation", payloads=payloads,
+            )
+            assert len(dispatched) == 1 and dispatched[0] == ids[0]
+            jobs = _chain_jobs(db, f"sticker:{sid}")
+            assert [j.status for j in jobs] == ["queued", "queued", "queued"] or \
+                   [j.status for j in jobs][0] in ("queued", "running")
+            # 接力：模拟首单落定，应投递第二单
+            dispatched.clear()
+            first = db.get(__import__("app.models", fromlist=["BackgroundJob"]).BackgroundJob, ids[0])
+            first.status = "succeeded"
+            db.commit()
+            queue.chain_next_if_done(payloads[0])
+            assert dispatched == [ids[1]]
+        finally:
+            db.execute(__import__("sqlalchemy").delete(__import__("app.models", fromlist=["BackgroundJob"]).BackgroundJob).where(
+                __import__("app.models", fromlist=["BackgroundJob"]).BackgroundJob.id.in_(ids)))
+            db.commit(); db.close()
+    finally:
+        queue.dispatch = original
+
+
+def user_id_of(db):
+    from app import models
+    return db.query(models.User).first().id
+
+
+def test_recover_pending_chains_head_only(client):
+    """重启恢复：同链多个 queued 只补投最早一单，不把串行链打回并发。"""
+    from app import models
+    from app.core import queue
+    from app.core.db import SessionLocal
+    from datetime import datetime, timedelta, timezone
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    key = f"sticker:{sid}"
+    db = SessionLocal()
+    try:
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        ids = []
+        for i in range(3):
+            job = models.BackgroundJob(
+                owner_user_id=user_id_of(db), queue="ai-image", kind="image-generation",
+                payload={"prompt": f"p{i}", "stickerSetId": sid, "stickerChainKey": key},
+                status="queued",
+            )
+            db.add(job)
+            db.flush()
+            job.created_at = old + timedelta(seconds=i)
+            ids.append(job.id)
+        # 本测试进程里 make_set 等任务都晚于 BOOT_TIME，会被恢复逻辑排除；
+        # 造一条更早的普通 queued 任务当「历史遗留」，否则整轮恢复无事可做。
+        plain = models.BackgroundJob(
+            owner_user_id=user_id_of(db), queue="ai-image", kind="image-generation",
+            payload={"prompt": "legacy"}, status="queued",
+        )
+        db.add(plain)
+        db.flush()
+        plain.created_at = old
+        plain_ids = [plain.id]
+        db.commit()
+        dispatched: list[str] = []
+        original = queue.dispatch
+        queue.dispatch = lambda job_id, **kw: dispatched.append(job_id) or True
+        try:
+            queue.recover_pending()
+        finally:
+            queue.dispatch = original
+        # 链成员只允许投出最早一单（其余靠接力）；本测试造的普通历史任务必须被补投
+        chain_dispatched = [j for j in dispatched if j in ids]
+        assert chain_dispatched == [ids[0]], f"链内应只投链头，实际 {chain_dispatched}"
+        assert plain.id in dispatched, "历史普通任务应被补投"
+    finally:
+        import sqlalchemy
+        db.execute(sqlalchemy.delete(models.BackgroundJob).where(
+            models.BackgroundJob.id.in_(ids + plain_ids)))
+        db.commit()
+        db.close()
+
+
+def test_retry_failed_uses_chain(client, captured_jobs):
+    """retry-failed 批量重试：多张走链式入队且带锚点参考；无失败张报业务码。"""
+    from app import models
+    from app.core.db import SessionLocal
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(3), headers=headers)
+    db = SessionLocal()
+    try:
+        rows = db.query(models.StickerImage).filter_by(set_id=sid).order_by(models.StickerImage.sort_order).all()
+        rows[0].status, rows[0].asset_id = "succeeded", "anchor-x"
+        for r in rows[1:]:
+            r.status, r.error_code = "failed", "provider_error"
+        db.commit()
+    finally:
+        db.close()
+    captured_jobs.clear()
+    res = client.post(f"/api/v1/stickers/{sid}/retry-failed", headers=headers)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "generating"
+    assert [img["status"] for img in body["images"]] == ["succeeded", "queued", "queued"]
+    assert len(captured_jobs) == 2
+    for call in captured_jobs:
+        assert call["payload"]["referenceAssetIds"] == ["anchor-x"]
+        assert call["payload"]["stickerChainKey"] == f"sticker:{sid}"
+    # 再点一次：没有 failed 了
+    res2 = client.post(f"/api/v1/stickers/{sid}/retry-failed", headers=headers)
+    assert res2.status_code == 409
+    assert res2.json()["code"] == "nothing_to_retry"
+
+
+def test_retry_failed_chain_starts_at_anchor(client, captured_jobs):
+    """锚点也失败时：锚点作链头留在串行链里（不带参考图），其余失败张带锚点参考。"""
+    from app import models
+    from app.core.db import SessionLocal
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(3), headers=headers)
+    db = SessionLocal()
+    try:
+        rows = db.query(models.StickerImage).filter_by(set_id=sid).order_by(models.StickerImage.sort_order).all()
+        for r in rows:
+            r.status, r.error_code = "failed", "provider_error"
+        rows[0].asset_id = "stale-anchor"  # 锚点失败：旧 asset 不可当参考
+        db.commit()
+    finally:
+        db.close()
+    captured_jobs.clear()
+    res = client.post(f"/api/v1/stickers/{sid}/retry-failed", headers=headers)
+    assert res.status_code == 200, res.text
+    # 三张全部重试（不漏张），且全部同一条链——锚点单独单发会与链头并发打供应商
+    assert len(captured_jobs) == 3
+    for call in captured_jobs:
+        assert call["payload"]["stickerChainKey"] == f"sticker:{sid}"
+    anchor_call = captured_jobs[0]["payload"]
+    assert anchor_call["stickerImageId"], "链头应是锚点那一行"
+    assert "referenceAssetIds" not in anchor_call, "锚点带不了自己的参考图"
+    for call in captured_jobs[1:]:
+        assert "referenceAssetIds" not in call["payload"], "锚点未成功时不得拿旧 asset 当参考"
+
+
+def test_stalled_chain_is_resumed_not_deadlocked(client):
+    """链只剩排队成员（接力断了）时：守卫不能永久 409，应把链头补投起来。"""
+    from app import models
+    from app.core import queue
+    from app.core.db import SessionLocal
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(3), headers=headers)
+    db = SessionLocal()
+    try:
+        rows = db.query(models.StickerImage).filter_by(set_id=sid).order_by(models.StickerImage.sort_order).all()
+        rows[0].status, rows[0].asset_id = "succeeded", "anchor-asset"
+        rows[1].status = "failed"
+        db.commit()
+        owner = db.get(models.StickerSet, sid).owner_user_id
+        stalled = models.BackgroundJob(
+            owner_user_id=owner,
+            queue="ai-image",
+            kind="image-generation",
+            payload={"prompt": "p", "stickerSetId": sid, "stickerChainKey": f"sticker:{sid}"},
+            status="queued",
+        )
+        db.add(stalled)
+        db.commit()
+        job_ids = [stalled.id]
+    finally:
+        db.close()
+    dispatched: list[str] = []
+    original = queue.dispatch
+    queue.dispatch = lambda job_id, **kw: dispatched.append(job_id) or True
+    try:
+        res = client.post(f"/api/v1/stickers/{sid}/retry-failed", headers=headers)
+        # 依然是 409（这一轮不入新链），但停摆的成员必须被补投，否则用户永远推进不了
+        assert res.status_code == 409, res.text
+        assert dispatched == job_ids, f"停摆链应补投链头，实际 {dispatched}"
+    finally:
+        queue.dispatch = original
+        import sqlalchemy
+        from app.core.db import SessionLocal as SL
+
+        db = SL()
+        db.execute(sqlalchemy.delete(models.BackgroundJob).where(models.BackgroundJob.id.in_(job_ids)))
+        db.commit()
+        db.close()
+
+
+def test_generate_rest_rejects_second_chain(client):
+    """已有链在跑（running）时再发 generate-rest 必须 409，避免同集合两个 running。"""
+    from app import models
+    from app.core.db import SessionLocal
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(3), headers=headers)
+    db = SessionLocal()
+    try:
+        rows = db.query(models.StickerImage).filter_by(set_id=sid).order_by(models.StickerImage.sort_order).all()
+        rows[0].status, rows[0].asset_id = "succeeded", "anchor-asset"
+        rows[1].status = "failed"
+        db.commit()
+        owner = db.get(models.StickerSet, sid).owner_user_id
+        # 造一条同链 running 任务，模拟「上一次批量生成正在跑」
+        db.add(
+            models.BackgroundJob(
+                owner_user_id=owner,
+                queue="ai-image",
+                kind="image-generation",
+                payload={"prompt": "p", "stickerSetId": sid, "stickerChainKey": f"sticker:{sid}"},
+                status="running",
+            )
+        )
+        db.commit()
+        job_ids = [j.id for j in db.query(models.BackgroundJob).filter_by(queue="ai-image").all()]
+    finally:
+        db.close()
+    try:
+        res = client.post(f"/api/v1/stickers/{sid}/generate-rest", headers=headers)
+        assert res.status_code == 409, res.text
+        assert res.json()["code"] == "chain_active"
+        res2 = client.post(f"/api/v1/stickers/{sid}/retry-failed", headers=headers)
+        assert res2.status_code == 409
+        assert res2.json()["code"] == "chain_active"
+    finally:
+        import sqlalchemy
+        from app.core.db import SessionLocal as SL
+
+        db = SL()
+        db.execute(sqlalchemy.delete(models.BackgroundJob).where(models.BackgroundJob.id.in_(job_ids)))
+        db.commit()
+        db.close()
+
+
+def test_anchor_success_invalidates_cached_style_signature(client):
+    """锚点换图后必须作废 anchor_desc 缓存，否则其余张会按旧锚点的画风对齐。"""
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services.job_runner import _apply_sticker_success
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(3), headers=headers)
+    db = SessionLocal()
+    try:
+        sticker_set = db.get(models.StickerSet, sid)
+        sticker_set.meta_json = {"edits_unsupported": True, "anchor_desc": "flat vector, muted teal"}
+        job = models.BackgroundJob(
+            owner_user_id=sticker_set.owner_user_id,
+            queue="ai-image",
+            kind="image-generation",
+            payload={"stickerSetId": sid},
+            status="running",
+        )
+        db.add(job)
+        db.commit()
+        anchor = db.query(models.StickerImage).filter_by(set_id=sid, sort_order=0).one()
+        anchor_id, anchor.job_id = anchor.id, job.id
+        db.commit()
+        _apply_sticker_success(db, job, ["new-anchor"], anchor_id)
+    finally:
+        db.close()
+    db = SessionLocal()
+    try:
+        meta = db.get(models.StickerSet, sid).meta_json or {}
+        assert "anchor_desc" not in meta, "锚点换图后旧画风签名必须失效"
+        assert meta.get("edits_unsupported") is True, "不得连带抹掉其他缓存键"
+    finally:
+        db.close()
+
+
+def test_late_anchor_reference_filled_at_run_time(client):
+    """锚点失败时入队的链成员，轮到执行时若锚点已成功，应补上参考图保持整组同风格。"""
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services.job_runner import _fill_late_anchor_reference
+
+    headers = login(client)
+    sid = make_set(client, headers)["id"]
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(3), headers=headers)
+    db = SessionLocal()
+    try:
+        rows = db.query(models.StickerImage).filter_by(set_id=sid).order_by(models.StickerImage.sort_order).all()
+        # 入队那一刻：锚点尚未成功，后续行没有参考图
+        payload = {"prompt": "p", "stickerSetId": sid, "stickerImageId": rows[1].id}
+        assert _fill_late_anchor_reference(db, payload) == payload
+        # 轮到执行时锚点已成功 → 补上参考图
+        rows[0].status, rows[0].asset_id = "succeeded", "anchor-ok"
+        db.commit()
+        filled = _fill_late_anchor_reference(db, payload)
+        assert filled["referenceAssetIds"] == ["anchor-ok"]
+        assert payload == {"prompt": "p", "stickerSetId": sid, "stickerImageId": rows[1].id}, "不得改写原 payload"
+        # 锚点自己那一行永远不会给自己当参考
+        anchor_payload = {"prompt": "p", "stickerSetId": sid, "stickerImageId": rows[0].id}
+        assert "referenceAssetIds" not in _fill_late_anchor_reference(db, anchor_payload)
+    finally:
+        db.close()

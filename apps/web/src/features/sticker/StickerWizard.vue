@@ -228,6 +228,14 @@ function onRetryImage(image) {
   }, '重试请求失败')
 }
 
+function onRetryFailed() {
+  runAction(async () => {
+    const updated = await api.post(`/stickers/${detail.value.id}/retry-failed`, {})
+    detail.value = updated
+    markQueued((updated.images || []).map((item) => item.id))
+  }, '批量重试失败')
+}
+
 function onUpdateCaption({ id, caption }) {
   runAction(async () => {
     // 配文是行级数据：PATCH 契约未声明 images 字段（会被静默忽略），
@@ -320,6 +328,7 @@ onBeforeUnmount(stopPolling)
       @generate-anchor="onGenerateAnchor"
       @generate-rest="onGenerateRest"
       @retry-image="onRetryImage"
+      @retry-failed="onRetryFailed"
       @update-caption="onUpdateCaption"
       @append="onAppend"
       @finalize="onFinalize"

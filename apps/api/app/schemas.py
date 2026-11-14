@@ -835,6 +835,8 @@ class StickerSetOut(CamelModel):
     succeeded: int = 0
     failed: int = 0
     cover_url: str | None = None
+    # 画风签名（锚点反推的一致性锚），仅详情接口回显
+    anchor_desc: str = ""
     created_at: datetime
     updated_at: datetime
     images: list[StickerImageOut] = []

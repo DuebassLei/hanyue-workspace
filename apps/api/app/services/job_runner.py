@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -106,10 +107,13 @@ def run_job(job_id: str) -> None:
         job = db.get(models.BackgroundJob, job_id)
         for attempt in range(job.attempt_count, MAX_ATTEMPTS + 1):
             if _current_status(job_id) == "cancelled":
+                # 链成员被取消也要接力：否则同链 queued 成员无人投递，卡到下次重启
+                queue.chain_next_if_done(payload_of(db, job_id), owner_user_id=job.owner_user_id)
                 return
             try:
                 result = _execute(db, job)
                 if _current_status(job_id) == "cancelled":
+                    queue.chain_next_if_done(payload_of(db, job_id), owner_user_id=job.owner_user_id)
                     return
                 if _write_terminal(
                     db,
@@ -120,6 +124,7 @@ def run_job(job_id: str) -> None:
                     completed_at=_utcnow(),
                 ):
                     db.refresh(job)
+                queue.chain_next_if_done(payload_of(db, job_id), owner_user_id=job.owner_user_id)
                 return
             except JobFailure as exc:
                 if exc.retryable and attempt < MAX_ATTEMPTS:
@@ -143,6 +148,7 @@ def run_job(job_id: str) -> None:
                 )
                 db.refresh(job)
                 _on_failure(db, job)
+                queue.chain_next_if_done(payload_of(db, job_id), owner_user_id=job.owner_user_id)
                 return
             except Exception as exc:  # 兜底，保证任务不会永远 queued/running
                 _write_terminal(
@@ -155,9 +161,15 @@ def run_job(job_id: str) -> None:
                 )
                 db.refresh(job)
                 _on_failure(db, job)
+                queue.chain_next_if_done(payload_of(db, job_id), owner_user_id=job.owner_user_id)
                 return
     finally:
         db.close()
+
+
+def payload_of(db, job_id: str) -> dict:
+    row = db.get(models.BackgroundJob, job_id)
+    return (row.payload or {}) if row else {}
 
 
 def _on_failure(db, job: models.BackgroundJob) -> None:
@@ -254,6 +266,37 @@ def _store_asset(db, user, workspace_id: str, raw: bytes, mime: str, name: str, 
     return asset
 
 
+def _fill_late_anchor_reference(db, payload: dict) -> dict:
+    """入队时锚点还没出图 → 到执行这张时再补一次参考图。
+
+    retry-failed / generate-rest 在「锚点失败」时只能按当时状态发 payload（参考图为空）。
+    如果锚点是同一条链的链头，等轮到后面几张时它往往已经成功了——此时补上参考图，
+    整组才能保持同一画风，而不是集体退化为纯文生图。
+    只对「贴图批量、非锚点、payload 里本来就没有参考图」的行生效，且必须仍是
+    sort_order==0 的成功行，避免拿错基准。返回值是新的 payload 副本（不改 job 行）。
+    """
+    if payload.get("referenceAssetIds") or not payload.get("stickerSetId"):
+        return payload
+    image_id = payload.get("stickerImageId")
+    if not image_id:
+        return payload
+    image = db.get(models.StickerImage, image_id)
+    if image is None or image.sort_order == 0:
+        return payload
+    anchor = db.scalar(
+        select(models.StickerImage)
+        .where(
+            models.StickerImage.set_id == image.set_id,
+            models.StickerImage.sort_order == 0,
+            models.StickerImage.status == "succeeded",
+            models.StickerImage.asset_id.is_not(None),
+        )
+    )
+    if anchor is None:
+        return payload
+    return {**payload, "referenceAssetIds": [anchor.asset_id]}
+
+
 def _load_reference_images(db, job: models.BackgroundJob, payload: dict) -> list[tuple[bytes, str, str]]:
     """读取参考图素材；文件缺失或不属于任务创建者时明确失败。"""
     references: list[tuple[bytes, str, str]] = []
@@ -316,9 +359,22 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
         prompt = f"{prompt} {style['prompt_suffix']}".strip()
     user = db.get(models.User, job.owner_user_id)
     workspace = default_workspace(db, user)
+    payload = _fill_late_anchor_reference(db, payload)
     references = _load_reference_images(db, job, payload)
     provider = image_provider.resolve_image_provider(db, job.owner_user_id, payload.get("modelId"))
     model_code = provider.get("modelCode") if provider else None
+    # 贴图批量：该供应商已被证实不支持 /images/edits 时直接走文生图+画风签名，
+    # 不再每张白烧一发注定 404 的 edits 请求。探测结果记在集合 meta_json。
+    sticker_set_row = None
+    if payload.get("stickerSetId") and references:
+        sticker_set_row = db.get(models.StickerSet, payload["stickerSetId"])
+        if sticker_set_row is not None and (sticker_set_row.meta_json or {}).get(
+            "edits_unsupported"
+        ):
+            anchor_desc = _sticker_anchor_desc(db, payload)
+            if anchor_desc:
+                prompt = f"{prompt}, consistent with: {anchor_desc}"
+            references = []
     builtin = _builtin_reference(
         payload.get("builtinReferenceStyleNumber"),
         model_code,
@@ -337,7 +393,35 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             reference_images=references or None,
         )
     except image_provider.ImageProviderUnavailable as exc:
-        raise JobFailure(exc.code, exc.message, exc.code in RETRYABLE_CODES) from exc
+        # 贴图批量：供应商不支持 /images/edits（典型表现 404）时降级为纯文生图。
+        # 一致性走 Q10-B：把锚点图反推成英文描述拼进 prompt（每集合只反推一次，
+        # 结果缓存在集合行上），让「同一画风、同一主体」落到文字层面；
+        # 反推不可用时退回仅风格句。其他错误照常上抛。
+        if not (
+            payload.get("stickerSetId")
+            and references
+            and (
+                exc.code == "edits_unsupported"
+                # 兼容旧路径：网关吞掉状态码只回通用错误时仍按文案兜底识别
+                or (exc.code == "provider_error" and "/images/edits" in exc.message)
+            )
+        ):
+            raise JobFailure(exc.code, exc.message, exc.code in RETRYABLE_CODES) from exc
+        # 记住这家供应商不支持 edits（按集合缓存），后续任务直接跳过白烧的一发
+        _merge_set_meta(db, payload["stickerSetId"], edits_unsupported=True)
+        anchor_desc = _sticker_anchor_desc(db, payload)
+        fallback_prompt = prompt
+        if anchor_desc:
+            fallback_prompt = f"{prompt}, consistent with: {anchor_desc}"
+        images = image_provider.generate_images(
+            db,
+            job.owner_user_id,
+            prompt=fallback_prompt,
+            aspect_ratio=payload.get("aspectRatio") or "3:4",
+            count=int(payload.get("count") or 1),
+            model_id=payload.get("modelId"),
+            reference_images=None,
+        )
     asset_ids: list[str] = []
     for index, (raw, mime) in enumerate(images, start=1):
         asset = _store_asset(
@@ -352,10 +436,16 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             license_note="AI 生成，发布前请确认平台内容规范与商用授权",
         )
         asset_ids.append(asset.id)
+    if not asset_ids:
+        # 供应商路径正常时会抛错而不是返回空列表；这里是最后一道闸：
+        # 没有 asset 就绝不能把图行标成 succeeded（会出现「成功但没图」的格子）。
+        raise JobFailure("empty_provider_response", "图像供应商未返回任何图片")
     db.commit()
     # 贴图创作：把首张 asset 幂等回写到对应图行，并按集合终态推进集合状态。
+    # 按 payload.stickerImageId 定位而不是 job_id——enqueue_chain 在任务开始执行前
+    # 不会把 job_id 写回图行，用 job_id 匹配会永远找不到行（真实批量路径踩过的坑）。
     if payload.get("stickerImageId"):
-        _apply_sticker_success(db, job, asset_ids)
+        _apply_sticker_success(db, job, asset_ids, payload["stickerImageId"])
     return {
         "assetIds": asset_ids,
         "count": len(asset_ids),
@@ -364,15 +454,142 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
     }
 
 
-def _apply_sticker_success(db, job: models.BackgroundJob, asset_ids: list[str]) -> None:
+def _merge_set_meta(db, set_id: str, **updates) -> dict:
+    """原子合并贴图集 meta_json 的若干键。
+
+    直接 `row.meta_json = {**old, ...}` 是整列覆盖：另一个会话若持着旧快照
+    （如先取集合、再写 anchor_desc），会把对方刚写的键抹掉。这里在写之前
+    强制从库里重读一次（populate_existing 覆盖 identity map 里的旧对象），
+    把丢更新窗口压到同一事务内。
+    """
+    fresh = db.execute(
+        select(models.StickerSet)
+        .where(models.StickerSet.id == set_id)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if fresh is None:
+        return {}
+    merged = {**(fresh.meta_json or {}), **updates}
+    fresh.meta_json = merged
+    db.commit()
+    return merged
+
+
+def _merge_set_meta_remove(db, set_id: str, *keys: str) -> None:
+    """从集合 meta_json 删掉若干键（同样先重读再合并，避免覆盖并发写入）。"""
+    fresh = db.execute(
+        select(models.StickerSet)
+        .where(models.StickerSet.id == set_id)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if fresh is None:
+        return
+    meta = dict(fresh.meta_json or {})
+    if not any(key in meta for key in keys):
+        return
+    for key in keys:
+        meta.pop(key, None)
+    fresh.meta_json = meta
+
+
+def _sticker_anchor_desc(db, payload: dict) -> str:
+    """锚点图的「画风签名」（Q10-B 一致性兜底），缓存在集合 meta_json.anchor_desc。
+
+    用 STYLE_SIGNATURE_SYSTEM 只提取可迁移画法（技法/色板/光线/质感/构图），
+    刻意排除主体——主体由各张画面描述负责，避免锚点内容污染整组。
+    每个集合只调一次视觉模型；失败记哨兵值不再重试，降级为仅风格句。
+
+    锚点必须是 sort_order==0 的那张（图序第一张），不能「取第一个有 asset 的行」——
+    done 集合重排、或锚点尚未成功而中间张先出图时，那样会拿中间张的画风去锚定全组。
+    """
+    sticker_set = db.get(models.StickerSet, payload.get("stickerSetId") or "")
+    if sticker_set is None:
+        return ""
+    meta = sticker_set.meta_json or {}
+    if "anchor_desc" in meta:
+        return str(meta["anchor_desc"])
+    anchor = db.scalar(
+        select(models.StickerImage)
+        .where(
+            models.StickerImage.set_id == sticker_set.id,
+            models.StickerImage.sort_order == 0,
+            models.StickerImage.asset_id.is_not(None),
+        )
+    )
+    if anchor is None:
+        # 正常情况下锚点未就绪时批量生成不会开跑；拿不到就退回仅风格句，
+        # 宁可少一层一致性，也不要拿错误基准污染整组。
+        return ""
+    asset = db.get(models.Asset, anchor.asset_id)
+    desc = ""
+    if asset is not None:
+        try:
+            path = image_service.storage_path(get_settings().storage_dir, asset.storage_key)
+            if path.is_file():
+                desc = image_provider.interrogate_image(
+                    db,
+                    sticker_set.owner_user_id,
+                    image_bytes=path.read_bytes(),
+                    mime_type=asset.mime_type,
+                    system_prompt=image_provider.STYLE_SIGNATURE_SYSTEM,
+                    user_text="Extract this image's style signature.",
+                ).strip()
+        except Exception as exc:  # noqa: BLE001 —— 反推失败不阻塞生成，降级为仅风格句
+            from ..core.logging import get_logger
+
+            get_logger("job_runner.sticker").warning("锚点画风提取失败，降级为仅风格句：%s", exc)
+            desc = ""
+    desc = _style_signature_guard(desc)[:400] if desc else ""
+    _merge_set_meta(db, sticker_set.id, anchor_desc=desc)
+    return desc
+
+
+# VLM 偶尔无视指令把锚点主体带进画风签名（典型：a man walking / the Eiffel Tower）。
+# 这些词会污染其余各张的画面描述：先按逗号切段，整段含主体词的丢弃（风格词与主体词
+# 很少同段）；只剩冠词等碎片的段也丢掉。剩余太短说明签名基本被主体占满，整体弃用。
+_SUBJECT_TOKEN_RE = re.compile(
+    r"\b(?:man|men|woman|women|person|people|person's|child|children|boy|girl|crowd|"
+    r"building|tower|bridge|street|cityscape|skyline|room|interior|table|chair|car|"
+    r"vehicle|cat|dog|bird|horse|tree|forest|mountain|beach|ocean|sea|lake|food|dish|"
+    r"meal|cup|mug|bottle|book|phone|laptop|screen|logo|sign|poster|banner|"
+    r"eiffel|statue|monument|temple|church|mosque|castle)\b",
+    re.IGNORECASE,
+)
+_STOPWORD_ONLY_RE = re.compile(r"^(?:the|a|an|this|that|with|and|of|in|on|to|its|their)?[\s.]*$", re.IGNORECASE)
+
+
+def _style_signature_guard(text: str) -> str:
+    kept = []
+    for segment in re.split(r"[,;\n]", text):
+        seg = segment.strip(" .")
+        if not seg or _STOPWORD_ONLY_RE.match(seg):
+            continue
+        if _SUBJECT_TOKEN_RE.search(seg):
+            continue
+        kept.append(seg)
+    cleaned = ", ".join(kept)
+    return cleaned if len(cleaned) >= 20 else ""
+
+
+def _apply_sticker_success(
+    db, job: models.BackgroundJob, asset_ids: list[str], image_id: str | None = None
+) -> None:
     """生图成功后回写贴图集：图行 → succeeded + asset；全成功则集合 → review。
 
-    用 `StickerImage.job_id == job.id` 条件更新保证幂等（重试/恢复不重复改）。
+    定位优先用 payload 里的 stickerImageId（enqueue_chain 路径不回写 job_id），
+    兜底按 job_id 匹配（单发 enqueue 路径）；两者都查不到即任务已被替换，静默跳过。
     有 failed 行时集合保持 generating，让单张 retry 按钮可用。
     """
-    image = db.scalar(
-        select(models.StickerImage).where(models.StickerImage.job_id == job.id)
-    )
+    image = None
+    if image_id:
+        image = db.get(models.StickerImage, image_id)
+        # 该行已被新一轮重试接管（job_id 指向别的任务）时不再回写
+        if image is not None and image.job_id not in (None, job.id):
+            image = None
+    if image is None:
+        image = db.scalar(
+            select(models.StickerImage).where(models.StickerImage.job_id == job.id)
+        )
     if image is None:
         return
     new_asset_id = asset_ids[0] if asset_ids else image.asset_id
@@ -392,6 +609,11 @@ def _apply_sticker_success(db, job: models.BackgroundJob, asset_ids: list[str]) 
         asset = db.get(models.Asset, new_asset_id)
         if asset is not None and asset.owner_user_id == job.owner_user_id:
             asset.source_type = "sticker"
+    # 锚点换图即作废画风签名缓存：旧签名描述的是上一张锚点，继续用它对齐会让
+    # 这一轮其余几张往已经不在的基准上靠。下一张需要时按新锚点重新提取。
+    # 用 _merge_set_meta_remove 重读后合并，避免拿本会话的旧快照把并发写入的键抹掉。
+    if image.sort_order == 0:
+        _merge_set_meta_remove(db, image.set_id, "anchor_desc")
     siblings = db.scalars(
         select(models.StickerImage).where(models.StickerImage.set_id == image.set_id)
     ).all()

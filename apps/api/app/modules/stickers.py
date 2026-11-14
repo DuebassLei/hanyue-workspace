@@ -102,6 +102,21 @@ def _sync_images_from_jobs(db, images) -> bool:
     return changed
 
 
+def _reject_if_chain_active(db, user, set_id: str) -> None:
+    """同一集合只允许一条在跑的串行链，否则会有两个 running 成员并发打供应商。
+
+    除「有成员在跑」外，链上只要还留着排队成员也一并拒绝：这时再发一条新链，
+    新旧两批会交替被接力投递，等于把串行链变成两条交错链。若发现链已停摆
+    （有排队却没人跑，接力断掉或重启后没补投），就地补投链头再拒绝——
+    否则用户会被永久 409 卡死，只能等下次重启。
+    """
+    group_key = f"sticker:{set_id}"
+    if queue.chain_busy(db, owner_user_id=user.id, group_key=group_key):
+        raise ApiError(
+            "chain_active", "该贴图集还有未完成的任务，请等它们落定后再试", status_code=409
+        )
+
+
 def _set_out(
     db, row: models.StickerSet, images, *, with_images: bool = False
 ) -> schemas.StickerSetOut:
@@ -121,6 +136,7 @@ def _set_out(
         succeeded=succeeded,
         failed=failed,
         cover_url=_signed_url(cover) if cover else None,
+        anchor_desc=str((row.meta_json or {}).get("anchor_desc") or ""),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -283,18 +299,14 @@ def put_outline(
     # 按图序对齐旧 asset：done 重排/补一张时，位置未变且描述未改的行才能复用旧素材
     old_by_order = {img.sort_order: img for img in previous}
     archived: list[str | None] = []
-    # 归档集合改图序（「再补一张」闭环）时要求全部在跑任务已终态：
-    # 否则旧 job 成功后会把 asset 写进已被替换的行，产生无主素材。
-    if row.status == "done":
-        running = [
-            img.job_id
-            for img in previous
-            if img.job_id and img.status not in _IMAGE_TERMINAL
-        ]
-        if running:
-            raise ApiError(
-                "invalid_transition", "仍有任务在生成中，等它们结束后再调整图序", status_code=409
-            )
+    # 改图序会先删行再重建：任何在跑任务的回写都会落空（资产白烧 + 行状态错乱），
+    # 所以要求既没有在跑的行、也没有活跃链。done 集合此前只看行状态，
+    # 走过一遍链式入队后 job_id 可能已与行脱钩，这里用链状态兜住。
+    if any(img.job_id and img.status not in _IMAGE_TERMINAL for img in previous):
+        raise ApiError(
+            "invalid_transition", "仍有任务在生成中，等它们结束后再调整图序", status_code=409
+        )
+    _reject_if_chain_active(db, user, row.id)
     # 已有图行先全删再重建；改图序意味着重新规划，旧生成结果作废
     db.execute(delete(models.StickerImage).where(models.StickerImage.set_id == row.id))
     for index, item in enumerate(payload.items):
@@ -337,9 +349,9 @@ def put_outline(
     return _set_out(db, row, _images(db, row.id), with_images=True)
 
 
-def _enqueue_image_job(
-    db, user, row: models.StickerSet, img: models.StickerImage, reference_asset_ids: list[str]
-) -> str:
+def _job_payload(
+    row: models.StickerSet, img: models.StickerImage, reference_asset_ids: list[str], chain: bool
+) -> dict:
     payload = {
         "prompt": img.frame_prompt,
         "aspectRatio": "3:4",
@@ -350,12 +362,21 @@ def _enqueue_image_job(
     }
     if reference_asset_ids:
         payload["referenceAssetIds"] = reference_asset_ids
+    if chain:
+        # 同集合的批量任务串行执行，避免并发撞供应商限流（429）
+        payload["stickerChainKey"] = f"sticker:{row.id}"
+    return payload
+
+
+def _enqueue_image_job(
+    db, user, row: models.StickerSet, img: models.StickerImage, reference_asset_ids: list[str]
+) -> str:
     return queue.enqueue(
         db,
         owner_user_id=user.id,
         queue="ai-image",
         kind="image-generation",
-        payload=payload,
+        payload=_job_payload(row, img, reference_asset_ids, chain=False),
     )
 
 
@@ -377,6 +398,9 @@ def generate_anchor(set_id: str, user: CurrentUser, db: DbSession) -> schemas.St
     # succeeded 也放行 = 「重抽锚点」：旧 asset 作废（finalize 后标记由执行器回写补盖）
     if anchor.status == "queued":
         raise ApiError("invalid_transition", "锚点任务已在排队中", status_code=409)
+    # 重抽锚点是无链任务；与在跑的链并发会双开生成（撞限流），
+    # 且其余行参考的是即将被换掉的旧锚点，出来必然不成套。
+    _reject_if_chain_active(db, user, row.id)
     job_id = _enqueue_image_job(db, user, row, anchor, [])
     anchor.status = "queued"
     anchor.job_id = job_id
@@ -400,26 +424,39 @@ def generate_rest(
         images = _images(db, row.id)
     if not images:
         raise ApiError("invalid_transition", "尚未设置图序", status_code=409)
-    # asset 复用（done 重排/补一张）：put_outline 已把可复用素材随行落库（状态仍 pending），
-    # 先就地转正再校验——锚点同样适用，否则 done 集合的锚点会被误判「未生成」。
+    # asset 复用（done 重排/补一张）：put_outline 已把可复用素材随行落库（状态仍 pending）。
+    # 先算出还要真生成哪些行，再决定是否放行——守卫放在写库之前，免得复用转正
+    # 已经改在内存里、却因为 409 半途返回。
+    reusable_ids = {
+        img.id for img in images if img.asset_id and img.status in ("pending", "failed")
+    }
+    pending_rest = [
+        img for img in images[1:] if img.status in ("pending", "failed") and img.id not in reusable_ids
+    ]
+    if pending_rest:
+        # 已有链在跑时再发链会出现两个 running 成员，供应商限流前就先挡住
+        _reject_if_chain_active(db, user, row.id)
     reused = 0
     for img in images:
-        if img.asset_id and img.status in ("pending", "failed"):
+        if img.id in reusable_ids:
             img.status = "succeeded"
             img.error_code = None
             reused += 1
     anchor = images[0]
     if anchor.status != "succeeded" or not anchor.asset_id:
         raise ApiError("invalid_transition", "需先生成锚点图", status_code=409)
-    enqueued = 0
-    for img in images[1:]:
-        if img.status not in ("pending", "failed"):
-            continue
-        job_id = _enqueue_image_job(db, user, row, img, [anchor.asset_id])
-        img.status = "queued"
-        img.job_id = job_id
-        img.error_code = None
-        enqueued += 1
+    batch = pending_rest
+    if batch:
+        # 串行链：同集合逐张执行，前一张落定后由 chain_next_if_done 接力投递下一单
+        payloads = [_job_payload(row, img, [anchor.asset_id], chain=True) for img in batch]
+        job_ids = queue.enqueue_chain(
+            db, owner_user_id=user.id, queue="ai-image", kind="image-generation", payloads=payloads
+        )
+        for img, job_id in zip(batch, job_ids):
+            img.status = "queued"
+            img.job_id = job_id
+            img.error_code = None
+    enqueued = len(batch)
     siblings = images
     if reused and enqueued == 0 and all(row_img.status == "succeeded" for row_img in siblings):
         # done 集合只补了 asset、零新任务：就地推进状态机，finalize 重新盖归档标记
@@ -458,6 +495,8 @@ def retry_image(
     # 非锚点且锚点已成功 → 带锚点做一致性参考；锚点自身重试不带参考图
     if target is not anchor and anchor.status == "succeeded" and anchor.asset_id:
         references = [anchor.asset_id]
+    # 单张重试也是真打供应商：与在跑的串行链并发同样会撞限流
+    _reject_if_chain_active(db, user, row.id)
     job_id = _enqueue_image_job(db, user, row, target, references)
     target.status = "queued"
     target.job_id = job_id
@@ -468,6 +507,45 @@ def retry_image(
     detail = _set_out(db, row, _images(db, row.id), with_images=True)
     detail.images = [_image_out(img) for img in _images(db, row.id)]
     return detail
+
+
+@router.post("/stickers/{set_id}/retry-failed", response_model=schemas.StickerSetOut)
+def retry_failed(set_id: str, user: CurrentUser, db: DbSession) -> schemas.StickerSetOut:
+    """批量重试全部失败张：走串行链，避免一次全打出去撞供应商限流。"""
+    row = _load_set(db, user, set_id)
+    images = _images(db, row.id)
+    if _sync_images_from_jobs(db, images):
+        db.refresh(row)
+        images = _images(db, row.id)
+    anchor = images[0] if images else None
+    # 按图序取失败张：锚点（sort_order 0）自然排在链头
+    batch = [img for img in images if img.status == "failed"]
+    if not batch:
+        raise ApiError("nothing_to_retry", "没有失败的图片可重试", status_code=409)
+    _reject_if_chain_active(db, user, row.id)
+    # 锚点没成功就没有可用的一致性参考：绝不把空/旧 asset 塞进 referenceAssetIds。
+    # （锚点自身同理——它带不了自己的参考图，只能走纯文生图路径。）
+    references = (
+        [anchor.asset_id]
+        if anchor is not None and anchor.status == "succeeded" and anchor.asset_id
+        else []
+    )
+    # 锚点必须留在链里、作为链头，而不是单独 enqueue 出去：单独投递会与链头同时
+    # 执行，等于同一集合并发两次供应商调用——正是串行链要消灭的 429 场景。
+    payloads = [
+        _job_payload(row, img, [] if img is anchor else references, chain=True) for img in batch
+    ]
+    job_ids = queue.enqueue_chain(
+        db, owner_user_id=user.id, queue="ai-image", kind="image-generation", payloads=payloads
+    )
+    for img, job_id in zip(batch, job_ids):
+        img.status = "queued"
+        img.job_id = job_id
+        img.error_code = None
+    if row.status != "done":
+        row.status = "generating"
+    db.commit()
+    return _set_out(db, row, _images(db, row.id), with_images=True)
 
 
 @router.post("/stickers/{set_id}/finalize", response_model=schemas.StickerSetOut)

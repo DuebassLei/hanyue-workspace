@@ -10,6 +10,7 @@ const props = defineProps({
 
 const emit = defineEmits([
   'retry-image',
+  'retry-failed',
   'generate-anchor',
   'generate-rest',
   'finalize',
@@ -47,6 +48,9 @@ const allDone = computed(
 const restCount = computed(() => Math.max(0, images.value.length - 1))
 const generating = computed(() =>
   images.value.some((item) => ['queued', 'generating'].includes(item.status)),
+)
+const failedCount = computed(
+  () => images.value.filter((item) => item.status === 'failed').length,
 )
 
 /** 锚点之外是否仍在跑：决定按钮区显示什么 */
@@ -132,7 +136,16 @@ function archiveUrl() {
           <!-- 失败：中文错误说明 + 单张重试 -->
           <div v-else-if="image.status === 'failed'" class="review-failed">
             <span class="review-failed-text">{{ errorText(image.errorCode) }}</span>
-            <n-button size="tiny" secondary :disabled="busy" @click="emit('retry-image', image)">重试这张</n-button>
+            <!-- 有任务在跑时后端会拒绝单张重试（同集合不许双开生成），按钮先锁住 -->
+            <n-button
+              size="tiny"
+              secondary
+              :disabled="busy || generating"
+              :title="generating ? '等当前生成任务结束再重试' : ''"
+              @click="emit('retry-image', image)"
+            >
+              重试这张
+            </n-button>
           </div>
           <!-- pending：锚点没出图时其余格子是锁着的 -->
           <div v-else class="review-pending">
@@ -150,6 +163,10 @@ function archiveUrl() {
       </figure>
     </div>
 
+    <p v-if="detail.anchorDesc" class="review-anchor-hint" :title="detail.anchorDesc">
+      一致性锚定：{{ detail.anchorDesc }}
+    </p>
+
     <div class="row review-foot">
       <span class="field-hint">进度 {{ detail.succeeded }}/{{ detail.total }}{{ generating ? ' · 正在生成…' : '' }}</span>
       <div class="spacer" />
@@ -164,15 +181,24 @@ function archiveUrl() {
         >
           {{ anchor?.status === 'failed' ? '重抽锚点' : '先生成锚点图' }}
         </n-button>
+        <n-button v-if="failedCount > 1" secondary :disabled="busy" @click="emit('retry-failed')">
+          重试全部失败（{{ failedCount }}）
+        </n-button>
       </template>
       <template v-else-if="restPending">
-        <n-button quaternary :disabled="busy" @click="emit('generate-anchor')">重抽锚点</n-button>
+        <!-- 有链在跑时重抽锚点会被后端拒绝（同集合不许双开生成），按钮直接锁住 -->
+        <n-button quaternary :disabled="busy || generating" :title="generating ? '等当前生成任务结束再重抽锚点' : ''" @click="emit('generate-anchor')">
+          重抽锚点
+        </n-button>
         <n-button
           type="primary"
           :disabled="busy || images.slice(1).some((item) => ['queued', 'generating'].includes(item.status))"
           @click="emit('generate-rest')"
         >
           满意，生成其余 {{ restCount }} 张
+        </n-button>
+        <n-button v-if="failedCount > 1" secondary :disabled="busy || generating" @click="emit('retry-failed')">
+          重试全部失败（{{ failedCount }}）
         </n-button>
       </template>
       <template v-else-if="allDone">
@@ -220,6 +246,14 @@ function archiveUrl() {
 </template>
 
 <style scoped>
+.review-anchor-hint {
+  margin: 0;
+  font-size: var(--font-xs);
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .review-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

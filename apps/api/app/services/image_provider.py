@@ -28,6 +28,9 @@ SIZE_MAP = {
 }
 MAX_PIXELS = 16_000_000
 MAX_BYTES = 20 * 1024 * 1024
+# 这些状态码配参考图出现，说明供应商根本没实现 /images/edits
+# 404 端点不存在 / 405 方法不支持 / 501 未实现；400/415 视网关而定，也算
+EDIT_UNSUPPORTED_STATUS = frozenset({400, 404, 405, 415, 501})
 
 
 class ImageProviderUnavailable(RuntimeError):
@@ -258,6 +261,13 @@ def generate_images(
         if response.status_code in (401, 403):
             raise ImageProviderUnavailable("unauthorized", "图像供应商拒绝了凭据")
         if response.status_code >= 400:
+            # 带参考图却收到「端点不存在/方法不支持」一类状态码：供应商不支持
+            # /images/edits。用独立 errorCode 表达，调用方不必去猜 message 文案。
+            if reference_images and response.status_code in EDIT_UNSUPPORTED_STATUS:
+                raise ImageProviderUnavailable(
+                    "edits_unsupported",
+                    f"供应商不支持参考图编辑（HTTP {response.status_code}）",
+                )
             hint = "（供应商可能不支持参考图编辑 /images/edits）" if reference_images else ""
             last_error = ImageProviderUnavailable(
                 "provider_error", f"图像供应商返回 HTTP {response.status_code}{hint}"
@@ -291,6 +301,19 @@ INTERROGATE_SYSTEM = (
     "Output ONLY the prompt text — no explanation, no prefix, no extra formatting."
 )
 
+# 画风提取：只输出可迁移的「画法」，刻意排除主体/场景/文字内容——
+# 给贴图批量生成做一致性锚点时，主体由各张自己的画面描述负责。
+STYLE_SIGNATURE_SYSTEM = (
+    "You extract the STYLE SIGNATURE of an image so another generator can match its look. "
+    "Describe ONLY transferable visual style: rendering technique (photo/film stock/lens cues "
+    "for photography; medium and line treatment for illustration), color palette with hue names, "
+    "lighting character, contrast and grain/texture, composition tendencies (framing, perspective, "
+    "depth of field), overall mood. "
+    "NEVER mention the specific subject, people, place, objects, readable text, or brand names. "
+    "Write one dense comma-separated phrase in English, 25-60 words, lowercase, no sentences, "
+    "no prefixes, no quotes — pure style tokens only."
+)
+
 INTERROGATE_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
 
 
@@ -301,11 +324,14 @@ def interrogate_image(
     image_bytes: bytes,
     mime_type: str,
     model_id: str | None = None,
+    system_prompt: str | None = None,
+    user_text: str = "请分析这张图片并生成一段描述性提示词。",
 ) -> str:
     """用视觉语言模型反推图片提示词；返回提示词字符串。
 
     优先使用 model_id 指定的文本模型，否则取用户第一个可用文本连接。
     走 OpenAI 兼容 /chat/completions，携带 image_url content block（base64）。
+    system_prompt/user_text 可换成画风提取等专用指令（见 STYLE_SIGNATURE_SYSTEM）。
     """
     from .ai_gateway import resolve_connection
 
@@ -348,7 +374,7 @@ def interrogate_image(
         "model": model_code,
         "stream": False,
         "messages": [
-            {"role": "system", "content": INTERROGATE_SYSTEM},
+            {"role": "system", "content": system_prompt or INTERROGATE_SYSTEM},
             {
                 "role": "user",
                 "content": [
@@ -358,7 +384,7 @@ def interrogate_image(
                     },
                     {
                         "type": "text",
-                        "text": "请分析这张图片并生成一段描述性提示词。",
+                        "text": user_text,
                     },
                 ],
             },
