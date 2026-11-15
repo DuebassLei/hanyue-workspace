@@ -7,6 +7,12 @@
    host 换成该 IP、Host 头保留原域名、`sni_hostname` 扩展保证 TLS 仍按原域名校验证书。
    这样「校验的 IP == 实际连接的 IP」，消除 DNS 二次解析造成的 rebinding/TOCTOU。
 
+**可信主机例外**：公司内网自建网关（如内部 LLM 代理）的域名必然解析到私网地址，
+会被第 2 步误杀。`SSRF_TRUSTED_HOSTS`（逗号分隔域名）显式登记的域名跳过内网 IP
+拦截——但 HTTPS、端口白名单、BLOCKED_HOSTNAMES/SUFFIXES 字面量检查与 IP 固定
+全部照旧，例外只针对「解析结果是内网地址」这一条。登记什么域名是运维的显式决定，
+随机用户输入永远不会出现在这份名单里。
+
 所有出站请求都必须走 `safe_request` 或 `pin_url`；禁止自己 new 一个 httpx client 直连外部域名。
 重定向不自动跟随，每一跳重新解析并重新 pin。
 
@@ -45,6 +51,9 @@ BLOCKED_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain", ".home.
 # 非标准端口常被用于内网端口探测，只放开 HTTPS 常规端口
 ALLOWED_PORTS = {None, 443, 8443}
 
+# 显式登记的可信主机（逗号分隔域名）：解析到内网地址也放行，见模块 docstring
+_TRUSTED_HOSTS_ENV = "SSRF_TRUSTED_HOSTS"
+
 # 代理相关环境变量：命中任意一个就认为出站流量经代理转发
 _PROXY_ENV_VARS = (
     "HTTPS_PROXY",
@@ -68,6 +77,25 @@ def proxy_in_effect() -> bool:
     而 pin 与否只影响 TLS 校验路径，判断错了顶多回退到直连重试。
     """
     return any((os.environ.get(name) or "").strip() for name in _PROXY_ENV_VARS)
+
+
+def trusted_hosts() -> set[str]:
+    """`SSRF_TRUSTED_HOSTS` 解析出的小写域名集合（未配置时为空）。"""
+    raw = (os.environ.get(_TRUSTED_HOSTS_ENV) or "").strip()
+    if not raw:
+        return set()
+    hosts: set[str] = set()
+    for item in raw.split(","):
+        name = item.strip().lower().strip("[]").rstrip(".")
+        # 通配符和空项不属于可信主机；宁可漏放行，不可误放行
+        if name and "*" not in name:
+            hosts.add(name)
+    return hosts
+
+
+def _host_is_trusted(host: str) -> bool:
+    name = host.strip().lower().strip("[]").rstrip(".")
+    return bool(name) and name in trusted_hosts()
 
 
 def _ip_is_blocked(ip: ipaddress._BaseAddress) -> bool:
@@ -136,8 +164,14 @@ def _resolve_public_ips(url: str) -> tuple[str, object, list[ipaddress._BaseAddr
     normalized = validate_base_url(url)
     if not normalized:
         raise UnsafeUrl("未配置 Base URL")
+    normalized = validate_base_url(url)
+    if not normalized:
+        raise UnsafeUrl("未配置 Base URL")
     parsed = urlparse(normalized)
     host = parsed.hostname or ""
+    # 白名单匹配的是用户配置的域名本身。不能信任 DNS 返回值：DNS 被劫持时，
+    # 可信域名也可能被解析成 169.254.169.254 之类的元数据地址，那仍然要拦。
+    trusted = _host_is_trusted(host)
     try:
         infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError, OSError) as exc:
@@ -153,7 +187,12 @@ def _resolve_public_ips(url: str) -> tuple[str, object, list[ipaddress._BaseAddr
             ip = ipaddress.ip_address(address)
         except ValueError as exc:
             raise UnsafeUrl(f"域名解析结果异常：{address}") from exc
-        if _ip_is_blocked(ip):
+        # 可信主机例外只豁免「内网/保留网段」这一条；云元数据与 unspecified 地址
+        # 任何情况下都拦截（DNS 被劫持时可信域名也可能被指到这些地址）。
+        always_blocked = ip.is_unspecified or str(ip) in BLOCKED_HOSTNAMES or (
+            ip.version == 6 and ip.ipv4_mapped is not None and str(ip.ipv4_mapped) in BLOCKED_HOSTNAMES
+        )
+        if always_blocked or (_ip_is_blocked(ip) and not trusted):
             raise UnsafeUrl(f"域名解析到禁止访问的地址：{address}")
         ips.append(ip)
     if not ips:

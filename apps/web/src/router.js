@@ -11,6 +11,7 @@ const routes = [
   { path: '/stickers', name: 'stickers', component: () => import('./views/StickersView.vue'), meta: { title: '贴图创作', icon: '❖' } },
   { path: '/storyboards', name: 'storyboards', component: () => import('./views/StoryboardsView.vue'), meta: { title: '漫画分镜', icon: '▧' } },
   { path: '/novels', name: 'novels', component: () => import('./views/NovelsView.vue'), meta: { title: '小说创作', icon: '✎' } },
+  { path: '/characters', name: 'characters', component: () => import('./views/CharactersView.vue'), meta: { title: '角色库', icon: '☻' } },
   { path: '/assets', name: 'assets', component: () => import('./views/AssetsView.vue'), meta: { title: '素材图库', icon: '▣' } },
   { path: '/prompts', name: 'prompts', component: () => import('./views/PromptsView.vue'), meta: { title: '提示词库', icon: '✧' } },
   { path: '/handdraw', name: 'handdraw', component: () => import('./views/HanddrawView.vue'), meta: { title: '提示词库', icon: '✧' } },

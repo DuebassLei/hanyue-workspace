@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 
@@ -34,6 +35,7 @@ TASK_LABELS = {
     "summarize": "摘要",
     "platform_variant": "平台版本",
     "image_prompt": "配图提示词",
+    "novel": "小说文本处理",
 }
 
 SYSTEM_RULES = (
@@ -43,6 +45,28 @@ SYSTEM_RULES = (
 # 提示词模板版本（设计 §6.5）：每次修改 SYSTEM_RULES / build_prompt 必须同步升级，
 # 生成记录会带上版本号，便于复盘时区分不同模板下的产出。
 PROMPT_TEMPLATE_VERSION = "2026-11-06.v1"
+
+logger = logging.getLogger(__name__)
+
+# 默认模型在「配置层」失效的原因。运行时 400（订阅过期等）由候选链降级覆盖，
+# 这里只处理模型/连接被删、停用、越权、能力变更、密钥清空。
+DEFAULT_IGNORE_MESSAGES = {
+    "not_found": "默认模型已被删除",
+    "foreign": "默认模型不属于当前用户",
+    "connection_missing": "默认模型所属连接已被删除",
+    "disabled": "默认模型已被停用",
+    "not_text": "默认模型已不具备文本能力",
+    "no_credential": "默认模型连接缺少 API Key",
+}
+
+
+class InvalidModelSelection(Exception):
+    """显式传入的 modelId 非法。与「默认模型失效静默忽略」刻意不同：必须 400 拒绝。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class ProviderHTTPError(httpx.HTTPStatusError):
@@ -270,17 +294,73 @@ async def _stream_once(
                 await response.aclose()
 
 
-def resolve_connection(db, owner_user_id: str):
-    """取该用户第一个可用连接与模型；无连接时返回 (None, "unconfigured")。"""
-    candidates = resolve_connections(db, owner_user_id, limit=1)
-    return candidates[0] if candidates else (None, "unconfigured")
+def _default_model_id(db, owner_user_id: str) -> str | None:
+    """读用户级默认文本模型偏好；无记录或未设置返回 None。"""
+    value = db.scalar(
+        select(models.UserPreference.default_text_model_id).where(
+            models.UserPreference.owner_user_id == owner_user_id
+        )
+    )
+    return str(value or "").strip() or None
 
 
-def resolve_connections(db, owner_user_id: str, limit: int = 3) -> list[tuple]:
-    """按创建顺序返回候选 (connection, modelCode)，供备用模型降级使用（设计 §6.4）。
+def _validate_entry(db, owner_user_id: str, model_id: str):
+    """校验一个 catalog 条目能不能用于文本生成。
 
-    同一个连接下登记的多个 enabled 模型也各自成为一个候选，降级链不再只覆盖连接级。
-    只挑文本能力模型：图像/视频模型混进文本降级链会被供应商直接 400 拒绝。
+    返回 (connection, entry, reason)；reason 为 None 表示有效。
+    不解密密钥：只看有没有登记凭据，避免把解密异常带进候选链解析。
+    """
+    entry = db.get(models.ModelCatalogEntry, model_id)
+    if entry is None:
+        return None, None, "not_found"
+    connection = db.get(models.ModelConnection, entry.connection_id)
+    if connection is None:
+        return None, entry, "connection_missing"
+    if connection.owner_user_id != owner_user_id:
+        return None, entry, "foreign"
+    if not entry.enabled:
+        return connection, entry, "disabled"
+    if not _is_text_model(entry):
+        return connection, entry, "not_text"
+    if not str(connection.credential_ciphertext or "").strip():
+        return connection, entry, "no_credential"
+    return connection, entry, None
+
+
+def _ignored(reason: str, model_id: str) -> dict:
+    return {
+        "reason": reason,
+        "message": DEFAULT_IGNORE_MESSAGES.get(reason, "默认模型当前不可用"),
+        "modelId": model_id,
+    }
+
+
+def describe_default_model(db, owner_user_id: str) -> dict:
+    """给设置页 / 下拉「自动」项用的默认模型展示信息。
+
+    失效时只返回 ignored 原因，**不清除偏好**：订阅续上、模型重新启用后自动恢复。
+    """
+    model_id = _default_model_id(db, owner_user_id)
+    if not model_id:
+        return {"id": None, "label": None, "ignored": None}
+    connection, entry, reason = _validate_entry(db, owner_user_id, model_id)
+    label = None
+    if entry is not None:
+        name = (connection.display_name if connection else None) or "已删除的连接"
+        label = f"{name} · {entry.model_code}"
+    if not reason:
+        return {"id": model_id, "label": label, "ignored": None}
+    detail = _ignored(reason, model_id)
+    logger.warning("[model] 默认模型 %s 配置失效，本次忽略：%s", model_id, reason)
+    return {"id": model_id, "label": label, "ignored": detail}
+
+
+def _text_candidates(db, owner_user_id: str) -> list[tuple]:
+    """按创建顺序收集全部文本候选 (connection, modelCode, catalogId)。
+
+    同一个连接下登记的多个 enabled 模型各自成为一个候选；只挑文本能力模型，
+    图像/视频模型混进文本降级链会被供应商直接 400 拒绝。
+    这里刻意先收全再截断：默认模型可能排在后面，提前 limit 会把它丢掉。
     """
     rows = db.scalars(
         select(models.ModelConnection)
@@ -300,15 +380,106 @@ def resolve_connections(db, owner_user_id: str, limit: int = 3) -> list[tuple]:
         for entry in entries:
             if not _is_text_model(entry):
                 continue
-            candidates.append((connection, entry.model_code))
-            if len(candidates) >= limit:
-                return candidates
+            candidates.append((connection, entry.model_code, entry.id))
         if not entries:
             # 连接尚未登记任何模型：保留为候选，供状态页提示补齐模型/密钥
-            candidates.append((connection, "unconfigured"))
-            if len(candidates) >= limit:
-                return candidates
+            candidates.append((connection, "unconfigured", None))
     return candidates
+
+
+def resolve_selection(
+    db,
+    owner_user_id: str,
+    model_id: str | None = None,
+    *,
+    apply_default: bool = True,
+    limit: int = 3,
+) -> dict:
+    """统一模型解析：显式选中钉死，不选择时把默认模型排候选链首位仍可降级。
+
+    返回 {candidates, entryIds, pinned, defaultModelId, defaultModelIgnored,
+    requestedModelId}；entryIds 与 candidates 下标对齐，供生成记录落「实际模型」。
+
+    apply_default=False 用于小说队列任务：执行时严格按入队快照，不受之后
+    修改默认模型的影响。
+    """
+    requested = str(model_id or "").strip() or None
+    if requested:
+        connection, entry, reason = _validate_entry(db, owner_user_id, requested)
+        if reason:
+            raise InvalidModelSelection(
+                "model_not_found",
+                f"指定的模型不可用（{DEFAULT_IGNORE_MESSAGES.get(reason, reason)}）；"
+                "请重新选择或清空 modelId 自动使用默认文本模型",
+            )
+        return {
+            "candidates": [(connection, entry.model_code)],
+            "entryIds": [entry.id],
+            "pinned": True,
+            "defaultModelId": None,
+            "defaultModelIgnored": None,
+            "requestedModelId": requested,
+        }
+
+    base = _text_candidates(db, owner_user_id)
+    default_id = _default_model_id(db, owner_user_id) if apply_default else None
+    ignored = None
+    if default_id:
+        connection, entry, reason = _validate_entry(db, owner_user_id, default_id)
+        if reason:
+            ignored = _ignored(reason, default_id)
+            logger.warning(
+                "[model] 默认模型 %s 配置失效，本次按原候选链生成：%s", default_id, reason
+            )
+        else:
+            head = (connection, entry.model_code, entry.id)
+            base = [head, *[row for row in base if row[2] != entry.id]]
+    selected = base[: max(limit, 1)]
+    return {
+        "candidates": [(conn, code) for conn, code, _ in selected],
+        "entryIds": [entry_id for _, _, entry_id in selected],
+        "pinned": False,
+        "defaultModelId": default_id,
+        "defaultModelIgnored": ignored,
+        "requestedModelId": None,
+    }
+
+
+def resolve_connection(db, owner_user_id: str):
+    """取该用户第一个可用连接与模型；无连接时返回 (None, "unconfigured")。"""
+    candidates = resolve_connections(db, owner_user_id, limit=1)
+    return candidates[0] if candidates else (None, "unconfigured")
+
+
+def resolve_connections(
+    db, owner_user_id: str, limit: int = 3, *, apply_default: bool = True
+) -> list[tuple]:
+    """按候选顺序返回 (connection, modelCode)，供备用模型降级使用（设计 §6.4）。
+
+    不传 modelId 的所有文本入口都会经过这里，因此用户级默认模型自动生效，
+    无需逐个页面加 UI。
+    """
+    return resolve_selection(
+        db, owner_user_id, apply_default=apply_default, limit=limit
+    )["candidates"]
+
+
+def snapshot_model_id(db, owner_user_id: str, explicit: str | None = None) -> str | None:
+    """入队时把「显式选择，或当时有效的默认」快照成 catalog id。
+
+    失效的默认不写进快照（执行时按原候选链降级），避免任务因为一条失效偏好卡死。
+    """
+    explicit = str(explicit or "").strip() or None
+    if explicit:
+        _, _, reason = _validate_entry(db, owner_user_id, explicit)
+        if reason:
+            raise InvalidModelSelection(
+                "model_not_found",
+                f"指定的模型不可用（{DEFAULT_IGNORE_MESSAGES.get(reason, reason)}）",
+            )
+        return explicit
+    described = describe_default_model(db, owner_user_id)
+    return described["id"] if not described["ignored"] else None
 
 
 def _is_text_model(entry: models.ModelCatalogEntry) -> bool:
@@ -317,6 +488,11 @@ def _is_text_model(entry: models.ModelCatalogEntry) -> bool:
     if not capabilities:
         return True
     return any(str(cap) in TEXT_CAPABILITIES for cap in capabilities)
+
+
+def is_text_model(entry: models.ModelCatalogEntry) -> bool:
+    """公开给模型目录/选择器判断文本能力，口径与候选链过滤完全一致。"""
+    return _is_text_model(entry)
 
 
 async def _collect(

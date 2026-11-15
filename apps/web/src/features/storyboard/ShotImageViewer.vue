@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NButton, NModal } from 'naive-ui'
-import { copyText, shotFramePrompt, shotPromptFor, shotStagePrompt } from './shotImages'
+import { copyText, downloadImage, shotFramePrompt, shotPromptFor, shotStagePrompt } from './shotImages'
 
 const props = defineProps({
   shot: { type: Object, default: null },
@@ -24,7 +24,26 @@ const inlineUrl = computed(() => {
   if (!url) return ''
   return `${url}${url.includes('?') ? '&' : '?'}inline=1`
 })
-const downloadName = computed(() => `镜头-${shotNumber.value}-${current.value?.label || '画面'}`)
+// 后端 raw 链不带扩展名，统一存成 .png（浏览器对 blob 下载的文件名以 download 为准）
+const downloadName = computed(() => `镜头-${shotNumber.value}-${(current.value?.label || '画面').replace(/\s+/g, '')}.png`)
+const downloading = ref(false)
+const downloadError = ref('')
+let downloadTimer
+
+async function download() {
+  if (!current.value || downloading.value) return
+  downloading.value = true
+  downloadError.value = ''
+  try {
+    await downloadImage(current.value.url, downloadName.value)
+  } catch (err) {
+    downloadError.value = err?.message || '下载失败，请改用「打开原图」后手动保存'
+    clearTimeout(downloadTimer)
+    downloadTimer = setTimeout(() => { downloadError.value = '' }, 4000)
+  } finally {
+    downloading.value = false
+  }
+}
 const copyState = ref('')
 let copyTimer
 
@@ -58,6 +77,7 @@ onMounted(() => window.addEventListener('keydown', onKeydown))
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   clearTimeout(copyTimer)
+  clearTimeout(downloadTimer)
 })
 </script>
 
@@ -93,9 +113,10 @@ onBeforeUnmount(() => {
           <span v-if="images.length > 1" class="viewer-tip">← → 切换图片</span>
           <div v-if="current" class="viewer-links">
             <a class="viewer-link" :href="inlineUrl" target="_blank" rel="noopener" title="在新标签显示原图（不会下载）">打开原图 ↗</a>
-            <a class="viewer-link" :href="current.url" :download="downloadName" title="下载当前这一张图片">下载图片 ↓</a>
+            <button class="viewer-link" type="button" :disabled="downloading" :title="`保存为 ${downloadName}`" @click="download">{{ downloading ? '下载中…' : '下载图片 ↓' }}</button>
           </div>
         </div>
+        <p v-if="downloadError" class="copy-error">{{ downloadError }}</p>
       </div>
 
       <aside class="viewer-side">
@@ -143,6 +164,8 @@ onBeforeUnmount(() => {
 .viewer-links { display:flex; gap:8px; }
 .viewer-link { display:inline-flex; align-items:center; padding:5px 10px; border:1px solid #d5cfc5; background:#fffefa; color:#315e68; font-size:12px; white-space:nowrap; text-decoration:none; }
 .viewer-link:hover { border-color:#315e68; background:#f1f6f5; }
+button.viewer-link { font-family:inherit; cursor:pointer; }
+button.viewer-link:disabled { opacity:.6; cursor:default; }
 .viewer-side { min-width:0; border-left:1px solid #e1ddd5; padding-left:16px; display:flex; flex-direction:column; gap:16px; max-height:min(72vh,680px); overflow:auto; }
 .prompt-block { min-width:0; }
 .prompt-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }

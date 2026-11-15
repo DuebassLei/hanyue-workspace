@@ -137,32 +137,37 @@ def _normalize(raw) -> list[dict]:
 
 
 async def break_down(db, user_id: str, source_text: str, model_id: str | None) -> list[dict]:
-    candidates = []
-    if model_id:
-        entry = db.get(models.ModelCatalogEntry, model_id)
-        conn = db.get(models.ModelConnection, entry.connection_id) if entry else None
-        if not entry or not conn or conn.owner_user_id != user_id:
-            raise BreakdownError("model_not_found", "模型不存在")
-        candidates = [(conn, entry.model_code)]
-    else:
-        candidates = ai_gateway.resolve_connections(db, user_id)
+    """拆分正文为镜头草稿。
+
+    模型解析走统一网关：显式 modelId 钉死单候选（失败明确报错），
+    不传时用「默认模型优先 + 自动降级」的完整候选链。
+    """
+    try:
+        selection = ai_gateway.resolve_selection(db, user_id, model_id)
+    except ai_gateway.InvalidModelSelection as exc:
+        raise BreakdownError(exc.code, exc.message) from exc
+    candidates = selection["candidates"]
     if not candidates:
         raise BreakdownError("provider_unavailable", "尚未配置可用的文本模型")
     collected: list[str] = []
     error = ""
     for conn, model_code in candidates:
-        collected = []
+        parts: list[str] = []
+        pending_error = ""
         async for event in ai_gateway.stream_text(
             db, connection=conn, model_code=model_code, task_type="outline",
             prompt=source_text.strip(), system_prompt=BREAKDOWN_SYSTEM,
         ):
             if event.get("event") == "generation.delta":
-                collected.append((event.get("data") or {}).get("text") or "")
-            elif event.get("event") == "generation.error" and not collected:
-                error = (event.get("data") or {}).get("message") or "模型拆分失败"
-                break
-        if collected:
+                parts.append((event.get("data") or {}).get("text") or "")
+            elif event.get("event") == "generation.error":
+                pending_error = (event.get("data") or {}).get("message") or "模型拆分失败"
+        # 出错的候选整段作废，避免把两个模型的半截 JSON 拼在一起
+        if parts and not pending_error:
+            collected = parts
             break
+        if pending_error:
+            error = pending_error
     if not collected:
         raise BreakdownError("provider_unavailable", error or "模型没有返回拆分结果")
     raw = _loads_breakdown("".join(collected))

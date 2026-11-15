@@ -6,13 +6,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from sqlalchemy import select
 
 from .. import models
-from .ai_gateway import resolve_connection
+from . import ai_gateway
 from .job_runner import JobFailure
+
+# 小说链路既有正文改写，也有必须输出 JSON 的抽取/事实任务。
+# ai_gateway 默认的 SYSTEM_RULES 是「中文自媒体创作助手，只输出正文」，
+# 与 JSON 任务冲突，因此这里单独指定系统提示词。
+NOVEL_SYSTEM_RULES = (
+    "你是中文小说文本处理助手。严格遵循用户的输出格式要求：要求正文时只输出正文，"
+    "要求 JSON 时只输出一个 JSON 对象，不要标题、不要解释、不要 Markdown 代码块。"
+)
+
+logger = logging.getLogger(__name__)
 
 FACT_KEYS = ("characterChanges", "itemHoldings", "events", "openHooks")
 ALIAS_KINDS = {"person", "place", "org"}
@@ -20,9 +31,64 @@ CHARACTER_STATES = {"present", "dead", "absent"}
 _JSON_DECODER = json.JSONDecoder()
 
 
-def get_default_connection(db, user_id: str):
-    """当前用户的默认模型连接与 model_code。无可用连接时返回 (None, "unconfigured")。"""
-    return resolve_connection(db, user_id)
+def resolve_novel_selection(
+    db,
+    user_id: str,
+    *,
+    model_id: str | None = None,
+    apply_default: bool = True,
+    explicit: bool = False,
+) -> dict:
+    """小说链路的模型解析（与创作空间共用 ai_gateway.resolve_selection）。
+
+    - 显式选择 / 快照失效：explicit=True 时抛 InvalidModelSelection，由调用方转成明确失败；
+      默认模型快照失效时忽略并回退到原候选链（不清除偏好），同时回报
+      defaultModelIgnored，符合「失效忽略 + 明确提示」约定。
+    - apply_default=False：队列任务执行时严格按入队快照，不读当前默认。
+    """
+    try:
+        return ai_gateway.resolve_selection(
+            db, user_id, model_id, apply_default=apply_default
+        )
+    except ai_gateway.InvalidModelSelection as exc:
+        if explicit:
+            raise
+        fallback = ai_gateway.resolve_selection(db, user_id, apply_default=False)
+        ignored = {
+            "reason": "snapshot_invalid",
+            "message": exc.message,
+            "modelId": model_id,
+        }
+        logger.warning(
+            "[novel] 入队模型快照 %s 已失效，按原候选链生成：%s", model_id, exc.message
+        )
+        return {
+            **fallback,
+            "defaultModelIgnored": fallback["defaultModelIgnored"] or ignored,
+        }
+
+
+def get_text_candidates(
+    db,
+    user_id: str,
+    *,
+    model_id: str | None = None,
+    apply_default: bool = True,
+    explicit: bool = False,
+) -> list[tuple]:
+    """与创作空间一致的文本模型候选链，剔除 `unconfigured` 占位。
+
+    网关已过滤只有图像/视频能力的模型；这里再去掉「连接存在但未登记模型」
+    的占位，避免把字面量 "unconfigured" 当模型代号发给供应商（必然 400）。
+    """
+    selection = resolve_novel_selection(
+        db, user_id, model_id=model_id, apply_default=apply_default, explicit=explicit
+    )
+    return [
+        (connection, model_code)
+        for connection, model_code in selection["candidates"]
+        if connection is not None and model_code and model_code != "unconfigured"
+    ]
 
 
 def _rule(rules: dict | None, key: str) -> str:

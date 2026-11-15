@@ -81,6 +81,7 @@ hanyue-workspace/
 | `ai_images.py` | `/api/v1/ai/image-generations` | AI 生图任务 |
 | `assets.py` | `/api/v1/assets` | 素材上传、7 种图像处理、分格 |
 | `cards.py` | `/api/v1/cards` | 图文卡片生成（8套模板）、PNG/ZIP 导出 |
+| `characters.py` | `/api/v1/characters` | 角色库：用户级角色卡 CRUD、多参考图、正文抽取草稿（不落库） |
 | `prompts.py` | `/api/v1/prompts` | 提示词库 CRUD（生图提示词模板，按用户隔离） |
 | `handdraw.py` | `/api/v1/handdraw` | 手绘风格提示词库（内置模板 + 用户收藏） |
 | `publishing.py` | `/api/v1/publishing` | 发布队列、平台账号、OAuth 接入 |
@@ -128,6 +129,7 @@ hanyue-workspace/
 | `CardsView.vue` | `/cards` | 图文卡片生成与导出 |
 | `PromptsView.vue` | `/prompts` | 提示词库维护（生图提示词模板） |
 | `HanddrawView.vue` | `/handdraw` | 手绘风格提示词库 |
+| `CharactersView.vue` | `/characters` | 角色库：跨项目复用的角色卡、多参考图与正文抽取草稿 |
 | `AssetsView.vue` | `/assets` | 素材管理、AI 生图任务列表 |
 | `PublishingView.vue` | `/publishing` | 发布中心（含公众号草稿箱入口） |
 | `SettingsView.vue` | `/settings` | 模型连接、平台接入、Agent 策略、偏好 |
@@ -262,7 +264,7 @@ cd ../web && npm run build                             # 前端构建
 
 ## 当前能力边界（快速参考）
 
-**已实现**：稿件/日历/复盘、多模型连接与流式生成、AI 生图、7 种图像处理与条漫分格、图文卡片（8套模板）、**热点选题（7 路采集 + 同事件合并 + 100 分可解释评分 + 一键成稿）**、Agent 受控执行、发布队列与幂等提交、公众号草稿箱（AppSecret 绑定 + 真实三步推送）、真 keyset 分页、SSRF 防护、生产安全门禁。
+**已实现**：稿件/日历/复盘、多模型连接与流式生成、AI 生图、7 种图像处理与条漫分格、图文卡片（8套模板）、**热点选题（7 路采集 + 同事件合并 + 100 分可解释评分 + 一键成稿）**、漫画分镜与**角色库**（用户级角色卡跨项目复用、按镜头景别选参考图、生成时快照进 job payload、正文 LLM 抽取草稿需人工确认）、Agent 受控执行、发布队列与幂等提交、公众号草稿箱（AppSecret 绑定 + 真实三步推送）、真 keyset 分页、SSRF 防护、生产安全门禁。
 
 **明确未实现**：各平台具体发布适配器字段映射、公众号群发、公众号指标采集、OCR/抠图、Agent SDK/MCP 独立 Worker、TanStack Query/Tiptap。
 

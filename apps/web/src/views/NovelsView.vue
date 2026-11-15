@@ -10,6 +10,7 @@ import NovelEditor from '../features/novel/NovelEditor.vue'
 import NovelCompare from '../features/novel/NovelCompare.vue'
 import NovelBible from '../features/novel/NovelBible.vue'
 import NovelContinue from '../features/novel/NovelContinue.vue'
+import ModelSelector from '../components/ModelSelector.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -22,7 +23,33 @@ const splitting = ref(false)
 const accepting = ref(false)
 const actionError = ref('')
 
+// 任务错误 → 人话。映射不到的原样显示 errorMessage，方便按 errorCode 查供应商日志。
+const JOB_ERROR_TEXT = {
+  provider_unavailable: '文本模型未配置或订阅已失效，请到「设置 → 模型连接」检查并测试通过后重试',
+}
+
+const failedJobMessage = computed(() => {
+  const failed = store.job.value?.status === 'failed' ? store.job.value : null
+  if (!failed) return ''
+  const hint = JOB_ERROR_TEXT[failed.errorCode]
+  const detail = String(failed.errorMessage || '').trim()
+  if (!hint) return detail || '任务失败'
+  if (!detail || detail === hint) return hint
+  // 固定指引之外附上供应商真实原因（订阅过期、模型不存在、400 响应体），
+  // 否则页面只会笼统说「模型未配置」，无从判断是哪个连接出了问题。
+  const brief = detail.length > 220 ? `${detail.slice(0, 220)}…` : detail
+  return `${hint}（${brief}）`
+})
 const pageError = computed(() => actionError.value || listError.value || store.error.value)
+// 任务结果如实回报实际模型；降级 / 默认失效都要看得见
+const jobModelInfo = computed(() => {
+  const result = store.job.value?.result || {}
+  if (!result.modelCode) return ''
+  const parts = [`本次生成模型：${result.modelCode}`]
+  if (result.fallbackUsed) parts.push('（已自动降级）')
+  if (result.defaultModelIgnored) parts.push(`默认模型失效：${result.defaultModelIgnored.message}`)
+  return parts.join('，')
+})
 const sourcePreview = computed(() => String(store.project.value?.sourceText || '').slice(0, 200))
 const impactChapters = computed(() => store.selectedChapter.value?.impact?.chapters || [])
 
@@ -125,10 +152,11 @@ onMounted(loadProjects)
     </header>
 
     <NAlert v-if="pageError" type="error" closable @close="clearError">{{ pageError }}</NAlert>
-    <NAlert v-if="store.job.value?.status === 'failed'" type="error">
-      {{ store.job.value.errorMessage || '任务失败' }}。可以再点一次。
+    <NAlert v-if="failedJobMessage" type="error">
+      {{ failedJobMessage }}<template v-if="store.job.value?.errorCode !== 'provider_unavailable'">。可以再点一次。</template>
     </NAlert>
     <p v-if="store.jobBusy.value" class="job-note">任务进行中，章节仍可查看。</p>
+    <p v-if="jobModelInfo" class="job-note">{{ jobModelInfo }}</p>
 
     <div v-if="listLoading" class="list-loading">正在读取小说…</div>
 
@@ -146,6 +174,9 @@ onMounted(loadProjects)
       <div v-if="store.project.value" class="novel-main">
         <div class="toolbar">
           <strong class="project-title">{{ store.project.value.title }}</strong>
+          <div class="novel-model-slot">
+            <ModelSelector :disabled="store.jobBusy.value" label="模型" />
+          </div>
           <NButton size="small" :loading="splitting" :disabled="store.jobBusy.value" @click="split">切章</NButton>
           <NButton size="small" :disabled="store.jobBusy.value" @click="run(() => store.extract())">抽取人名</NButton>
           <NButton size="small" secondary @click="run(() => store.exportFile('md'))">导出 md</NButton>
@@ -207,6 +238,7 @@ onMounted(loadProjects)
 .novel-main { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .project-title { margin-right: auto; overflow-wrap: anywhere; }
+.novel-model-slot { flex: 0 1 420px; min-width: 240px; }
 .no-chapters { min-width: 0; }
 .no-chapters h2 { margin: 0 0 8px; font-size: 16px; }
 .plain { margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 inherit; background: #f7f4ee; padding: 10px; }

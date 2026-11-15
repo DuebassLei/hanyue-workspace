@@ -41,7 +41,9 @@ def _chapters(client, headers, project_id):
 def _fake_complete(monkeypatch, text):
     from app.services import job_runner
 
-    monkeypatch.setattr(job_runner, "_novel_complete", lambda db, user_id, prompt: text)
+    monkeypatch.setattr(
+        job_runner, "_novel_complete", lambda db, user_id, prompt, **kwargs: text
+    )
 
 
 def _accept_in_db(chapter_id, text, facts=None):

@@ -50,16 +50,23 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     # D6：自动草稿保存字段（不创建版本记录，防丢失用）
     ("content_items", "draft_title", "VARCHAR(200)"),
     ("content_items", "draft_body", "TEXT"),
+    # 稿件库：归档软隐藏（默认 False；SQLite 旧行 NULL 在查询里按未归档处理）
+    ("content_items", "archived", "BOOLEAN DEFAULT 0"),
+    ("content_items", "archived_at", "TIMESTAMP"),
     # 贴图：锚点反推描述缓存（Q10-B 一致性兜底）
     ("sticker_sets", "meta_json", "JSON"),
     # 贴图：该行最近一次入队用的描述，用于识别「改了描述但还没重画」
     ("sticker_images", "generated_prompt", "TEXT"),
     # 微信排版页：用户级默认主题 / 收藏 / 隐藏
     ("user_preferences", "wechat_layout", "JSON"),
+    # 全局默认文本模型（model_catalog_entries.id）
+    ("user_preferences", "default_text_model_id", "VARCHAR(32)"),
     ("storyboard_shots", "asset_refs", "JSON"),
     ("storyboard_projects", "deleted_at", "TIMESTAMP"),
     ("storyboard_scenes", "deleted_at", "TIMESTAMP"),
     ("storyboard_shots", "deleted_at", "TIMESTAMP"),
+    # 角色库：AI 生成的候选参考图（采用前挂在角色卡上）
+    ("characters", "pending_images", "JSON"),
 ]
 
 # keyset 分页与队列恢复都按时间列做 seek，缺索引会退化成全表排序。

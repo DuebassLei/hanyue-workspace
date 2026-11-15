@@ -1,7 +1,12 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { api } from '../api/client'
+import { useModelSelectionStore } from '../stores/modelSelection'
 
 export function useStoryboard() {
+  const modelSelection = useModelSelectionStore()
+  // 不选择时省略 modelId，服务端按「默认模型优先 + 自动降级」解析
+  const modelBody = () => (modelSelection.requestModelId ? { modelId: modelSelection.requestModelId } : {})
+
   const projects = ref([])
   const project = ref(null)
   const selectedSceneId = ref('')
@@ -147,14 +152,20 @@ export function useStoryboard() {
   })
 
   async function breakDownProject(sourceText) {
-    const result = await api.post(`/storyboards/${project.value.id}/breakdown`, { sourceText })
+    const result = await api.post(`/storyboards/${project.value.id}/breakdown`, {
+      sourceText,
+      ...modelBody(),
+    })
     project.value = result.project
     selectScene(project.value.scenes?.at(-1)?.id || '')
     return result
   }
 
   async function breakDownScene(sceneId, sourceText) {
-    const result = await api.post(`/storyboards/scenes/${sceneId}/breakdown`, { sourceText })
+    const result = await api.post(`/storyboards/scenes/${sceneId}/breakdown`, {
+      sourceText,
+      ...modelBody(),
+    })
     project.value = result.project
     selectScene(sceneId)
     return result

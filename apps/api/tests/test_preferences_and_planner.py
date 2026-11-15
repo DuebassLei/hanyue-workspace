@@ -29,11 +29,12 @@ def test_preferences_default_persist_validate_and_isolate(client):
     headers = _login(client, "pref-owner")
     first = client.get(f"{PREFIX}/preferences", headers=headers)
     assert first.status_code == 200
-    assert first.json() == {"theme": "system", "source": "default"}
+    assert (first.json()["theme"], first.json()["source"]) == ("system", "default")
+    assert first.json()["defaultTextModelId"] is None
 
     updated = client.patch(f"{PREFIX}/preferences", json={"theme": "dark"}, headers=headers)
     assert updated.status_code == 200
-    assert updated.json() == {"theme": "dark", "source": "server"}
+    assert (updated.json()["theme"], updated.json()["source"]) == ("dark", "server")
     reread = client.get(f"{PREFIX}/preferences", headers=headers)
     assert reread.json()["theme"] == "dark"
 
@@ -41,10 +42,9 @@ def test_preferences_default_persist_validate_and_isolate(client):
     assert bad.status_code == 422
 
     other = _login(client, "pref-other")
-    assert client.get(f"{PREFIX}/preferences", headers=other).json() == {
-        "theme": "system",
-        "source": "default",
-    }
+    isolated = client.get(f"{PREFIX}/preferences", headers=other).json()
+    assert (isolated["theme"], isolated["source"]) == ("system", "default")
+    assert isolated["defaultTextModelId"] is None
 
 
 # ---------------- LLM 规划 ----------------

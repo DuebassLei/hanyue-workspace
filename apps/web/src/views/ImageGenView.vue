@@ -1400,20 +1400,25 @@ onBeforeUnmount(() => {
   padding: 0 12px;
   font-family: inherit;
   font-size: var(--font-xs);
-  color: var(--color-text-primary);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  font-weight: 500;
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-surface));
+  border: 1px solid var(--color-accent);
   border-radius: 999px;
   cursor: pointer;
-  opacity: 0.92;
-  transition: opacity 0.15s ease;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
 }
 .result-dl:hover:not(:disabled) {
-  opacity: 1;
+  background: var(--color-accent);
+  color: #fff;
 }
 .result-dl:disabled {
   cursor: default;
   color: var(--color-text-muted);
+  background: var(--color-surface);
+  border-color: var(--color-border);
 }
 .result-empty {
   display: flex;

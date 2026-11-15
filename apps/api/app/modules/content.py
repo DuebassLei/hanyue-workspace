@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Query, Response
-from sqlalchemy import func, select
+from pydantic import BaseModel
+from sqlalchemy import exists, func, or_, select
 
 from .. import models, schemas
 from ..core import pagination
+from ..models import utcnow
 from ..core.deps import CurrentUser, DbSession, default_workspace, not_found
 from ..services import article_workflow
 
@@ -40,10 +44,24 @@ def _item_out(item: models.ContentItem, db: DbSession | None = None) -> schemas.
         type=item.type,
         current_version_id=item.current_version_id,
         updated_at=item.updated_at,
+        created_at=item.created_at,
+        archived=bool(item.archived),
+        archived_at=item.archived_at,
         latest_version=latest,
         draft_title=item.draft_title,
         draft_body=item.draft_body,
     )
+
+
+class ArchivePatch(BaseModel):
+    archived: bool
+
+
+_SORTABLE = {
+    "updatedAt": models.ContentItem.updated_at,
+    "createdAt": models.ContentItem.created_at,
+    "title": models.ContentItem.title,
+}
 
 
 @router.get("/content", response_model=list[schemas.ContentOut])
@@ -53,17 +71,113 @@ def list_content(
     response: Response,
     limit: int = Query(default=50, le=200),
     cursor: str | None = Query(default=None),
+    fields: str | None = Query(default=None, description="list=瘦身模式，不返回正文"),
+    q: str | None = Query(default=None, description="标题关键词"),
+    status: str | None = Query(default=None),
+    type: str | None = Query(default=None),
+    platform: str | None = Query(default=None, description="按平台版本的平台筛"),
+    updated_from: datetime | None = Query(default=None, alias="updatedFrom"),
+    updated_to: datetime | None = Query(default=None, alias="updatedTo"),
+    include_archived: bool = Query(default=False, alias="includeArchived"),
+    sort: str = Query(default="updatedAt"),
 ) -> list[schemas.ContentOut]:
+    """稿件列表。
+
+    默认（创作空间侧栏）：未归档、updated_at 倒序；`fields=list` 时不返回
+    draft_body / latest_version 正文，最新版本号与平台版本数改走两条聚合查询，
+    消灭逐行 N+1——稿件几百篇时侧栏与稿件库首屏都靠它。
+    """
     workspace = default_workspace(db, user)
     stmt = select(models.ContentItem).where(
         models.ContentItem.workspace_id == workspace.id
     )
+    if not include_archived:
+        # 旧库补列前写入的行 archived 为 NULL，一律按未归档处理
+        stmt = stmt.where(
+            or_(models.ContentItem.archived.is_(None), models.ContentItem.archived.is_(False))
+        )
+    if q and q.strip():
+        stmt = stmt.where(models.ContentItem.title.ilike(f"%{q.strip()}%"))
+    if status:
+        stmt = stmt.where(models.ContentItem.status == status)
+    if type:
+        stmt = stmt.where(models.ContentItem.type == type)
+    if platform:
+        stmt = stmt.where(
+            exists().where(
+                models.PlatformVariant.content_item_id == models.ContentItem.id,
+                models.PlatformVariant.platform == platform,
+            )
+        )
+    if updated_from:
+        stmt = stmt.where(models.ContentItem.updated_at >= updated_from)
+    if updated_to:
+        stmt = stmt.where(models.ContentItem.updated_at <= updated_to)
+    # 标题按字母升序符合直觉；时间类仍倒序（新→旧）
+    descending = sort != "title"
+    sort_column = _SORTABLE.get(sort, models.ContentItem.updated_at)
     rows, next_cursor = pagination.paginate(
         db, stmt, models.ContentItem,
-        sort_column=models.ContentItem.updated_at, cursor=cursor, limit=limit,
+        sort_column=sort_column, cursor=cursor, limit=limit, descending=descending,
     )
     pagination.set_cursor_header(response, next_cursor)
-    return [_item_out(row, db) for row in rows]
+
+    if fields != "list":
+        return [_item_out(row, db) for row in rows]
+
+    # 瘦身模式：一次聚合取最新版本号 + 平台版本数，替代每行两次子查询
+    ids = [row.id for row in rows]
+    version_no_by_item: dict[str, int] = {}
+    variant_count_by_item: dict[str, int] = {}
+    if ids:
+        for item_id, version_no in db.execute(
+            select(
+                models.ContentVersion.content_item_id,
+                func.max(models.ContentVersion.version_no),
+            )
+            .where(models.ContentVersion.content_item_id.in_(ids))
+            .group_by(models.ContentVersion.content_item_id)
+        ):
+            version_no_by_item[item_id] = version_no
+        for item_id, count in db.execute(
+            select(
+                models.PlatformVariant.content_item_id,
+                func.count(models.PlatformVariant.id),
+            )
+            .where(models.PlatformVariant.content_item_id.in_(ids))
+            .group_by(models.PlatformVariant.content_item_id)
+        ):
+            variant_count_by_item[item_id] = count
+    return [
+        schemas.ContentOut(
+            id=row.id,
+            title=row.title,
+            status=row.status,
+            type=row.type,
+            current_version_id=row.current_version_id,
+            updated_at=row.updated_at,
+            created_at=row.created_at,
+            archived=bool(row.archived),
+            archived_at=row.archived_at,
+            version_no=version_no_by_item.get(row.id),
+            variant_count=variant_count_by_item.get(row.id, 0),
+        )
+        for row in rows
+    ]
+
+
+@router.patch("/content/{content_id}/archive", response_model=schemas.ContentOut)
+def set_content_archive(
+    content_id: str, payload: ArchivePatch, user: CurrentUser, db: DbSession
+) -> schemas.ContentOut:
+    """归档/恢复稿件。软隐藏：不进侧栏与稿件库默认视图，详情接口照常可开。"""
+    item = db.get(models.ContentItem, content_id)
+    if not item or item.owner_user_id != user.id:
+        raise not_found("稿件")
+    item.archived = payload.archived
+    item.archived_at = utcnow() if payload.archived else None
+    db.commit()
+    return _item_out(item, db)
 
 
 @router.post("/content", response_model=schemas.ContentOut, status_code=201)

@@ -176,6 +176,8 @@ export function streamGeneration(payload, handlers) {
         else if (event === 'generation.done') handlers.onDone?.(data)
         else if (event === 'generation.error') handlers.onError?.(data)
         else if (event === 'generation.started') handlers.onStart?.(data)
+        // 真正产出正文的那个候选：降级后也能如实显示实际使用的模型
+        else if (event === 'generation.model') handlers.onModel?.(data)
         else if (event === 'generation.saved') handlers.onSaved?.(data)
       }
     }

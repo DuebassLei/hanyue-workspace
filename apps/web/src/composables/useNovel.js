@@ -1,9 +1,15 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { api, getToken } from '../api/client'
+import { useModelSelectionStore } from '../stores/modelSelection'
 
 const POLL_MS = 2000
 
 export function useNovel() {
+  const modelSelection = useModelSelectionStore()
+  // 会话级选择作用于本次调用；不选择时省略 modelId，服务端按默认 + 降级解析。
+  // 队列任务的模型会在入队那一刻快照，重启重投也按同一模型执行。
+  const modelBody = () => (modelSelection.requestModelId ? { modelId: modelSelection.requestModelId } : {})
+
   const projects = ref([])
   const project = ref(null)
   const selectedChapterId = ref('')
@@ -135,19 +141,19 @@ export function useNovel() {
   }
 
   async function extract() {
-    const started = await api.post(`/novels/${project.value.id}/extract`)
+    const started = await api.post(`/novels/${project.value.id}/extract`, modelBody())
     watchJob(started.jobId)
     return started
   }
 
   async function rewrite(chapterId) {
-    const started = await api.post(`/novels/${project.value.id}/chapters/${chapterId}/rewrite`)
+    const started = await api.post(`/novels/${project.value.id}/chapters/${chapterId}/rewrite`, modelBody())
     watchJob(started.jobId)
     return started
   }
 
   async function accept(chapterId) {
-    const next = await api.post(`/novels/${project.value.id}/chapters/${chapterId}/accept`)
+    const next = await api.post(`/novels/${project.value.id}/chapters/${chapterId}/accept`, modelBody())
     applyChapter(next)
     await refresh()
     return next
@@ -162,7 +168,7 @@ export function useNovel() {
 
   async function continueNext() {
     warnings.value = []
-    const started = await api.post(`/novels/${project.value.id}/continue`)
+    const started = await api.post(`/novels/${project.value.id}/continue`, modelBody())
     if (started.chapterId) selectedChapterId.value = started.chapterId
     watchJob(started.jobId)
     await refresh()

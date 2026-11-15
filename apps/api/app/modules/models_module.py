@@ -17,7 +17,12 @@ from ..services import ai_gateway
 router = APIRouter(tags=["models"])
 
 
-def _model_out(entry: models.ModelCatalogEntry) -> schemas.CatalogOut:
+def _model_out(
+    entry: models.ModelCatalogEntry,
+    db: DbSession | None = None,
+    default_id: str | None = None,
+) -> schemas.CatalogOut:
+    connection = db.get(models.ModelConnection, entry.connection_id) if db else None
     return schemas.CatalogOut(
         id=entry.id,
         model_code=entry.model_code,
@@ -25,10 +30,17 @@ def _model_out(entry: models.ModelCatalogEntry) -> schemas.CatalogOut:
         capabilities=entry.capabilities or [],
         enabled=entry.enabled,
         supports_streaming=entry.supports_streaming,
+        connection_id=entry.connection_id,
+        connection_name=connection.display_name if connection else None,
+        connection_status=connection.status if connection else None,
+        is_default=bool(default_id and default_id == entry.id),
+        is_text_model=ai_gateway.is_text_model(entry),
     )
 
 
-def _connection_out(conn: models.ModelConnection, db: DbSession) -> schemas.ConnectionOut:
+def _connection_out(
+    conn: models.ModelConnection, db: DbSession, default_id: str | None = None
+) -> schemas.ConnectionOut:
     models_rows = db.scalars(
         select(models.ModelCatalogEntry).where(models.ModelCatalogEntry.connection_id == conn.id)
     ).all()
@@ -39,7 +51,7 @@ def _connection_out(conn: models.ModelConnection, db: DbSession) -> schemas.Conn
         base_url=conn.base_url,
         key_masked=mask_secret(conn.credential_ciphertext),
         status=conn.status,
-        models=[_model_out(m) for m in models_rows],
+        models=[_model_out(m, db, default_id) for m in models_rows],
     )
 
 
@@ -60,7 +72,8 @@ def list_connections(
         cursor=cursor, limit=limit, descending=False,
     )
     pagination.set_cursor_header(response, next_cursor)
-    return [_connection_out(row, db) for row in rows]
+    default_id = ai_gateway.describe_default_model(db, user.id)["id"]
+    return [_connection_out(row, db, default_id) for row in rows]
 
 
 @router.post("/models/connections", response_model=schemas.ConnectionOut, status_code=201)
@@ -160,7 +173,8 @@ def list_catalog(user: CurrentUser, db: DbSession) -> list[schemas.CatalogOut]:
             models.ModelCatalogEntry.connection_id.in_(connection_ids)
         )
     ).all()
-    return [_model_out(row) for row in rows]
+    default_id = ai_gateway.describe_default_model(db, user.id)["id"]
+    return [_model_out(row, db, default_id) for row in rows]
 
 
 @router.post("/models/catalog", response_model=schemas.CatalogOut, status_code=201)
@@ -179,7 +193,7 @@ def add_catalog(
     )
     db.add(entry)
     db.commit()
-    return _model_out(entry)
+    return _model_out(entry, db, ai_gateway.describe_default_model(db, user.id)["id"])
 
 
 @router.patch("/models/catalog/{model_id}", response_model=schemas.CatalogOut)
@@ -198,7 +212,7 @@ def update_catalog(
     for key, value in data.items():
         setattr(entry, key, value)
     db.commit()
-    return _model_out(entry)
+    return _model_out(entry, db, ai_gateway.describe_default_model(db, user.id)["id"])
 
 
 @router.delete("/models/catalog/{model_id}", status_code=204)
@@ -217,24 +231,23 @@ def delete_catalog(model_id: str, user: CurrentUser, db: DbSession) -> None:
 async def text_generation(
     payload: schemas.TextGenerationIn, user: CurrentUser, db: DbSession
 ) -> StreamingResponse:
-    """SSE 流式生成；同时持久化生成记录，断线可用 generationId 恢复。"""
-    candidates: list[tuple[models.ModelConnection | None, str]] = []
-    if payload.model_id:
-        entry = db.get(models.ModelCatalogEntry, payload.model_id)
-        if not entry:
-            raise not_found("模型")
-        chosen = db.get(models.ModelConnection, entry.connection_id)
-        if not chosen or chosen.owner_user_id != user.id:
-            raise not_found("模型")
-        candidates = [(chosen, entry.model_code)]
-    else:
-        # 前端没有模型选择器时不传 modelId；此时按创建顺序列出所有可用文本模型。
-        # 只取第一个会出现「配了两个连接、第一个订阅过期就整体不可用」，
-        # 所以保留完整候选链，首个失败且未产出任何文本时自动换下一个。
-        candidates = ai_gateway.resolve_connections(db, user.id)
+    """SSE 流式生成；同时持久化生成记录，断线可用 generationId 恢复。
+
+    模型解析统一走 ai_gateway.resolve_selection：
+    - 显式 modelId → 钉死单候选，失败直接报错（含供应商原因），绝不偷偷换模型；
+    - 不传 modelId → 用户级默认模型排候选链首位，后面仍保留自动降级；
+    - 默认模型配置失效 → 忽略并回报 defaultModelIgnored，不清除偏好。
+    """
+    try:
+        selection = ai_gateway.resolve_selection(db, user.id, payload.model_id)
+    except ai_gateway.InvalidModelSelection as exc:
+        raise ApiError(exc.code, exc.message, status_code=400) from exc
+    candidates: list[tuple[models.ModelConnection | None, str]] = selection["candidates"]
+    entry_ids: list[str | None] = selection["entryIds"]
+    pinned = selection["pinned"]
     if not candidates:
         candidates = [(None, "unconfigured")]
-    conn, model_code = candidates[0]
+        entry_ids = [None]
     style_tasks = {"article", "polish", "rewrite"}
     selected_skill = (
         ai_article.resolve_skill(db, user.id, payload.skill_key)
@@ -253,7 +266,8 @@ async def text_generation(
     generation = models.AiGeneration(
         owner_user_id=user.id,
         task_type=payload.task_type,
-        model_id=payload.model_id,
+        # 先记首选；finally 里会覆盖为「实际使用的模型」，降级后不假装用的是首选
+        model_id=entry_ids[0],
         status="running",
         prompt_version=ai_gateway.PROMPT_TEMPLATE_VERSION,
         request_summary={
@@ -262,6 +276,10 @@ async def text_generation(
             "promptTemplateVersion": ai_gateway.PROMPT_TEMPLATE_VERSION,
             "skillKey": skill_key,
             "skillVersion": skill_version,
+            "requestedModelId": selection["requestedModelId"],
+            "defaultModelId": selection["defaultModelId"],
+            "defaultModelIgnored": selection["defaultModelIgnored"],
+            "pinned": pinned,
         },
     )
     db.add(generation)
@@ -272,13 +290,28 @@ async def text_generation(
         error_code: str | None = None
         completed = False
         saved_version_id: str | None = None
+        used_index: int | None = None
+
+        def model_meta(index: int) -> dict:
+            cand_conn = candidates[index][0]
+            return {
+                "modelCode": candidates[index][1],
+                "modelId": entry_ids[index] if index < len(entry_ids) else None,
+                "provider": cand_conn.provider_type if cand_conn else "none",
+                "fallbackUsed": index > 0,
+                "pinned": pinned,
+                "defaultModelId": selection["defaultModelId"],
+                "defaultModelIgnored": selection["defaultModelIgnored"],
+                "requestedModelId": selection["requestedModelId"],
+            }
+
         try:
             yield _sse(
                 "generation.started",
                 {
                     "generationId": generation.id,
-                    "modelCode": model_code,
-                    "provider": conn.provider_type if conn else "none",
+                    **model_meta(0),
+                    "candidates": [code for _, code in candidates],
                 },
             )
             for idx, (cand_conn, cand_model) in enumerate(candidates):
@@ -295,6 +328,13 @@ async def text_generation(
                 ):
                     kind = event["event"]
                     if kind == "generation.delta":
+                        if used_index is None:
+                            # 真正开始产出的候选才算「实际使用的模型」，降级后不谎报首选
+                            used_index = idx
+                            yield _sse(
+                                "generation.model",
+                                {"generationId": generation.id, **model_meta(idx)},
+                            )
                         collected.append(event["data"]["text"])
                         emitted = True
                         yield _sse(kind, {**event["data"], "generationId": generation.id})
@@ -303,11 +343,14 @@ async def text_generation(
                         pending_error = event["data"]
                     elif kind == "generation.done":
                         completed = True
+                        if used_index is None:
+                            used_index = idx
                         done_data = {
                             **event["data"],
                             "generationId": generation.id,
                             "skillKey": skill_key,
                             "skillVersion": skill_version,
+                            **model_meta(idx),
                         }
                         if payload.task_type == "article":
                             # 契约检查失败只告知，不阻断落库
@@ -320,23 +363,26 @@ async def text_generation(
                 if pending_error is None:
                     break
                 error_code = pending_error.get("code")
-                if not emitted and idx + 1 < len(candidates):
+                # 显式选中的模型钉死：失败直接把供应商原因透传，绝不偷偷换模型
+                if not emitted and not pinned and idx + 1 < len(candidates):
                     # 一个字都没吐出去，换下一个候选重试，客户端无感
                     error_code = None
                     continue
                 yield _sse(
                     "generation.error",
-                    {**pending_error, "generationId": generation.id},
+                    {**pending_error, "generationId": generation.id, **model_meta(idx)},
                 )
                 break
             # 只有真实供应商完整返回才写入稿件版本；错误/中断/占位一律不落库
             if payload.content_item_id and collected and completed and not error_code:
+                actual = used_index if used_index is not None else 0
                 saved_version_id = _persist_version(
                     db,
                     user,
                     payload.content_item_id,
                     "".join(collected),
                     payload,
+                    model_id=entry_ids[actual] if actual < len(entry_ids) else None,
                     skill_ref=(
                         f"{skill_key}@{skill_version}"
                         if skill_key and skill_version
@@ -349,6 +395,18 @@ async def text_generation(
             # 客户端中断也保留已生成部分与状态，避免丢失内容；但状态必须如实区分
             text = "".join(collected)
             generation.result_text = text
+            actual = used_index if used_index is not None else 0
+            generation.model_id = (
+                entry_ids[actual] if actual < len(entry_ids) else None
+            )
+            # JSON 列必须赋新 dict，原地改不会被 SQLAlchemy 感知
+            generation.request_summary = {
+                **(generation.request_summary or {}),
+                "modelCode": candidates[actual][1],
+                "modelId": generation.model_id,
+                "fallbackUsed": actual > 0,
+                "defaultModelIgnored": selection["defaultModelIgnored"],
+            }
             if error_code:
                 generation.status = "failed"
             elif completed:
@@ -371,6 +429,7 @@ def _persist_version(
     content_item_id: str,
     text: str,
     payload: schemas.TextGenerationIn,
+    model_id: str | None = None,
     skill_ref: str | None = None,
 ) -> str | None:
     from sqlalchemy import func
@@ -396,7 +455,8 @@ def _persist_version(
         version_no=(max_no or 0) + 1,
         parent_version_id=item.current_version_id,
         source_type="ai",
-        model_id=payload.model_id,
+        # 记实际产出的模型；降级后仍写请求值会让复盘对不上
+        model_id=model_id,
         prompt_template_version=skill_ref[:32] if skill_ref else None,
         title=ai_title or item.title,
         body=ai_body,

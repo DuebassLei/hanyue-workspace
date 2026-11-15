@@ -52,10 +52,20 @@ class PreferenceOut(CamelModel):
     theme: str
     # default = 服务端尚无记录；server = 已从服务端读取
     source: str
+    # 全局默认文本模型（model_catalog_entries.id）；未设置时为 None
+    default_text_model_id: str | None = None
+    # 「连接名 · modelCode」，供下拉的「自动（默认：xxx）」直接显示
+    default_text_model_label: str | None = None
+    # 默认模型配置失效时给出原因，但不清除偏好（恢复后自动生效）
+    default_text_model_ignored: dict | None = None
 
 
 class PreferencePatch(CamelModel):
-    theme: Literal["system", "light", "dark"]
+    """部分更新：只改传了的字段，避免设默认模型时把主题冲掉。"""
+
+    theme: Literal["system", "light", "dark"] | None = None
+    # 传空字符串 / null 表示清除默认；不传该字段表示保持不变
+    default_text_model_id: str | None = None
 
 
 # ---------- workspaces ----------
@@ -104,10 +114,16 @@ class ContentOut(CamelModel):
     type: str
     current_version_id: str | None
     updated_at: datetime
+    created_at: datetime | None = None
+    archived: bool = False
+    archived_at: datetime | None = None
     latest_version: VersionOut | None = None
     # 自动草稿字段：未 None 时说明有未提交为版本的自动保存内容
     draft_title: str | None = None
     draft_body: str | None = None
+    # fields=list 瘦身模式附带：最新版本号与平台版本数（列表页展示用）
+    version_no: int | None = None
+    variant_count: int | None = None
 
 
 class DraftPatch(CamelModel):
@@ -226,6 +242,13 @@ class CatalogOut(CamelModel):
     capabilities: list[str]
     enabled: bool
     supports_streaming: bool
+    # 模型选择器需要连接名、状态，以及「是否为当前默认」
+    connection_id: str | None = None
+    connection_name: str | None = None
+    connection_status: str | None = None
+    is_default: bool = False
+    # 空能力的历史模型按文本模型处理，与网关 _is_text_model 保持一致
+    is_text_model: bool = False
 
 
 class TextGenerationIn(CamelModel):
@@ -876,11 +899,121 @@ class StickerStylesOut(CamelModel):
 # ---------- storyboards（漫画分镜） ----------
 
 
+# ---------- 角色库（跨项目复用） ----------
+# 分镜项目用 `role:<characterId>` 引用全局角色；老项目里的本地角色条目继续可读。
+
+CHARACTER_ANGLES = ("front", "side", "full", "close", "back", "any")
+APPEARANCE_KEYS = ("hair", "hairColor", "eyes", "face", "outfit", "body", "age", "extra")
+
+
+class CharacterImageIn(CamelModel):
+    asset_id: str = Field(min_length=1, max_length=64)
+    angle: str = Field(default="front", max_length=16)
+    is_primary: bool = False
+    label: str = Field(default="", max_length=60)
+
+
+class CharacterImageOut(CharacterImageIn):
+    url: str | None = None
+
+
+class CharacterIn(CamelModel):
+    name: str = Field(min_length=1, max_length=120)
+    aliases: list[str] = Field(default_factory=list, max_length=12)
+    appearance: dict[str, str] = Field(default_factory=dict)
+    images: list[CharacterImageIn] = Field(default_factory=list, max_length=8)
+    notes: str = Field(default="", max_length=2000)
+
+
+class CharacterPatch(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    aliases: list[str] | None = Field(default=None, max_length=12)
+    appearance: dict[str, str] | None = None
+    images: list[CharacterImageIn] | None = Field(default=None, max_length=8)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class CharacterPendingImageOut(CamelModel):
+    asset_id: str | None = None
+    angle: str = "front"
+    job_id: str | None = None
+    status: str = "queued"  # queued / running / succeeded / failed
+    prompt: str = ""
+    degraded: bool = False
+    error: str | None = None
+    url: str | None = None
+
+
+class CharacterOut(CamelModel):
+    id: str
+    name: str
+    aliases: list[str]
+    appearance: dict[str, str]
+    images: list[CharacterImageOut]
+    pending_images: list[CharacterPendingImageOut] = Field(default_factory=list)
+    notes: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CharacterExtractIn(CamelModel):
+    source_text: str = Field(min_length=1, max_length=12000)
+    model_id: str | None = None
+
+
+class CharacterDraftOut(CamelModel):
+    name: str
+    aliases: list[str]
+    appearance: dict[str, str]
+    exists: bool = False
+
+
+class CharacterExtractOut(CamelModel):
+    drafts: list[CharacterDraftOut]
+    model_code: str | None = None
+    fallback_used: bool = False
+
+
+CHARACTER_STYLES = ("manga", "realistic", "guoman", "watercolor")
+
+
+class CharacterImageGenerateIn(CamelModel):
+    angle: str = Field(default="front", max_length=16)
+    style: str = Field(default="manga", max_length=24)
+    model_id: str | None = None
+    # 用户改过的最终提示词；给定时整体替换模板合成结果
+    prompt_override: str = Field(default="", max_length=4000)
+
+
+class CharacterImageGenerateOut(CamelModel):
+    job_id: str
+    prompt: str
+    anchored: bool = False
+
+
+class CharacterAppearanceCompleteIn(CamelModel):
+    hint_text: str = Field(default="", max_length=2000)
+    source_text: str = Field(default="", max_length=8000)
+    model_id: str | None = None
+
+
+class CharacterAppearanceCompleteOut(CamelModel):
+    appearance: dict[str, str]
+    model_code: str | None = None
+    fallback_used: bool = False
+
+
 class StoryboardAssetItem(CamelModel):
-    id: str = Field(min_length=1, max_length=32)
+    id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=80)
-    asset_id: str | None = Field(default=None, max_length=32)
+    asset_id: str | None = Field(default=None, max_length=64)
     description: str = Field(default="", max_length=500)
+    # 引用全局角色时由服务端回填；输入侧只需给 roleId，其余字段一律以角色库为准
+    role_id: str | None = Field(default=None, max_length=64)
+    aliases: list[str] = Field(default_factory=list)
+    appearance: dict[str, str] = Field(default_factory=dict)
+    images: list[CharacterImageOut] = Field(default_factory=list)
+    image_urls: list[str] = Field(default_factory=list)
 
 
 class StoryboardAssets(CamelModel):
@@ -927,6 +1060,16 @@ class StoryboardShotCreate(CamelModel):
 
 class StoryboardShotPatch(StoryboardShotCreate):
     pass
+
+
+class NovelModelIn(CamelModel):
+    """小说 4 个 AI 动作共用的可选请求体。
+
+    不传或 modelId 为空 = 用当前默认模型（入队时快照）；显式指定 = 钉死该模型，
+    失败明确报错不降级。历史调用完全不带 body，保持兼容。
+    """
+
+    model_id: str | None = None
 
 
 class StoryboardBreakdownIn(CamelModel):

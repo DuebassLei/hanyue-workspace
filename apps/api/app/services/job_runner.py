@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 import time
 import uuid
@@ -26,6 +27,7 @@ from . import handdraw, image_provider, image_service, publish_state, wechat_art
 
 RETRYABLE_CODES = {"provider_unreachable", "provider_error", "provider_timeout", "rate_limited"}
 MAX_ATTEMPTS = queue.MAX_ATTEMPTS
+logger = logging.getLogger(__name__)
 
 
 class JobFailure(RuntimeError):
@@ -193,6 +195,23 @@ def _on_failure(db, job: models.BackgroundJob) -> None:
             db.commit()
     if payload.get("storyboardShotId"):
         _apply_storyboard_failure(db, job)
+    if payload.get("characterId"):
+        _apply_character_image_failure(db, job)
+
+
+def _apply_character_image_failure(db, job: models.BackgroundJob) -> None:
+    payload = job.payload or {}
+    row = db.get(models.Character, payload.get("characterId"))
+    if not row or row.owner_user_id != job.owner_user_id:
+        return
+    pending = [dict(item) for item in (row.pending_images or [])]
+    hit = next((item for item in pending if item.get("jobId") == job.id), None)
+    if hit is None:
+        return
+    hit["status"] = "failed"
+    hit["error"] = (job.error_message or job.error_code or "生成失败")[:500]
+    row.pending_images = pending
+    db.commit()
 
 
 def _advance_publish_job_on_failure(db, publish_job: models.PublishJob, error_code: str) -> None:
@@ -370,6 +389,12 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
         workspace = db.get(models.Workspace, project.workspace_id)
         if not workspace or workspace.owner_user_id != job.owner_user_id:
             raise JobFailure("workspace_not_found", "分镜工作区不存在")
+    if payload.get("characterId"):
+        # 角色是用户级的，没有所属工作区；入队时已解析好默认工作区
+        if payload.get("workspaceId"):
+            candidate = db.get(models.Workspace, payload["workspaceId"])
+            if candidate and candidate.owner_user_id == job.owner_user_id:
+                workspace = candidate
     payload = _fill_late_anchor_reference(db, payload)
     references = _load_reference_images(db, job, payload)
     provider = image_provider.resolve_image_provider(db, job.owner_user_id, payload.get("modelId"))
@@ -462,6 +487,8 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
         _apply_sticker_success(db, job, asset_ids, payload["stickerImageId"])
     if payload.get("storyboardShotId"):
         _apply_storyboard_success(db, job, asset_ids, payload)
+    if payload.get("characterId"):
+        _apply_character_image_success(db, job, asset_ids, payload, degraded_to_text, prompt)
     return {
         "assetIds": asset_ids,
         "count": len(asset_ids),
@@ -498,6 +525,26 @@ def _apply_storyboard_success(db, job, asset_ids: list[str], payload: dict) -> N
         shot.final_asset_ids = asset_ids
         shot.final_status = "succeeded"
         shot.final_error = None
+    db.commit()
+
+
+def _apply_character_image_success(
+    db, job: models.BackgroundJob, asset_ids: list[str], payload: dict,
+    degraded_to_text: bool, prompt: str,
+) -> None:
+    """角色参考图出图后回写候选位：只认 jobId 匹配的占位，任务被替换则静默跳过。"""
+    row = db.get(models.Character, payload.get("characterId"))
+    if not row or row.owner_user_id != job.owner_user_id or row.deleted_at is not None:
+        return
+    pending = [dict(item) for item in (row.pending_images or [])]
+    hit = next((item for item in pending if item.get("jobId") == job.id), None)
+    if hit is None:
+        return
+    hit["status"] = "succeeded"
+    hit["assetId"] = asset_ids[0] if asset_ids else None
+    hit["degraded"] = bool(degraded_to_text)
+    hit["prompt"] = prompt[:4000]
+    row.pending_images = pending
     db.commit()
 
 
@@ -836,33 +883,98 @@ def _handle_platform_publish(db, job: models.BackgroundJob) -> dict:
     return {"remoteContentId": remote_id}
 
 
-def _novel_complete(db, user_id: str, prompt: str) -> str:
-    """同步拼一次模型文本。测试 monkeypatch 这个函数，避免打网。"""
+def _novel_complete(
+    db,
+    user_id: str,
+    prompt: str,
+    *,
+    model_id: str | None = None,
+    apply_default: bool = True,
+    explicit: bool = False,
+    meta: dict | None = None,
+) -> str:
+    """同步拼一次模型文本。测试 monkeypatch 这个函数，避免打网。
+
+    - 不传 model_id：默认模型排候选链首位，失败逐个降级；
+    - 显式指定 / 入队快照：钉死该模型，失败明确报错并带供应商原因，绝不偷偷换模型；
+    - apply_default=False：队列任务严格按入队快照执行，不受之后修改默认模型影响；
+    - meta（可变 dict）：回填实际使用的模型信息，供 job.result 如实回报。
+    """
     from . import ai_gateway, novel_rewrite
 
-    connection, model_code = novel_rewrite.get_default_connection(db, user_id)
-    if connection is None:
-        raise JobFailure("provider_unavailable", "尚未配置可用的模型连接", retryable=False)
+    try:
+        selection = novel_rewrite.resolve_novel_selection(
+            db,
+            user_id,
+            model_id=model_id,
+            apply_default=apply_default,
+            explicit=explicit,
+        )
+    except ai_gateway.InvalidModelSelection as exc:
+        raise JobFailure(exc.code, exc.message, retryable=False) from exc
+
+    candidates = [
+        (connection, model_code, entry_id)
+        for (connection, model_code), entry_id in zip(
+            selection["candidates"], selection["entryIds"]
+        )
+        if connection is not None and model_code and model_code != "unconfigured"
+    ]
+    if not candidates:
+        raise JobFailure(
+            "provider_unavailable",
+            "尚未配置可用的文本模型连接；请在「设置 → 模型连接」登记并测试通过后重试",
+            retryable=False,
+        )
 
     async def _collect() -> str:
-        parts: list[str] = []
-        async for event in ai_gateway.stream_text(
-            db,
-            connection=connection,
-            model_code=model_code,
-            task_type="novel",
-            prompt=prompt,
-            system_prompt="",
-        ):
-            name = event.get("event")
-            data = event.get("data") or {}
-            if name == "generation.delta":
-                parts.append(data.get("text") or "")
-            elif name == "generation.error":
-                code = data.get("code") or "provider_unavailable"
-                retryable = False if code == "provider_unavailable" else bool(data.get("retryable"))
-                raise JobFailure(code, data.get("message") or "模型调用失败", retryable=retryable)
-        return "".join(parts)
+        failures: list[str] = []
+        for index, (connection, model_code, entry_id) in enumerate(candidates):
+            parts: list[str] = []
+            error: dict | None = None
+            async for event in ai_gateway.stream_text(
+                db,
+                connection=connection,
+                model_code=model_code,
+                task_type="novel",
+                prompt=prompt,
+                system_prompt=novel_rewrite.NOVEL_SYSTEM_RULES,
+            ):
+                name = event.get("event")
+                data = event.get("data") or {}
+                if name == "generation.delta":
+                    parts.append(data.get("text") or "")
+                elif name == "generation.error":
+                    error = data
+            # 出错时整个候选作废（即使已吐了几个字），换下一个重新生成，
+            # 避免把两个模型的半截正文拼成一章。
+            text = "".join(parts)
+            if error is None and text.strip():
+                if meta is not None:
+                    meta.update(
+                        {
+                            "modelCode": model_code,
+                            "modelId": entry_id,
+                            "provider": connection.provider_type,
+                            "fallbackUsed": index > 0,
+                            "defaultModelIgnored": selection["defaultModelIgnored"],
+                            "pinned": selection["pinned"],
+                        }
+                    )
+                return text
+            reason = (error or {}).get("message") or "模型没有返回正文"
+            failures.append(f"{model_code}：{reason}")
+            logger.warning(
+                "[novel] 模型 %s 调用失败，尝试下一个候选：%s", model_code, reason[:200]
+            )
+            if selection["pinned"]:
+                # 显式选中 / 快照钉死：不降级，让错误原样冒出去
+                break
+        raise JobFailure(
+            "provider_unavailable",
+            "所有文本模型均不可用 → " + "；".join(failures)[:500],
+            retryable=False,
+        )
 
     return asyncio.run(_collect())
 
@@ -885,11 +997,20 @@ def _handle_novel_extract(db, job: models.BackgroundJob) -> dict:
     project = db.get(models.NovelProject, payload.get("novelProjectId"))
     if not project or project.owner_user_id != job.owner_user_id:
         raise JobFailure("not_found", "小说项目不存在", retryable=False)
-    raw = _novel_complete(db, job.owner_user_id, novel_rewrite.build_extract_prompt(project.source_text))
+    meta: dict = {}
+    raw = _novel_complete(
+        db,
+        job.owner_user_id,
+        novel_rewrite.build_extract_prompt(project.source_text),
+        model_id=payload.get("modelId"),
+        explicit=bool(payload.get("modelExplicit")),
+        apply_default=False,
+        meta=meta,
+    )
     characters, aliases = novel_rewrite.parse_extract(raw)
     novel_rewrite.apply_extract(db, project, characters, aliases)
     db.commit()
-    return {"characters": len(characters), "aliases": len(aliases)}
+    return {"characters": len(characters), "aliases": len(aliases), **meta}
 
 
 def _handle_novel_rewrite(db, job: models.BackgroundJob) -> dict:
@@ -909,14 +1030,23 @@ def _handle_novel_rewrite(db, job: models.BackgroundJob) -> dict:
         select(models.NovelCharacter).where(models.NovelCharacter.project_id == project.id)
     ).all()
     prompt = novel_rewrite.build_rewrite_prompt(chapter, aliases, characters, project.rules or {})
-    text = _novel_complete(db, job.owner_user_id, prompt)
+    meta: dict = {}
+    text = _novel_complete(
+        db,
+        job.owner_user_id,
+        prompt,
+        model_id=payload.get("modelId"),
+        explicit=bool(payload.get("modelExplicit")),
+        apply_default=False,
+        meta=meta,
+    )
     if not str(text or "").strip():
         raise JobFailure("empty_model_output", "模型没有返回正文", retryable=False)
     outcome = novel_rewrite.apply_rewrite_result(
         db, chapter, text, expected_version=payload["expectedVersion"]
     )
     db.commit()
-    return {"outcome": outcome}
+    return {"outcome": outcome, **meta}
 
 
 def _handle_novel_continue(db, job: models.BackgroundJob) -> dict:
@@ -952,7 +1082,16 @@ def _handle_novel_continue(db, job: models.BackgroundJob) -> dict:
         aliases,
         project.rules or {},
     )
-    text = _novel_complete(db, job.owner_user_id, prompt)
+    meta: dict = {}
+    text = _novel_complete(
+        db,
+        job.owner_user_id,
+        prompt,
+        model_id=payload.get("modelId"),
+        explicit=bool(payload.get("modelExplicit")),
+        apply_default=False,
+        meta=meta,
+    )
     if not str(text or "").strip():
         raise JobFailure("empty_model_output", "模型没有返回正文", retryable=False)
     outcome = novel_rewrite.apply_rewrite_result(
@@ -961,7 +1100,7 @@ def _handle_novel_continue(db, job: models.BackgroundJob) -> dict:
     scanned = chapter.draft_text if outcome == "applied" else ""
     warnings = novel_continue.scan_warnings(scanned, characters, aliases)
     db.commit()
-    return {"outcome": outcome, "warnings": warnings}
+    return {"outcome": outcome, "warnings": warnings, **meta}
 
 
 def _read_asset_bytes(asset: models.Asset) -> bytes:

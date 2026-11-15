@@ -18,6 +18,24 @@ _RULE_KEYS = ("person", "style", "banned")
 _EMPTY_FACTS = {"characterChanges": [], "itemHoldings": [], "events": [], "openHooks": []}
 
 
+def _model_snapshot(db, user_id: str, payload: schemas.NovelModelIn | None) -> dict:
+    """入队时把「显式选择，或当时的默认模型」快照进 job payload。
+
+    这样服务重启重投旧任务、或之后改了默认模型，同一批章节仍按同一模型生成，
+    文风可复现。失效的默认不写进快照（执行时按原候选链降级）。
+    """
+    from ..services import ai_gateway
+
+    explicit = bool(payload and payload.model_id)
+    try:
+        model_id = ai_gateway.snapshot_model_id(
+            db, user_id, payload.model_id if payload else None
+        )
+    except ai_gateway.InvalidModelSelection as exc:
+        raise ApiError(exc.code, exc.message, status_code=400) from exc
+    return {"modelId": model_id, "modelExplicit": explicit}
+
+
 def _project(db, user, project_id) -> models.NovelProject:
     row = db.get(models.NovelProject, project_id)
     if not row or row.owner_user_id != user.id:
@@ -285,23 +303,35 @@ class _AliasPatch(BaseModel):
 
 
 @router.post("/novels/{project_id}/extract", status_code=202)
-def extract_novel(project_id: str, user: CurrentUser, db: DbSession):
+def extract_novel(
+    project_id: str,
+    user: CurrentUser,
+    db: DbSession,
+    payload: schemas.NovelModelIn | None = None,
+):
     project = _project(db, user, project_id)
     if _novel_job_busy(db, owner_user_id=user.id, project_id=project.id, kind="novel.extract"):
         raise ApiError("job_in_progress", "抽取任务进行中", status_code=409)
+    snapshot = _model_snapshot(db, user.id, payload)
     db.commit()
     job_id = queue.enqueue(
         db,
         owner_user_id=user.id,
         queue="novel",
         kind="novel.extract",
-        payload={"novelProjectId": project.id},
+        payload={"novelProjectId": project.id, **snapshot},
     )
     return {"jobId": job_id}
 
 
 @router.post("/novels/{project_id}/chapters/{chapter_id}/rewrite", status_code=202)
-def rewrite_chapter(project_id: str, chapter_id: str, user: CurrentUser, db: DbSession):
+def rewrite_chapter(
+    project_id: str,
+    chapter_id: str,
+    user: CurrentUser,
+    db: DbSession,
+    payload: schemas.NovelModelIn | None = None,
+):
     project = _project(db, user, project_id)
     chapter = _chapter(db, project, chapter_id)
     if chapter.source != "rewrite" or not str(chapter.source_text or "").strip():
@@ -315,6 +345,7 @@ def rewrite_chapter(project_id: str, chapter_id: str, user: CurrentUser, db: DbS
     ):
         raise ApiError("job_in_progress", "改写任务进行中", status_code=409)
     expected = chapter.draft_version
+    snapshot = _model_snapshot(db, user.id, payload)
     db.commit()
     job_id = queue.enqueue(
         db,
@@ -325,13 +356,20 @@ def rewrite_chapter(project_id: str, chapter_id: str, user: CurrentUser, db: DbS
             "novelProjectId": project.id,
             "novelChapterId": chapter.id,
             "expectedVersion": expected,
+            **snapshot,
         },
     )
     return {"jobId": job_id, "expectedVersion": expected}
 
 
 @router.post("/novels/{project_id}/chapters/{chapter_id}/accept", response_model=schemas.NovelChapterOut)
-def accept_novel_chapter(project_id: str, chapter_id: str, user: CurrentUser, db: DbSession):
+def accept_novel_chapter(
+    project_id: str,
+    chapter_id: str,
+    user: CurrentUser,
+    db: DbSession,
+    payload: schemas.NovelModelIn | None = None,
+):
     """同步接受：先生成事实，再落库。不入队，也不改其它章节。"""
     project = _project(db, user, project_id)
     chapter = _chapter(db, project, chapter_id)
@@ -342,9 +380,15 @@ def accept_novel_chapter(project_id: str, chapter_id: str, user: CurrentUser, db
     ).all()
     prompt = novel_rewrite.build_facts_prompt(chapter.draft_text, characters)
     try:
-        raw = job_runner._novel_complete(db, user.id, prompt)
+        raw = job_runner._novel_complete(
+            db,
+            user.id,
+            prompt,
+            model_id=payload.model_id if payload else None,
+            explicit=bool(payload and payload.model_id),
+        )
     except job_runner.JobFailure as exc:
-        status = 400 if exc.code == "provider_unavailable" else 502
+        status = 400 if exc.code in ("provider_unavailable", "model_not_found") else 502
         raise ApiError(exc.code, exc.message, status_code=status) from exc
     facts = novel_rewrite.parse_facts(raw)
     novel_rewrite.accept_chapter(db, chapter, facts)
@@ -515,7 +559,12 @@ def _export_body(chapters, fmt: str) -> str:
 
 
 @router.post("/novels/{project_id}/continue", status_code=202)
-def continue_novel(project_id: str, user: CurrentUser, db: DbSession):
+def continue_novel(
+    project_id: str,
+    user: CurrentUser,
+    db: DbSession,
+    payload: schemas.NovelModelIn | None = None,
+):
     """按已接受事实另开一章续写，不改旧章。"""
     project = _project(db, user, project_id)
     chapters = db.scalars(
@@ -546,6 +595,7 @@ def continue_novel(project_id: str, user: CurrentUser, db: DbSession):
     db.add(chapter)
     db.flush()
     db.commit()
+    snapshot = _model_snapshot(db, user.id, payload)
     job_id = queue.enqueue(
         db,
         owner_user_id=user.id,
@@ -555,6 +605,7 @@ def continue_novel(project_id: str, user: CurrentUser, db: DbSession):
             "novelProjectId": project.id,
             "novelChapterId": chapter.id,
             "expectedVersion": 0,
+            **snapshot,
         },
     )
     return {"jobId": job_id, "chapterId": chapter.id, "expectedVersion": 0}

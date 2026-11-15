@@ -11,16 +11,21 @@ import {
   NModal,
   NSelect,
   NSpace,
+  NTooltip,
 } from 'naive-ui'
 import { api, streamGeneration, fetchBlobUrl, apiUrl } from '../api/client'
 import StatusTag from '../components/StatusTag.vue'
 import MarkdownEditor from '../components/MarkdownEditor.vue'
+import ModelSelector from '../components/ModelSelector.vue'
+import { useModelSelectionStore } from '../stores/modelSelection'
 import { articleBodyFromOutput, parseArticleOutput } from '../utils/aiArticle'
 import PublishDrawer from '../features/publish/PublishDrawer.vue'
+import DraftLibraryModal from '../features/studio/DraftLibraryModal.vue'
 import { toast } from '../ui/feedback'
 
 const route = useRoute()
 const router = useRouter()
+const modelSelection = useModelSelectionStore()
 
 const items = ref([])
 const detail = ref(null)
@@ -97,6 +102,8 @@ const aiPrompt = ref('')
 const aiOutput = ref('')
 const aiRunning = ref(false)
 const aiError = ref('')
+// 实际使用的模型（降级后由 generation.model 更正），不谎报首选
+const aiModelInfo = ref('')
 const aiTargetLength = ref(600)  // 字数目标
 const aiInsertMode = ref('append') // 'append' | 'replace'
 const aiAutoImages = ref(false)
@@ -142,6 +149,81 @@ const flow = ref(null)
 const flowLoading = ref(false)
 const flowError = ref('')
 const draftsCollapsed = ref(false)
+// 稿件多了以后靠搜索定位；有分组兜底后搜索框常驻
+const draftKeyword = ref('')
+const filteredItems = computed(() => {
+  const q = draftKeyword.value.trim().toLowerCase()
+  if (!q) return items.value
+  return items.value.filter((item) => (item.title || '').toLowerCase().includes(q))
+})
+
+// 后端 SQLite 返回的是不带时区的 UTC 时间，直接 parse 会被当成本地时间差 8 小时
+function itemTime(value) {
+  return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/.test(value) ? value : `${value}Z`)
+}
+
+// 列表与分组共用同一口径：按自然日切"今天 / 近 7 天 / 更早"。
+// 当前量级（≤200 篇）DOM 全量渲染足够；将来涨到几百篇再考虑虚拟滚动。
+function itemBucket(value) {
+  const time = itemTime(value)
+  if (!Number.isFinite(time)) return 'older'
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const d = new Date(time)
+  const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const days = Math.round((today - dayStart) / 86400000)
+  if (days <= 0) return 'today'
+  if (days < 7) return 'week'
+  return 'older'
+}
+
+const DRAFT_GROUPS = [
+  { key: 'today', label: '今天' },
+  { key: 'week', label: '近 7 天' },
+  { key: 'older', label: '更早' },
+]
+
+// 搜索结果拍平不分组；无搜索时按日期分组（空组隐藏）
+const groupedItems = computed(() => {
+  if (draftKeyword.value.trim()) return null
+  const buckets = { today: [], week: [], older: [] }
+  for (const item of items.value) buckets[itemBucket(item.updatedAt)].push(item)
+  return DRAFT_GROUPS.map((group) => ({ ...group, list: buckets[group.key] })).filter(
+    (group) => group.list.length,
+  )
+})
+
+// "更早"最容易被翻长，折叠状态跨会话记住；其余组始终展开
+const OLDER_COLLAPSE_KEY = 'studio.drafts.groupCollapsed.v1'
+const olderCollapsed = ref(false)
+try {
+  olderCollapsed.value = localStorage.getItem(OLDER_COLLAPSE_KEY) === '1'
+} catch {
+  // 隐私模式下 localStorage 可能抛错，忽略即可
+}
+function toggleOlderGroup() {
+  olderCollapsed.value = !olderCollapsed.value
+  try {
+    localStorage.setItem(OLDER_COLLAPSE_KEY, olderCollapsed.value ? '1' : '0')
+  } catch {
+    // 存不上不影响本次会话内折叠
+  }
+}
+
+// 列表里只留相对日期（今天/昨天/月-日），完整时间放 tooltip
+function relativeDay(value) {
+  const time = itemTime(value)
+  if (!Number.isFinite(time)) return String(value).slice(0, 10)
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const d = new Date(time)
+  const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const days = Math.round((today - dayStart) / 86400000)
+  if (days <= 0) return '今天'
+  if (days === 1) return '昨天'
+  if (days < 7) return `${days} 天前`
+  return String(value).slice(5, 10)
+}
 const hotTopics = ref([])
 const hotStatus = ref({ configured: false, source: '', note: '' })
 const hotLoading = ref(false)
@@ -240,10 +322,29 @@ async function loadWritingStyles() {
   }
 }
 
+// 稿件库弹窗：全量检索 + 归档管理，选中后回填编辑器
+const libraryOpen = ref(false)
+
+// 归档即从侧栏移除；恢复后重新拉列表才能按更新时间落回正确分组
+function onLibraryArchived({ id, archived }) {
+  if (archived) {
+    items.value = items.value.filter((row) => row.id !== id)
+    if (detail.value?.item.id === id) {
+      detail.value = null
+      draftTitle.value = ''
+      draftBody.value = ''
+      router.replace({ name: 'studio' })
+    }
+  } else {
+    loadList()
+  }
+}
+
 async function loadList() {
   loading.value = true
   try {
-    items.value = await api.get('/content')
+    // fields=list：不拉正文、后端聚合版本数，几百篇时首屏不再拖泥带水
+    items.value = await api.get('/content?fields=list&limit=200')
     const targetId = route.query.id || items.value[0]?.id
     if (targetId) await openItem(targetId)
     else detail.value = null
@@ -282,6 +383,20 @@ async function openItem(id) {
   await nextTick()
   loadingDraft = false
   autoSaveStatus.value = hasDraft && dirty.value ? 'saved' : 'idle'
+  // 稿件库可能打开侧栏前 200 篇之外的稿子：补进行列，保证激活态有落点；
+  // 归档稿按约定不进侧栏，即使正打开着也不补
+  if (!data.item.archived && !items.value.some((row) => row.id === id)) {
+    items.value.push({
+      id: data.item.id,
+      title: data.item.title,
+      status: data.item.status,
+      type: data.item.type,
+      updatedAt: data.item.updatedAt,
+      archived: data.item.archived,
+      versionNo: latest?.versionNo || null,
+      variantCount: data.variants?.length || 0,
+    })
+  }
   if (route.query.id !== id) router.replace({ name: 'studio', query: { id } })
 }
 
@@ -423,12 +538,15 @@ function runAi() {
   let generationSaved = false
   aiOutput.value = ''
   aiError.value = ''
+  aiModelInfo.value = ''
   aiRunning.value = true
   const request = {
     taskType: aiTask.value,
     prompt: aiPrompt.value,
     contentItemId: generationItemId,
     constraints: { targetLength: aiTargetLength.value, platform: 'wechat_official' },
+    // 不选择时省略 modelId，由服务端按「默认模型优先 + 自动降级」解析
+    ...(modelSelection.requestModelId ? { modelId: modelSelection.requestModelId } : {}),
   }
   if (usesWritingStyle.value) {
     request.skillKey = writingStyleKey.value || 'article-drafting'
@@ -436,7 +554,14 @@ function runAi() {
   abortStream = streamGeneration(
     request,
     {
-      onStart: () => {},
+      onStart: (data) => {
+        aiModelInfo.value = data.modelCode ? `首选 ${data.modelCode}` : ''
+      },
+      onModel: (data) => {
+        aiModelInfo.value = data.fallbackUsed
+          ? `已自动降级到 ${data.modelCode}`
+          : `正在使用 ${data.modelCode}`
+      },
       onDelta: (data) => {
         aiOutput.value += data.text || ''
       },
@@ -998,23 +1123,98 @@ onBeforeUnmount(() => {
           >‹</n-button>
         </div>
         <n-button quaternary size="small" class="studio-new-draft" @click="createItem">+ 新建稿件</n-button>
-        <div class="list studio-list">
+        <button class="studio-library-link" type="button" @click="libraryOpen = true">
+          查看全部稿件（{{ items.length }}）
+        </button>
+        <n-input
+          v-model:value="draftKeyword"
+          class="studio-draft-search"
+          size="small"
+          round
+          clearable
+          placeholder="搜索稿件"
+          aria-label="搜索稿件"
+        />
+        <!-- 搜索时拍平；平时按 今天/近7天/更早 分组，组头滚动吸顶 -->
+        <template v-if="groupedItems">
+          <section
+            v-for="group in groupedItems"
+            :key="group.key"
+            class="studio-draft-group"
+            :class="{ 'is-collapsed': group.key === 'older' && olderCollapsed }"
+          >
+            <button
+              class="studio-draft-group-head"
+              type="button"
+              :aria-expanded="!(group.key === 'older' && olderCollapsed)"
+              @click="group.key === 'older' && toggleOlderGroup()"
+            >
+              <span>{{ group.label }}</span>
+              <span class="studio-draft-group-count">{{ group.list.length }}</span>
+              <span
+                v-if="group.key === 'older'"
+                class="studio-draft-group-caret"
+                aria-hidden="true"
+              >{{ olderCollapsed ? '▸' : '▾' }}</span>
+            </button>
+            <div v-show="!(group.key === 'older' && olderCollapsed)" class="list studio-list">
+              <div
+                v-for="item in group.list"
+                :key="item.id"
+                class="list-row item-row"
+                :class="{ 'is-active': item.id === detail?.item.id }"
+              >
+                <n-tooltip trigger="hover" placement="top-start">
+                  <template #trigger>
+                    <button
+                      class="item-open"
+                      type="button"
+                      @click="openItem(item.id)"
+                    >
+                      <div class="list-main">
+                        <div class="list-title">{{ item.title }}</div>
+                        <div class="list-meta">{{ relativeDay(item.updatedAt) }}</div>
+                      </div>
+                    </button>
+                  </template>
+                  {{ item.title }}
+                </n-tooltip>
+                <n-button
+                  quaternary
+                  size="small"
+                  class="item-delete"
+                  aria-label="删除稿件"
+                  title="删除稿件"
+                  @click="askDelete(item)"
+                >
+                  ✕
+                </n-button>
+              </div>
+            </div>
+          </section>
+        </template>
+        <div v-else class="list studio-list">
           <div
-            v-for="item in items"
+            v-for="item in filteredItems"
             :key="item.id"
             class="list-row item-row"
             :class="{ 'is-active': item.id === detail?.item.id }"
           >
-            <button
-              class="item-open"
-              type="button"
-              @click="openItem(item.id)"
-            >
-              <div class="list-main">
-                <div class="list-title">{{ item.title }}</div>
-                <div class="list-meta">{{ item.updatedAt.slice(0, 10) }}</div>
-              </div>
-            </button>
+            <n-tooltip trigger="hover" placement="top-start">
+              <template #trigger>
+                <button
+                  class="item-open"
+                  type="button"
+                  @click="openItem(item.id)"
+                >
+                  <div class="list-main">
+                    <div class="list-title">{{ item.title }}</div>
+                    <div class="list-meta">{{ relativeDay(item.updatedAt) }}</div>
+                  </div>
+                </button>
+              </template>
+              {{ item.title }}
+            </n-tooltip>
             <n-button
               quaternary
               size="small"
@@ -1026,6 +1226,9 @@ onBeforeUnmount(() => {
               ✕
             </n-button>
           </div>
+          <p v-if="!filteredItems.length" class="studio-draft-search-empty">
+            没有匹配「{{ draftKeyword.trim() }}」的稿件
+          </p>
         </div>
         <section v-if="detail" class="studio-versions" aria-labelledby="studio-versions-title">
           <h3 id="studio-versions-title" class="studio-section-label">最近版本</h3>
@@ -1194,6 +1397,9 @@ onBeforeUnmount(() => {
               <label class="field-label" for="ai-task">任务</label>
               <n-select id="ai-task" v-model:value="aiTask" :options="TASKS" />
             </div>
+            <div class="field">
+              <ModelSelector :disabled="aiRunning" label="模型" />
+            </div>
             <div v-if="usesWritingStyle" class="field">
               <label class="field-label" for="ai-writing-style">写作风格</label>
               <n-select
@@ -1239,6 +1445,7 @@ onBeforeUnmount(() => {
               </n-button>
               <n-button v-if="aiRunning" quaternary size="small" @click="stopAi">中断</n-button>
             </n-space>
+            <p v-if="aiModelInfo" class="studio-model-usage">{{ aiModelInfo }}</p>
             <n-alert v-if="aiError" type="error" :bordered="false">{{ aiError }}</n-alert>
             <section v-if="aiOutput" class="studio-ai-output" aria-label="AI 生成结果">
               <span class="studio-ai-output-label">生成结果</span>
@@ -1521,6 +1728,9 @@ onBeforeUnmount(() => {
       @published="() => toast('草稿已推送到公众号草稿箱，请到后台预览并群发。')"
     />
 
+    <!-- 稿件库：全量检索 + 归档管理；归档/恢复后刷新侧栏 -->
+    <DraftLibraryModal v-model:show="libraryOpen" @open="openItem" @archived="onLibraryArchived" />
+
     <n-modal
       v-model:show="showVariant"
       preset="card"
@@ -1606,7 +1816,7 @@ onBeforeUnmount(() => {
 }
 .studio-grid {
   display: grid;
-  grid-template-columns: minmax(190px, 220px) minmax(0, 1fr) minmax(300px, 340px);
+  grid-template-columns: minmax(240px, 260px) minmax(0, 1fr) minmax(300px, 340px);
   gap: var(--space-4);
   align-items: start;
   /* 编辑器列撑满：设最小行高，让中间列有足够空间 */
@@ -1696,23 +1906,86 @@ onBeforeUnmount(() => {
 .studio-new-draft {
   width: 100%;
   margin-bottom: var(--space-3);
-  border-style: dashed;
-  background: transparent;
-  color: var(--color-text-secondary);
-}
-.studio-new-draft:hover {
-  border-color: var(--color-accent);
+  border: 1px solid var(--color-accent);
+  border-radius: 8px;
   background: var(--color-accent-soft);
   color: var(--color-accent);
+  font-weight: 500;
+  transition: background-color 0.2s ease;
+}
+.studio-new-draft:hover {
+  background: var(--color-accent);
+  color: #fff;
+}
+.studio-library-link {
+  display: block;
+  width: 100%;
+  margin: calc(-1 * var(--space-1)) 0 var(--space-3);
+  padding: 2px var(--space-1);
+  border: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-xs);
+  text-align: center;
+  cursor: pointer;
+  transition: color 150ms ease;
+}
+.studio-library-link:hover {
+  color: var(--color-accent);
+}
+.studio-draft-search {
+  margin-bottom: var(--space-2);
+}
+/* 稿件分组：组头在面板内滚动时吸顶；"更早"可折叠 */
+.studio-draft-group + .studio-draft-group {
+  margin-top: var(--space-2);
+}
+.studio-draft-group-head {
+  position: sticky;
+  /* 负 top + 等量 padding：吸顶时贴住面板边缘，不留透缝 */
+  top: calc(-1 * var(--space-3));
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  margin: 0 calc(-1 * var(--space-1));
+  padding: calc(4px + var(--space-3)) var(--space-1) 4px;
+  border: 0;
+  background: color-mix(in srgb, var(--color-surface) 90%, var(--color-bg));
+  backdrop-filter: blur(4px);
+  color: var(--color-text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.studio-draft-group-count {
+  font-variant-numeric: tabular-nums;
+}
+.studio-draft-group-caret {
+  margin-left: auto;
+  font-size: 10px;
+}
+.studio-draft-group.is-collapsed .studio-draft-group-count {
+  margin-left: auto;
+}
+.studio-draft-search-empty {
+  margin: var(--space-2) var(--space-1) 0;
+  font-size: var(--font-xs);
+  color: var(--color-text-muted);
+  text-align: center;
 }
 .studio-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 2px;
 }
 .studio-list .list-row {
   position: relative;
-  padding: 10px;
+  padding: 7px 8px;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
@@ -1739,17 +2012,19 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 .item-open .list-title {
-  display: -webkit-box;
   overflow: hidden;
   color: var(--color-text-primary);
-  line-height: 1.5;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .item-open .list-meta {
-  margin-top: var(--space-1);
-  color: var(--color-text-secondary);
+  margin-top: 2px;
+  color: var(--color-text-muted);
   font-size: 11px;
+}
+.item-row.is-active .item-open .list-meta {
+  color: var(--color-text-secondary);
 }
 .item-delete {
   flex-shrink: 0;
@@ -2127,6 +2402,11 @@ onBeforeUnmount(() => {
 .studio-actions {
   gap: var(--space-2);
 }
+.studio-model-usage {
+  margin: 0;
+  color: var(--color-text-muted, #8a8178);
+  font-size: 11px;
+}
 .studio-ai-output {
   padding: var(--space-3);
   border-left: 3px solid var(--color-accent);
@@ -2427,7 +2707,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1180px) {
   .studio-grid {
-    grid-template-columns: minmax(190px, 220px) minmax(0, 1fr);
+    grid-template-columns: minmax(240px, 260px) minmax(0, 1fr);
   }
   .studio-grid.drafts-collapsed {
     grid-template-columns: 56px minmax(0, 1fr);
@@ -2506,6 +2786,20 @@ onBeforeUnmount(() => {
   }
   .item-delete {
     opacity: 1;
+  }
+  .item-open .list-title {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  /* 整页滚动的布局里组头不吸顶，避免乱吸 */
+  .studio-draft-group-head {
+    position: static;
+    margin: 0 calc(-1 * var(--space-1));
+    padding: 4px var(--space-1);
+    background: transparent;
+    backdrop-filter: none;
   }
   .studio-tools {
     position: relative;

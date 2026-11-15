@@ -369,26 +369,21 @@ def interrogate_image(
     走 OpenAI 兼容 /chat/completions，携带 image_url content block（base64）。
     system_prompt/user_text 可换成画风提取等专用指令（见 STYLE_SIGNATURE_SYSTEM）。
     """
+    from . import ai_gateway
     from .ai_gateway import resolve_connection
 
     connection: models.ModelConnection | None = None
     model_code: str = "unconfigured"
 
     if model_id:
-        # 通过 catalog id 找指定模型
-        entry = db.get(models.ModelCatalogEntry, model_id)
-        if entry and entry.enabled:
-            conn = db.get(models.ModelConnection, entry.connection_id)
-            if conn and conn.owner_user_id == owner_user_id and conn.base_url:
-                key = decrypt_secret(conn.credential_ciphertext)
-                if key:
-                    connection, model_code = conn, entry.model_code
-        if connection is None:
-            raise ImageProviderUnavailable(
-                "text_provider_unavailable",
-                "指定的模型不可用，请重新选择或清空 modelId 自动使用默认文本模型",
-            )
+        # 显式选择：统一走网关校验（越权/停用/无文本能力一律拒绝），并钉死单模型
+        try:
+            selection = ai_gateway.resolve_selection(db, owner_user_id, model_id)
+        except ai_gateway.InvalidModelSelection as exc:
+            raise ImageProviderUnavailable(exc.code, exc.message) from exc
+        connection, model_code = selection["candidates"][0]
     else:
+        # 不传 modelId：resolve_connection 会读用户级默认模型（未设置时行为同原来）
         connection, model_code = resolve_connection(db, owner_user_id)
 
     if connection is None or model_code == "unconfigured":

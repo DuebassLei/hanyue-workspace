@@ -66,6 +66,9 @@ class UserPreference(Base, TimestampMixin):
     )
     # system | light | dark
     theme: Mapped[str] = mapped_column(String(16), default="system")
+    # 全局默认文本模型：model_catalog_entries.id。不选择模型时它排候选链首位，
+    # 后面仍保留自动降级；失效时忽略但不清除偏好，恢复后自动生效。
+    default_text_model_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # 公众号排版偏好：{"defaultThemeId", "favoritePresetIds", "hiddenPresetIds"}
     # 读时兜底，写时整包替换（JSON 列必须赋新 dict，原地改不会被 SQLAlchemy 感知）
     wechat_layout: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -93,6 +96,9 @@ class ContentItem(Base, TimestampMixin):
     # 自动草稿字段：自动保存写这里，不创建版本记录；手动「存为版本」才写 content_versions
     draft_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     draft_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 归档：软隐藏而非删除。侧栏与稿件库默认视图排除，详情接口照常可开
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ContentVersion(Base, TimestampMixin):
@@ -738,6 +744,31 @@ class StickerImage(Base, TimestampMixin):
     # 最近一次入队时的画面描述。与 frame_prompt 不一致 = 用户改了描述但还没重画，
     # 此时不能直接 retry（会把旧文案再跑一遍），必须走「保存并重画这张」。
     generated_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# ---------------- 角色库（用户级，跨分镜项目复用） ----------------
+
+
+class Character(Base, TimestampMixin):
+    """视觉角色卡：名字/别名、结构化外貌、多张带角度标签的参考图。
+
+    分镜项目只存 `role:` 前缀的引用，不复制角色内容；改名或换图后，
+    下一次生成会用到新数据，历史生成结果由 job.payload 的快照负责追溯。
+    """
+
+    __tablename__ = "characters"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    aliases: Mapped[list] = mapped_column(JSON, default=list)
+    appearance: Mapped[dict] = mapped_column(JSON, default=dict)
+    images: Mapped[list] = mapped_column(JSON, default=list)
+    # AI 生成的候选参考图（未采用）：{assetId, angle, jobId, status, prompt, degraded}
+    # 采用才进 images；同角度重新生成时旧候选的 asset 一并删除。
+    pending_images: Mapped[list] = mapped_column(JSON, default=list)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 # ---------------- 漫画分镜 ----------------

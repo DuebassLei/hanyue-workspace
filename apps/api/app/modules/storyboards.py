@@ -71,9 +71,10 @@ def _asset_ids_for_shots(shots) -> set[str]:
 
 
 def _purge_generated_assets(db, asset_ids: set[str], project) -> list:
-    referenced = _asset_lookup(project) if project else {}
+    # 按素材 id 保护，而不是按条目 id：角色库的多张参考图也要算「仍被引用」
+    referenced = _asset_ids_in_assets(_resolved_assets(db, project)) if project else set()
     paths = []
-    for asset_id in asset_ids - set(referenced):
+    for asset_id in asset_ids - referenced:
         asset = db.get(models.Asset, asset_id)
         if not asset or asset.source_type != "generated":
             continue
@@ -98,7 +99,30 @@ def _unlink_assets(paths) -> None:
             pass
 
 
+ROLE_PREFIX = "role:"
+APPEARANCE_LABELS = {
+    "hair": "发型", "hairColor": "发色", "eyes": "眼睛", "face": "面部",
+    "outfit": "服装", "body": "体型", "age": "年龄", "extra": "其他",
+}
+
+
+def _role_id(item: dict) -> str | None:
+    value = item.get("role_id") or item.get("roleId")
+    if not value:
+        raw = str(item.get("id") or "")
+        if raw.startswith(ROLE_PREFIX):
+            value = raw[len(ROLE_PREFIX):]
+    if not value:
+        return None
+    return str(value).strip() or None
+
+
 def _validate_assets(db, user, assets):
+    """校验并精简项目视觉资产。
+
+    角色允许两种来源：老格式本地条目，或 `role:` 前缀的全局角色库引用。
+    引用条目的一切展示字段都由服务端按角色库实时回填，不采信前端传值。
+    """
     payload = assets.model_dump() if hasattr(assets, "model_dump") else assets
     for category in ("characters", "locations", "styles"):
         values = payload.get(category) or []
@@ -108,24 +132,45 @@ def _validate_assets(db, user, assets):
         for item in values:
             if not isinstance(item, dict):
                 raise ApiError("invalid_assets", "视觉资产格式不正确")
+            role_id = _role_id(item) if category == "characters" else None
+            if role_id:
+                row = db.get(models.Character, role_id)
+                # 软删角色仍允许引用：老项目不该因为角色下架而无法保存
+                if not row or row.owner_user_id != user.id:
+                    raise not_found("角色库角色")
+                item_id = f"{ROLE_PREFIX}{role_id}"
+                if item_id in seen:
+                    raise ApiError("invalid_assets", "视觉资产编号不能为空或重复")
+                seen.add(item_id)
+                item.clear()
+                item.update({
+                    "id": item_id, "name": row.name, "asset_id": None,
+                    "description": "", "role_id": role_id,
+                })
+                continue
             name = str(item.get("name") or "").strip()
             description = str(item.get("description") or "").strip()
             asset_id = item.get("asset_id") or item.get("assetId")
             if not name or not (description or asset_id):
                 raise ApiError("invalid_assets", "视觉资产需要名字，以及参考图或文字描述")
             item_id = str(item.get("id") or "").strip()
-            if not item_id or item_id in seen:
+            if not item_id or item_id in seen or item_id.startswith(ROLE_PREFIX):
                 raise ApiError("invalid_assets", "视觉资产编号不能为空或重复")
             seen.add(item_id)
-            if not asset_id:
-                continue
-            asset = db.get(models.Asset, asset_id)
-            if not asset or asset.owner_user_id != user.id:
-                raise not_found("项目素材")
+            if asset_id:
+                asset = db.get(models.Asset, asset_id)
+                if not asset or asset.owner_user_id != user.id:
+                    raise not_found("项目素材")
+            item.clear()
+            item.update({
+                "id": item_id, "name": name, "asset_id": asset_id,
+                "description": description,
+            })
     return payload
 
 
 def _project_assets(project) -> dict:
+    """项目里存下来的原始资产（角色库引用只存 id + roleId）。"""
     raw = project.assets or {}
     return {
         "characters": raw.get("characters") or [],
@@ -134,25 +179,125 @@ def _project_assets(project) -> dict:
     }
 
 
-def _asset_lookup(project) -> dict:
+def _appearance_text(appearance) -> str:
+    raw = appearance if isinstance(appearance, dict) else {}
+    return "，".join(
+        f"{label}：{str(raw[key]).strip()}"
+        for key, label in APPEARANCE_LABELS.items()
+        if str(raw.get(key) or "").strip()
+    )
+
+
+def _primary_asset_id(images) -> str | None:
+    rows = [item for item in (images or []) if isinstance(item, dict)]
+    usable = [item for item in rows if item.get("assetId") or item.get("asset_id")]
+    chosen = next((item for item in usable if item.get("isPrimary")), None) or (usable[0] if usable else None)
+    return (chosen.get("assetId") or chosen.get("asset_id")) if chosen else None
+
+
+def _resolved_assets(db, project) -> dict:
+    """把角色库引用展开成生成/展示用的完整条目；老格式本地角色原样保留。
+
+    软删的角色仍能解析：已经引用它的项目不该因为角色下架就静默失去参考图。
+    """
+    raw = _project_assets(project)
+    role_ids = {
+        rid for item in raw["characters"]
+        if isinstance(item, dict) and (rid := _role_id(item))
+    }
+    rows = {}
+    if role_ids:
+        found = db.scalars(select(models.Character).where(
+            models.Character.id.in_(role_ids),
+            models.Character.owner_user_id == project.owner_user_id,
+        )).all()
+        rows = {row.id: row for row in found}
+    characters = []
+    for item in raw["characters"]:
+        if not isinstance(item, dict):
+            continue
+        rid = _role_id(item)
+        row = rows.get(rid) if rid else None
+        if not row:
+            characters.append(dict(item))
+            continue
+        images = [image for image in (row.images or []) if isinstance(image, dict)]
+        appearance = row.appearance or {}
+        characters.append({
+            "id": f"{ROLE_PREFIX}{row.id}",
+            "name": row.name,
+            "description": (_appearance_text(appearance) or str(row.notes or ""))[:500],
+            "asset_id": _primary_asset_id(images),
+            "role_id": row.id,
+            "aliases": row.aliases or [],
+            "appearance": appearance,
+            "images": images,
+            "image_urls": [url for url in (_url(image.get("assetId")) for image in images) if url],
+        })
+    return {"characters": characters, "locations": raw["locations"], "styles": raw["styles"]}
+
+
+def _asset_ids_in_assets(assets) -> set[str]:
+    """项目正在使用的全部素材 id（含角色库多参考图），防止清理时误删。"""
+    ids = set()
+    for values in assets.values():
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            single = _item_asset_id(item)
+            if single:
+                ids.add(single)
+            for image in item.get("images") or []:
+                if isinstance(image, dict) and (image.get("assetId") or image.get("asset_id")):
+                    ids.add(image.get("assetId") or image.get("asset_id"))
+    return ids
+
+
+def _pick_character_image(images, shot_size: str, view_angle: str) -> dict | None:
+    """每个角色每个镜头只投 1 张：先按景别/视角匹配角度标签，匹配不到回落主图。"""
+    rows = [
+        image for image in (images or [])
+        if isinstance(image, dict) and (image.get("assetId") or image.get("asset_id"))
+    ]
+    if not rows:
+        return None
+    size = str(shot_size or "").strip()
+    if size in ("wide", "full"):
+        targets = ("full", "any")
+    elif size in ("close", "extreme_close"):
+        targets = ("close", "front", "any")
+    else:
+        targets = ("front", "any")
+    if any(word in str(view_angle or "") for word in ("high", "low", "over", "side", "tilt")):
+        targets = ("side",) + targets
+    matched = [image for image in rows if str(image.get("angle") or "any") in targets]
+    if matched:
+        matched.sort(key=lambda image: (
+            targets.index(str(image.get("angle") or "any")),
+            0 if image.get("isPrimary") else 1,
+        ))
+        return matched[0]
+    return next((image for image in rows if image.get("isPrimary")), rows[0])
+
+
+def _asset_lookup(assets) -> dict:
     found = {}
-    for items in _project_assets(project).values():
+    for items in assets.values():
         for item in items:
             if isinstance(item, dict) and item.get("id"):
                 found[item["id"]] = item
     return found
 
 
-def _selected_assets(project, refs: list[str]) -> list[dict]:
-    lookup = _asset_lookup(project)
+def _selected_assets(assets, refs: list[str]) -> list[dict]:
+    lookup = _asset_lookup(assets)
     unknown = [item for item in refs if item not in lookup]
     if unknown:
         raise ApiError("invalid_asset_refs", "镜头引用了项目里没有的视觉资产")
     return [lookup[item] for item in refs]
 
 
-def _category_of(project, ref: str) -> str:
-    assets = _project_assets(project)
+def _category_of(assets, ref: str) -> str:
     return next((key for key, values in assets.items() if any(
         isinstance(row, dict) and row.get("id") == ref for row in values
     )), "")
@@ -162,9 +307,9 @@ def _item_asset_id(item: dict) -> str | None:
     return item.get("asset_id") or item.get("assetId") or None
 
 
-def _named_characters(project) -> list[dict]:
+def _named_characters(assets) -> list[dict]:
     return [
-        item for item in _project_assets(project)["characters"]
+        item for item in assets["characters"]
         if isinstance(item, dict) and str(item.get("name") or "").strip()
     ]
 
@@ -174,15 +319,24 @@ def _mask_span(mask: list[bool], start: int, end: int) -> None:
         mask[index] = True
 
 
-def _present_characters(project, shot) -> list[dict]:
+def _present_characters(assets, shot) -> list[dict]:
     """在场角色：按画面、动作、对白、手写提示词的出现顺序点名；长名字先占位。
 
+    角色库条目的 aliases 一并进入匹配词表，命中后统一返回规范名。
     长名字先扫完整段并遮住命中区间，短名字不能落在已被占用的字上。
     正文一个名字都对不上时，才回退到本镜勾选的角色，并保持 asset_refs 顺序。
-    勾了但正文没提到的角色，在已经点到名字时不混进来。
     """
-    characters = _named_characters(project)
-    by_length = sorted(characters, key=lambda item: len(str(item["name"]).strip()), reverse=True)
+    terms: list[tuple[str, dict]] = []
+    for item in _named_characters(assets):
+        words = [str(item["name"]).strip()]
+        for alias in item.get("aliases") or []:
+            text = str(alias or "").strip()
+            if text and text not in words:
+                words.append(text)
+        for word in words:
+            if word:
+                terms.append((word, item))
+    by_length = sorted(terms, key=lambda pair: len(pair[0]), reverse=True)
     chunks = (
         shot.frame_description or "",
         shot.action or "",
@@ -194,8 +348,7 @@ def _present_characters(project, shot) -> list[dict]:
     for text in chunks:
         mask = [False] * len(text)
         hits: list[tuple[int, dict]] = []
-        for item in by_length:
-            name = str(item["name"]).strip()
+        for name, item in by_length:
             if not name or item["id"] in seen:
                 continue
             start = 0
@@ -213,19 +366,19 @@ def _present_characters(project, shot) -> list[dict]:
         found.extend(item for _, item in hits if item["id"] not in {row["id"] for row in found})
     if found:
         return found
-    lookup = _asset_lookup(project)
+    lookup = _asset_lookup(assets)
     fallback = []
     for ref in shot.asset_refs or []:
         item = lookup.get(ref) or {}
-        if _category_of(project, ref) == "characters" and item.get("id") not in {row["id"] for row in fallback}:
+        if _category_of(assets, ref) == "characters" and item.get("id") not in {row["id"] for row in fallback}:
             fallback.append(item)
     return fallback
 
 
-def _first_pictured(project, refs: list[str], category: str) -> dict | None:
-    lookup = _asset_lookup(project)
+def _first_pictured(assets, refs: list[str], category: str) -> dict | None:
+    lookup = _asset_lookup(assets)
     for ref in refs:
-        if _category_of(project, ref) != category:
+        if _category_of(assets, ref) != category:
             continue
         item = lookup.get(ref) or {}
         if _item_asset_id(item):
@@ -233,23 +386,30 @@ def _first_pictured(project, refs: list[str], category: str) -> dict | None:
     return None
 
 
-def _storyboard_references(project, shot, stage: str) -> list[tuple[str, dict | None]]:
+def _storyboard_references(assets, shot, stage: str) -> list[tuple[str, dict | None]]:
     """最多 4 张：在场角色图 ≤3，地点 ≤1，风格 ≤1。名额不够先丢风格再丢地点。
 
+    角色库条目带多张参考图时，按镜头景别/视角挑 1 张，绝不让一个人占满名额。
     正式图最后一张固定为已成功草图，因此角色+地点+风格先截到 3 张。
     草图阶段不带草图自己。请求体里的 reference_asset_ids 不并入。
     """
     slots: list[tuple[str, dict | None]] = []
-    for item in _present_characters(project, shot):
+    for item in _present_characters(assets, shot):
         if len([row for row in slots if row[0] == "character"]) >= 3:
             break
-        asset_id = _item_asset_id(item)
+        chosen = dict(item)
+        picked = _pick_character_image(item.get("images"), shot.shot_size, shot.view_angle)
+        if picked:
+            chosen["asset_id"] = picked.get("assetId") or picked.get("asset_id")
+            chosen.pop("assetId", None)
+            chosen["chosenAngle"] = picked.get("angle") or "any"
+        asset_id = _item_asset_id(chosen)
         if asset_id:
-            slots.append(("character", item))
-    location = _first_pictured(project, shot.asset_refs or [], "locations")
+            slots.append(("character", chosen))
+    location = _first_pictured(assets, shot.asset_refs or [], "locations")
     if location:
         slots.append(("location", location))
-    style = _first_pictured(project, shot.asset_refs or [], "styles")
+    style = _first_pictured(assets, shot.asset_refs or [], "styles")
     if style:
         slots.append(("style", style))
     cap = 3 if stage == "final" else 4
@@ -354,7 +514,7 @@ def _project_out(db, project, *, scenes=True):
         ) for row in rows]
     return schemas.StoryboardProjectOut(
         id=project.id, workspace_id=project.workspace_id, title=project.title,
-        deleted_at=project.deleted_at, summary=project.summary, assets=_project_assets(project), status=project.status,
+        deleted_at=project.deleted_at, summary=project.summary, assets=_resolved_assets(db, project), status=project.status,
         created_at=project.created_at, updated_at=project.updated_at, scenes=scene_out,
     )
 
@@ -582,7 +742,7 @@ def reorder_scenes(project_id: str, payload: schemas.StoryboardOrderIn, user: Cu
 @router.post("/storyboards/scenes/{scene_id}/shots", response_model=schemas.StoryboardShotOut, status_code=201)
 def create_shot(scene_id: str, payload: schemas.StoryboardShotCreate, user: CurrentUser, db: DbSession):
     scene, project = _scene(db, user, scene_id)
-    _selected_assets(project, payload.asset_refs)
+    _selected_assets(_resolved_assets(db, project), payload.asset_refs)
     order = len(db.scalars(select(models.StoryboardShot.id).where(models.StoryboardShot.scene_id == scene.id)).all())
     row = models.StoryboardShot(scene_id=scene.id, sort_order=order, **payload.model_dump())
     db.add(row)
@@ -597,7 +757,7 @@ def patch_shot(shot_id: str, payload: schemas.StoryboardShotPatch, user: Current
         raise ApiError("shot_busy", "镜头生成中，完成后再编辑", status_code=409)
     for key, value in payload.model_dump(exclude_unset=True).items():
         if key == "asset_refs":
-            _selected_assets(project, value or [])
+            _selected_assets(_resolved_assets(db, project), value or [])
             row.asset_refs = value or []
             continue
         if value is not None:
@@ -630,9 +790,10 @@ def reorder_shots(scene_id: str, payload: schemas.StoryboardOrderIn, user: Curre
 
 
 def _queue_generation(db, user, shot, project, stage, payload):
-    _selected_assets(project, shot.asset_refs or [])
-    present = _present_characters(project, shot)
-    slots = _storyboard_references(project, shot, stage)
+    assets = _resolved_assets(db, project)
+    _selected_assets(assets, shot.asset_refs or [])
+    present = _present_characters(assets, shot)
+    slots = _storyboard_references(assets, shot, stage)
     refs = [
         shot.sketch_asset_id if kind == "sketch" else _item_asset_id(item)
         for kind, item in slots
@@ -648,11 +809,11 @@ def _queue_generation(db, user, shot, project, stage, payload):
         f"{shot.shot_size} shot", f"{shot.view_angle} view", f"{shot.camera_motion} camera motion",
     ) if part)
     if not shot.prompt.strip():
-        selected = _selected_assets(project, shot.asset_refs or [])
+        selected = _selected_assets(assets, shot.asset_refs or [])
         names = [
             str(item.get("name") or "").strip()
             for item in selected
-            if _category_of(project, item["id"]) != "characters" and str(item.get("name") or "").strip()
+            if _category_of(assets, item["id"]) != "characters" and str(item.get("name") or "").strip()
         ]
         if names:
             subject = subject + " " + " ".join(names)
@@ -686,6 +847,27 @@ def _queue_generation(db, user, shot, project, stage, payload):
             + ", ".join(listed) + "."
         )
     prompt = "\n".join(part for part in (subject, *labels, consistency) if part)
+    # 生成时把实际用到的角色数据快照进 payload：之后改全局角色或删角色，
+    # 历史镜头的「实际出图提示词」与当时用的参考图仍可追溯。
+    pictured_assets = {
+        item["id"]: _item_asset_id(item)
+        for kind, item in slots if kind == "character" and item
+    }
+    character_snapshot = [
+        {
+            "roleId": item.get("role_id"),
+            "name": str(item.get("name") or "").strip(),
+            "aliases": item.get("aliases") or [],
+            "appearance": item.get("appearance") or {},
+            "description": str(item.get("description") or ""),
+            "allImageAssetIds": [
+                image.get("assetId") for image in (item.get("images") or [])
+                if isinstance(image, dict) and image.get("assetId")
+            ],
+            "referenceAssetId": pictured_assets.get(item.get("id")),
+        }
+        for item in present
+    ]
     job_id = queue.enqueue(
         db, owner_user_id=user.id, queue="ai-image", kind="image-generation",
         payload={
@@ -694,6 +876,7 @@ def _queue_generation(db, user, shot, project, stage, payload):
             "referenceAssetIds": refs, "storyboardShotId": shot.id,
             "storyboardProjectId": project.id, "workspaceId": project.workspace_id,
             "generationStage": stage, "generationVersion": version,
+            "characterSnapshot": character_snapshot,
         },
     )
     setattr(shot, f"{stage}_job_id", job_id)
@@ -784,7 +967,9 @@ async def breakdown_project(project_id: str, payload: schemas.StoryboardBreakdow
     try:
         scenes = await storyboard_breakdown.break_down(db, user.id, payload.source_text, payload.model_id)
     except storyboard_breakdown.BreakdownError as exc:
-        raise ApiError(exc.code, exc.message, status_code=422) from exc
+        # 显式选了不可用模型属于请求错误，与「供应商暂时不可用」区分开
+        status = 400 if exc.code == "model_not_found" else 422
+        raise ApiError(exc.code, exc.message, status_code=status) from exc
     added = _append_breakdown(db, project, scenes)
     return {"addedScenes": added, "project": _project_out(db, project)}
 
@@ -800,7 +985,9 @@ async def breakdown_scene(scene_id: str, payload: schemas.StoryboardBreakdownIn,
     try:
         scenes = await storyboard_breakdown.break_down(db, user.id, payload.source_text, payload.model_id)
     except storyboard_breakdown.BreakdownError as exc:
-        raise ApiError(exc.code, exc.message, status_code=422) from exc
+        # 显式选了不可用模型属于请求错误，与「供应商暂时不可用」区分开
+        status = 400 if exc.code == "model_not_found" else 422
+        raise ApiError(exc.code, exc.message, status_code=status) from exc
     shots = scenes[0]["shots"]
     for index, shot in enumerate(shots):
         db.add(models.StoryboardShot(scene_id=scene.id, sort_order=index, **shot))

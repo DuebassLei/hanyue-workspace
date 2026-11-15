@@ -49,7 +49,8 @@ def _chapters(client, headers, project_id):
 def _fake_complete(monkeypatch, text):
     from app.services import job_runner
 
-    def fake(db, user_id, prompt):
+    def fake(db, user_id, prompt, **kwargs):
+        # 队列任务会带 modelId / 快照 / meta 等关键字参数；测试替身只关心 prompt
         if isinstance(text, Exception):
             raise text
         return text
@@ -322,3 +323,111 @@ def test_rewrite_rejects_empty_source(client):
     assert response.status_code == 400
     assert response.json()["code"] == "nothing_to_rewrite"
     assert json.loads(response.text)["code"] == "nothing_to_rewrite"
+
+
+# --- 模型降级：首个连接订阅过期时，小说链路应与创作空间一样换下一个文本模型 ---
+
+def _fake_candidates(monkeypatch, candidates):
+    """替换统一模型解析，避免测试打真网。"""
+    from types import SimpleNamespace
+
+    from app.services import ai_gateway
+
+    conns = [SimpleNamespace(provider_type="openai_compatible") for _ in candidates]
+
+    def fake_selection(db, user_id, model_id=None, *, apply_default=True, limit=3):
+        return {
+            "candidates": list(zip(conns, candidates)),
+            "entryIds": [None] * len(candidates),
+            "pinned": False,
+            "defaultModelId": None,
+            "defaultModelIgnored": None,
+            "requestedModelId": model_id,
+        }
+
+    monkeypatch.setattr(ai_gateway, "resolve_selection", fake_selection)
+
+
+def _fake_stream(monkeypatch, seen, fail_models, ok_text="改写正文"):
+    from app.services import ai_gateway
+
+    async def fake_stream(db, **kwargs):
+        seen.append(kwargs)
+        if kwargs["model_code"] in fail_models:
+            yield {
+                "event": "generation.error",
+                "data": {
+                    "code": "provider_unavailable",
+                    "message": f"供应商返回 HTTP 400：{kwargs['model_code']} subscription has expired",
+                    "retryable": False,
+                },
+            }
+            return
+        yield {"event": "generation.delta", "data": {"text": ok_text}}
+        yield {"event": "generation.done", "data": {}}
+
+    monkeypatch.setattr(ai_gateway, "stream_text", fake_stream)
+
+
+def test_novel_complete_falls_back_to_next_text_model(monkeypatch):
+    from app.services import job_runner, novel_rewrite
+
+    _fake_candidates(monkeypatch, ["expired-model", "working-model"])
+    seen = []
+    _fake_stream(monkeypatch, seen, {"expired-model"})
+
+    text = job_runner._novel_complete(None, "u", "提示词")
+    assert text == "改写正文"
+    assert [item["model_code"] for item in seen] == ["expired-model", "working-model"]
+    assert all(item["task_type"] == "novel" for item in seen)
+    assert all(item["system_prompt"] == novel_rewrite.NOVEL_SYSTEM_RULES for item in seen)
+
+
+def test_novel_complete_skips_unconfigured_placeholder(monkeypatch):
+    from app.services import job_runner
+
+    _fake_candidates(monkeypatch, ["unconfigured"])
+    with pytest.raises(job_runner.JobFailure) as exc:
+        job_runner._novel_complete(None, "u", "提示词")
+    assert exc.value.code == "provider_unavailable"
+    assert "文本模型连接" in exc.value.message
+
+
+def test_novel_complete_reports_every_provider_error(monkeypatch):
+    from app.services import job_runner
+
+    _fake_candidates(monkeypatch, ["expired-a", "expired-b"])
+    _fake_stream(monkeypatch, [], {"expired-a", "expired-b"})
+    with pytest.raises(job_runner.JobFailure) as exc:
+        job_runner._novel_complete(None, "u", "提示词")
+    assert exc.value.code == "provider_unavailable"
+    assert "expired-a" in exc.value.message and "expired-b" in exc.value.message
+    assert "subscription has expired" in exc.value.message
+
+
+def test_rewrite_job_succeeds_after_first_model_400(client, monkeypatch):
+    from app.core.db import SessionLocal
+    from app import models
+    from app.services import job_runner
+
+    _fake_candidates(monkeypatch, ["expired-model", "working-model"])
+    seen = []
+    _fake_stream(monkeypatch, seen, {"expired-model"}, ok_text="降级后的改写正文")
+
+    headers = login(client, "novel-fallback")
+    project = _project(client, headers)
+    chapter = _chapters(client, headers, project["id"])[0]
+    queued = client.post(
+        f"/api/v1/novels/{project['id']}/chapters/{chapter['id']}/rewrite",
+        headers=headers,
+    )
+    assert queued.status_code == 202, queued.text
+    job_id = queued.json()["jobId"]
+    job_runner.run_job(job_id)
+
+    with SessionLocal() as db:
+        row = db.get(models.NovelChapter, chapter["id"])
+        job = db.get(models.BackgroundJob, job_id)
+        assert job.status == "succeeded", job.error_message
+        assert row.draft_text == "降级后的改写正文"
+    assert [item["model_code"] for item in seen] == ["expired-model", "working-model"]

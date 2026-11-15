@@ -141,6 +141,49 @@ def test_pin_url_skips_pinning_under_proxy(monkeypatch):
         ssrf.pin_url("https://internal.example.com/v1")
 
 
+def test_trusted_host_allows_private_resolution_but_keeps_other_checks(monkeypatch):
+    """SSRF_TRUSTED_HOSTS 登记的域名解析到内网地址也放行（内网自建 LLM 网关场景）。
+
+    例外只豁免「解析结果为内网地址」这一条：字面量黑名单、HTTPS/端口校验、
+    IP 固定都必须照旧生效。
+    """
+    from app.core import ssrf
+
+    monkeypatch.setenv("SSRF_TRUSTED_HOSTS", "lab.iwhalecloud.com, Gateway.Example.COM")
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.10.184.249", 443))],
+    )
+    monkeypatch.setattr(ssrf, "proxy_in_effect", lambda: False)
+    assert ssrf.assert_safe_url("https://lab.iwhalecloud.com/v1") == "https://lab.iwhalecloud.com/v1"
+    # 大小写不敏感
+    assert ssrf.assert_safe_url("https://gateway.example.com/v1") == "https://gateway.example.com/v1"
+    pinned, headers, extensions = ssrf.pin_url("https://lab.iwhalecloud.com/v1/chat")
+    assert "10.10.184.249" in pinned, "可信主机仍须固定已校验的 IP"
+    assert headers["Host"] == "lab.iwhalecloud.com"
+    assert extensions["sni_hostname"] == "lab.iwhalecloud.com"
+
+    # 未登记的域名解析到同一内网 IP 仍然被拦截
+    with pytest.raises(ssrf.UnsafeUrl, match="禁止访问的地址"):
+        ssrf.assert_safe_url("https://other.example.com/v1")
+    # 白名单不能绕过字面量黑名单与协议/端口限制
+    with pytest.raises(ssrf.UnsafeUrl):
+        ssrf.validate_base_url("http://lab.iwhalecloud.com/v1")
+    with pytest.raises(ssrf.UnsafeUrl):
+        ssrf.validate_base_url("https://localhost/v1")
+
+
+def test_trusted_hosts_rejects_wildcards_and_blanks(monkeypatch):
+    from app.core import ssrf
+
+    monkeypatch.setenv("SSRF_TRUSTED_HOSTS", " .example.com,*.corp.com,, spaced.example.com ")
+    hosts = ssrf.trusted_hosts()
+    assert "spaced.example.com" in hosts
+    assert not any("*" in h for h in hosts), "通配符不属于可信主机"
+    assert "" not in hosts
+
+
 def test_proxy_in_effect_reads_env(monkeypatch):
     from app.core import ssrf
 
