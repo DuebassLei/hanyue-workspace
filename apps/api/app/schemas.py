@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 
 def camel(name: str) -> str:
@@ -48,6 +48,19 @@ class LoginResponse(CamelModel):
 
 
 # ---------- preferences ----------
+_IMAGE_RATIOS = Literal["3:4", "1:1", "4:3", "16:9"]
+
+
+class StudioImagePreferences(CamelModel):
+    """创作空间自动配图设置；未知字段由 Pydantic 默认忽略。"""
+
+    auto_images: StrictBool = False
+    generate_cover: StrictBool = True
+    cover_aspect_ratio: _IMAGE_RATIOS = "3:4"
+    inline_aspect_ratio: _IMAGE_RATIOS = "1:1"
+    prompt_suffix: StrictStr = Field(default="", max_length=200)
+
+
 class PreferenceOut(CamelModel):
     theme: str
     # default = 服务端尚无记录；server = 已从服务端读取
@@ -58,6 +71,7 @@ class PreferenceOut(CamelModel):
     default_text_model_label: str | None = None
     # 默认模型配置失效时给出原因，但不清除偏好（恢复后自动生效）
     default_text_model_ignored: dict | None = None
+    studio_image_preferences: StudioImagePreferences = Field(default_factory=StudioImagePreferences)
 
 
 class PreferencePatch(CamelModel):
@@ -66,6 +80,7 @@ class PreferencePatch(CamelModel):
     theme: Literal["system", "light", "dark"] | None = None
     # 传空字符串 / null 表示清除默认；不传该字段表示保持不变
     default_text_model_id: str | None = None
+    studio_image_preferences: StudioImagePreferences | None = None
 
 
 # ---------- workspaces ----------
@@ -1236,3 +1251,89 @@ class NovelProjectListItem(CamelModel):
     updated_at: datetime
 
 
+# ---------- video（图文成片） ----------
+class VideoSettingsIn(CamelModel):
+    aspect_ratio: Literal["9:16", "16:9"] = "9:16"
+    voice: str = Field(default="zh-CN-XiaoxiaoNeural", max_length=64)
+    rate: str = Field(default="+0%", max_length=8)
+    subtitles: bool = True
+    bgm_asset_id: str | None = None
+    bgm_volume: float = Field(default=0.18, ge=0.02, le=0.6)
+
+
+class VideoProjectCreate(CamelModel):
+    title: str = Field(default="", max_length=200)
+    source_text: str = Field(default="", max_length=200_000)
+    content_item_id: str | None = None
+    settings: VideoSettingsIn | None = None
+
+
+class VideoProjectPatch(CamelModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    source_text: str | None = Field(default=None, max_length=200_000)
+    settings: VideoSettingsIn | None = None
+
+
+class VideoShotIn(CamelModel):
+    narration: str = Field(default="", max_length=1000)
+    image_prompt: str = Field(default="", max_length=1000)
+    motion: Literal["zoom_in", "zoom_out", "pan_left", "pan_right"] = "zoom_in"
+
+
+class VideoShotPatch(CamelModel):
+    narration: str | None = Field(default=None, max_length=1000)
+    image_prompt: str | None = Field(default=None, max_length=1000)
+    motion: Literal["zoom_in", "zoom_out", "pan_left", "pan_right"] | None = None
+    image_asset_id: str | None = None
+
+
+class VideoShotOut(CamelModel):
+    id: str
+    sort_order: int
+    narration: str
+    image_prompt: str
+    image_asset_id: str | None = None
+    image_url: str | None = None
+    audio_asset_id: str | None = None
+    audio_url: str | None = None
+    duration_ms: int
+    motion: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class VideoProjectOut(CamelModel):
+    id: str
+    workspace_id: str
+    title: str
+    source_text: str
+    source_content_id: str | None = None
+    settings: dict = Field(default_factory=dict)
+    status: str
+    render_asset_id: str | None = None
+    render_job_id: str | None = None
+    render_error: str | None = None
+    rendered_at: datetime | None = None
+    render_url: str | None = None
+    total_duration_ms: int = 0
+    created_at: datetime
+    updated_at: datetime
+    shots: list[VideoShotOut] = Field(default_factory=list)
+
+
+class VideoProjectListItem(CamelModel):
+    id: str
+    title: str
+    status: str
+    shot_count: int
+    total_duration_ms: int
+    render_asset_id: str | None = None
+    updated_at: datetime
+
+
+class VideoBreakdownRequest(CamelModel):
+    model_id: str | None = None
+
+
+class VideoRenderRequest(CamelModel):
+    reset: bool = False

@@ -72,6 +72,8 @@ class UserPreference(Base, TimestampMixin):
     # 公众号排版偏好：{"defaultThemeId", "favoritePresetIds", "hiddenPresetIds"}
     # 读时兜底，写时整包替换（JSON 列必须赋新 dict，原地改不会被 SQLAlchemy 感知）
     wechat_layout: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 创作空间 AI 自动配图偏好；读时兜底，写时整包替换
+    studio_image_preferences: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Workspace(Base, TimestampMixin):
@@ -890,4 +892,55 @@ class NovelAlias(Base, TimestampMixin):
     kind: Mapped[str] = mapped_column(String(16))
     original_name: Mapped[str] = mapped_column(String(120))
     new_name: Mapped[str] = mapped_column(String(120), default="")
+
+
+# ---------------- 视频创作（图文成片） ----------------
+
+
+def _default_video_settings() -> dict:
+    return {
+        "aspectRatio": "9:16",       # 9:16 | 16:9
+        "voice": "zh-CN-XiaoxiaoNeural",
+        "rate": "+0%",               # edge-tts 语速偏移
+        "subtitles": True,
+        "bgmAssetId": None,
+        "bgmVolume": 0.18,           # BGM 相对旁白的音量
+    }
+
+
+class VideoProject(Base, TimestampMixin):
+    """图文成片项目：文案 → 解说分镜 → 镜头配图/配音 → FFmpeg 合成。"""
+
+    __tablename__ = "video_projects"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="未命名视频")
+    source_text: Mapped[str] = mapped_column(Text, default="")
+    source_content_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    settings: Mapped[dict] = mapped_column(JSON, default=_default_video_settings)
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    render_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    render_job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    render_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rendered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class VideoShot(Base, TimestampMixin):
+    """镜头：旁白驱动时长；配图走 AI 生图，配音走可插拔 TTS。"""
+
+    __tablename__ = "video_shots"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("video_projects.id"), index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    narration: Mapped[str] = mapped_column(Text, default="")
+    image_prompt: Mapped[str] = mapped_column(Text, default="")
+    image_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    audio_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    motion: Mapped[str] = mapped_column(String(16), default="zoom_in")
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 

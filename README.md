@@ -332,6 +332,7 @@ OAuth 平台的令牌验证端点按官方文档**显式配置**（`PLATFORM_<�
 - 图文卡片：Markdown → 3:4 / 9:16 / 1:1 / 4:3 固定画幅卡片，8 套模板 + 底纹/边框/背景图层、三种分卡策略、3x PNG 与 ZIP 图集导出；自定义模板服务端持久化；可切后端 `/cards/paginate` 协同模式
 - Agent 会话、Skill 注册与启停、工具授权、运行事件、暂停/恢复/取消、审批；**步骤规划优先走真实 LLM**，失败明确降级
 - **热点选题**：7 路热点采集、同事件合并（硬否决 + 并查集）、100 分可解释评分、多维筛选、一键成稿；数据不足的维度显式降级
+- **视频创作（图文成片）**：文案/AI 拆解说稿+分镜 → 逐镜头 AI 生图（Ken Burns 推/拉/pan 运镜）→ edge-tts 旁白配音 → FFmpeg 硬字幕烧录合成 MP4；默认 9:16 竖屏可切 16:9，BGM 可选混音；渲染走单一后台任务（五阶段进度、断点续跑缓存配图/配音），成品入素材库；依赖 edge-tts（`pip install edge-tts`）与本机 ffmpeg（含 libass/zoompan），缺失时明确报错不伪造
 - 发布队列、幂等键、取消与受控重试；数据分析（缺失指标显示「不可获取」）
 - **微信公众号草稿箱**：AppID/AppSecret 绑定并真实探测、封面永久素材 + 正文图片上传 + `draft/add` 三步真实推送、后台草稿列表回读、令牌落库共享缓存；**只推草稿不群发**
 - 主题偏好**服务端持久化**（`GET/PATCH /preferences`），跨设备同步，离线回退 `localStorage`
@@ -346,6 +347,7 @@ OAuth 平台的令牌验证端点按官方文档**显式配置**（`PLATFORM_<�
 - 五个平台的**逐平台适配器字段映射**：OAuth 框架、令牌存储、能力核验注册表已就绪，但 `publish` / `sync*` 的具体请求体需按各平台官方文档与获批资质实现；未实现时明确报错，不猜测接口（公众号走独立的 AppSecret 实现，已按官方文档完成草稿箱三步，但**群发未实现**）
 - 公众号正式群发 / 发布：需要已认证账号的群发权限，本系统只做到草稿箱，`publish` 调用会明确报错
 - 公众号指标采集（阅读/在看/涨粉）：适配器未接入，调用报错
+- 视频平台发布（视频号/抖音等推视频）：本期不做，成片只入素材库供手动下载分发；`TTS_PROVIDER_*` HTTP 供应商通道已预留但后端未实现，配置齐全会明确报 `tts_backend_not_implemented`
 - Phase 0 官方能力核验本身（需要应用资质与官方文档证据），因此自动发布仍默认禁用
 - Claude Code CLI 或任意本机命令集成：禁止级工具永不执行
 - Agent 未接入 Agent SDK / MCP 与独立隔离 Worker：LLM 规划只用于「选工具与排顺序」，执行仍走现有受控运行时；开启条件是模型连接已通过真实「测试连接」（`status=connected`），否则明确降级为确定性规则并在 `plan.created` 事件里记录 `planner` 与原因
@@ -385,6 +387,9 @@ OAuth 平台的令牌验证端点按官方文档**显式配置**（`PLATFORM_<�
 | `IMAGE_PROVIDER_BASE_URL` | 空 | 生图供应商基址，填到 `/v1`，须公网 HTTPS |
 | `IMAGE_PROVIDER_API_KEY` | 空 | 生图供应商密钥 |
 | `IMAGE_PROVIDER_MODEL` | 空 | 生图模型代号；三个 `IMAGE_PROVIDER_*` 齐全才启用 |
+| `TTS_PROVIDER_BASE_URL` | 空 | TTS 供应商基址（预留通道，须公网 HTTPS） |
+| `TTS_PROVIDER_API_KEY` | 空 | TTS 供应商密钥 |
+| `TTS_PROVIDER_MODEL` | 空 | TTS 模型代号；三个 `TTS_PROVIDER_*` 齐全才启用（当前启用会明确报 `tts_backend_not_implemented`），留空用内置 edge-tts |
 | `PLATFORM_EVIDENCE_FILE` | 空 | Phase 0 核验证据 JSON 路径（建议绝对路径） |
 | `HOT_TOPICS_PLATFORMS` | 空（全部 7 路） | 热点采集源，逗号分隔（如 `微博,知乎`）；用于降噪或调试 |
 | `HOT_TOPICS_TIMEOUT` | `12` | 热点单源请求超时（秒，最小 3） |

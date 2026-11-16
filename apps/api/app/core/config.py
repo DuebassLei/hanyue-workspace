@@ -53,8 +53,11 @@ class Settings(BaseSettings):
     database_url: str = f"sqlite:///{(BASE_DIR / 'hanyue.db').as_posix()}"
     storage_dir: Path = BASE_DIR / "storage"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
-    # 任务租约：running 超过该秒数仍未推进即视为进程崩溃，启动时回收
+    # 任务租约：running 超过该秒数仍未推进即视为进程崩溃，启动时回收。
+    # 判活看 started_at——长任务须自行周期心跳刷新（见 job_runner._video_stage）。
     job_lease_seconds: int = 300
+    # 分级租约：图文成片整链渲染天然远超普通任务（生图+配音+编码），单独放宽
+    job_lease_video_render_seconds: int = 1800
     # 单次上传硬上限（即使不带签名上传会话也生效）
     max_upload_bytes: int = 20 * 1024 * 1024
     # 运行日志：级别、落盘目录（留空则 storage/logs）、单文件上限与保留份数

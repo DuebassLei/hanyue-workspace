@@ -22,12 +22,16 @@ def _preference_out(
     db, user_id: str, row: models.UserPreference | None
 ) -> schemas.PreferenceOut:
     info = ai_gateway.describe_default_model(db, user_id)
+    image_preferences = schemas.StudioImagePreferences.model_validate(
+        (row.studio_image_preferences if row else {}) or {}
+    )
     return schemas.PreferenceOut(
         theme=row.theme if row else "system",
         source="server" if row else "default",
         default_text_model_id=row.default_text_model_id if row else None,
         default_text_model_label=info["label"],
         default_text_model_ignored=info["ignored"],
+        studio_image_preferences=image_preferences,
     )
 
 
@@ -69,6 +73,14 @@ def update_preferences(
             except ai_gateway.InvalidModelSelection as exc:
                 raise ApiError(exc.code, exc.message, status_code=400) from exc
         row.default_text_model_id = model_id
+
+    if "studio_image_preferences" in data:
+        image_preferences = data["studio_image_preferences"]
+        row.studio_image_preferences = (
+            image_preferences.model_dump(exclude_unset=False)
+            if hasattr(image_preferences, "model_dump")
+            else dict(image_preferences or {})
+        )
 
     db.commit()
     db.refresh(row)

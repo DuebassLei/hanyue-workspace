@@ -61,6 +61,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("user_preferences", "wechat_layout", "JSON"),
     # 全局默认文本模型（model_catalog_entries.id）
     ("user_preferences", "default_text_model_id", "VARCHAR(32)"),
+    # 创作空间 AI 自动配图偏好
+    ("user_preferences", "studio_image_preferences", "JSON"),
     ("storyboard_shots", "asset_refs", "JSON"),
     ("storyboard_projects", "deleted_at", "TIMESTAMP"),
     ("storyboard_scenes", "deleted_at", "TIMESTAMP"),
@@ -90,6 +92,9 @@ _INDEXES: list[tuple[str, str]] = [
     ("ix_storyboard_projects_owner_updated", "storyboard_projects (owner_user_id, updated_at DESC, id DESC)"),
     ("ix_storyboard_scenes_project_order", "storyboard_scenes (project_id, sort_order)"),
     ("ix_storyboard_shots_scene_order", "storyboard_shots (scene_id, sort_order)"),
+    # 视频创作：列表按「最近改动」取；镜头按序读
+    ("ix_video_projects_owner_updated", "video_projects (owner_user_id, updated_at DESC, id DESC)"),
+    ("ix_video_shots_project_order", "video_shots (project_id, sort_order)"),
 ]
 
 

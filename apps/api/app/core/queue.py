@@ -256,11 +256,20 @@ def recover_stale_running(lease_seconds: int | None = None) -> int:
 
     超过租约未推进的任务：未达重试上限则回到 queued（由随后的 recover_pending 统一投递），
     已达上限直接标 failed（明确 errorCode=worker_crashed），绝不永久卡在 running。
+
+    判活字段是 started_at：长任务（如图文成片）在推进阶段时会心跳刷新 started_at，
+    因此「活着但慢」不会被误杀；真僵尸不心跳，照常回收。整链渲染按 kind 走分级租约。
     """
     from .config import get_settings
 
-    lease = lease_seconds or get_settings().job_lease_seconds
-    cutoff = datetime.now(timezone.utc).timestamp() - lease
+    settings = get_settings()
+    default_lease = lease_seconds or settings.job_lease_seconds
+    video_lease = (
+        lease_seconds
+        if lease_seconds is not None
+        else max(settings.job_lease_video_render_seconds, default_lease)
+    )
+    now = datetime.now(timezone.utc).timestamp()
     db = SessionLocal()
     stale: list[str] = []
     try:
@@ -268,6 +277,9 @@ def recover_stale_running(lease_seconds: int | None = None) -> int:
             select(models.BackgroundJob).where(models.BackgroundJob.status == "running")
         ).all()
         for row in rows:
+            cutoff = now - (
+                video_lease if row.kind == "video.render" else default_lease
+            )
             started = _as_utc(row.started_at)
             if started is None or started.timestamp() > cutoff:
                 continue

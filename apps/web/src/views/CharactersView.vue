@@ -6,6 +6,7 @@ import {
 import { api, apiUrl } from '../api/client'
 import { toast } from '../ui/feedback'
 import ModelSelector from '../components/ModelSelector.vue'
+import CharacterAssetPicker from '../features/character/CharacterAssetPicker.vue'
 
 const APPEARANCE_FIELDS = [
   { key: 'hair', label: '发型' },
@@ -84,10 +85,45 @@ const filtered = computed(() => {
   ].join(' ').toLowerCase().includes(q))
 })
 
-const libraryOptions = computed(() => library.value.map((item) => ({
-  label: item.originalName || item.id,
-  value: item.id,
-})))
+const libraryById = computed(() => new Map(library.value.map((asset) => [asset.id, asset])))
+
+/** 参考图行上展示的缩略信息：优先用素材库记录，素材已删时退回角色本身保存的 url */
+function imageAsset(image) {
+  const asset = image?.assetId ? libraryById.value.get(image.assetId) : null
+  return {
+    name: asset?.originalName || image?.assetId || '',
+    url: apiUrl(asset?.url || image?.url || ''),
+  }
+}
+
+// 参考图选择弹窗：一个弹窗对应一行，避免每行都挂一个下拉
+const assetPickerIndex = ref(-1)
+const assetPickerOpen = computed({
+  get: () => assetPickerIndex.value >= 0,
+  set: (open) => { if (!open) assetPickerIndex.value = -1 },
+})
+const assetPickerSelectedId = computed(
+  () => form.images[assetPickerIndex.value]?.assetId || '',
+)
+// 同一张素材在同一角色里只占一个角度位
+const assetPickerDisabledIds = computed(() => form.images
+  .map((image) => image.assetId)
+  .filter((id, index) => id && index !== assetPickerIndex.value))
+
+function openAssetPicker(index) {
+  assetPickerIndex.value = index
+}
+
+function onAssetPicked(asset) {
+  const index = assetPickerIndex.value
+  const row = form.images[index]
+  if (!row) return
+  row.assetId = asset.id
+}
+
+function clearImageAsset(index) {
+  if (form.images[index]) form.images[index].assetId = null
+}
 
 function appearanceText(item) {
   const raw = item.appearance || {}
@@ -492,13 +528,43 @@ onMounted(load)
       </div>
       <p v-if="!form.images.length" class="field-hint">还没有参考图。可以先建档，之后到素材图库上传再补。</p>
       <div v-for="(image, index) in form.images" :key="index" class="image-row">
-        <n-select v-model:value="image.assetId" filterable clearable :options="libraryOptions" placeholder="选择素材" />
+        <button type="button" class="image-asset" @click="openAssetPicker(index)">
+          <span class="image-asset-thumb">
+            <img
+              v-if="image.assetId && imageAsset(image).url"
+              :src="imageAsset(image).url"
+              :alt="imageAsset(image).name"
+              loading="lazy"
+            />
+            <span v-else-if="image.assetId" class="image-asset-empty">无预览</span>
+            <span v-else class="image-asset-empty">+</span>
+          </span>
+          <span class="image-asset-text" :class="{ 'is-empty': !image.assetId }">
+            {{ image.assetId ? imageAsset(image).name : '从图库选择参考图' }}
+          </span>
+          <span class="image-asset-cta">{{ image.assetId ? '更换' : '选择' }}</span>
+        </button>
+        <n-button
+          v-if="image.assetId"
+          size="tiny"
+          quaternary
+          title="清除已选参考图"
+          class="image-clear"
+          @click="clearImageAsset(index)"
+        >清除</n-button>
         <n-select v-model:value="image.angle" :options="ANGLES" class="angle-select" />
         <n-input v-model:value="image.label" placeholder="备注" class="image-label" />
-        <n-button size="tiny" :type="image.isPrimary ? 'primary' : 'default'" secondary @click="setPrimary(index)">
+        <n-button
+          size="tiny"
+          :type="image.isPrimary ? 'primary' : 'default'"
+          secondary
+          :disabled="!image.assetId"
+          :title="image.assetId ? '' : '先选一张参考图才能设为主图'"
+          @click="setPrimary(index)"
+        >
           {{ image.isPrimary ? '主图' : '设为主图' }}
         </n-button>
-        <n-button size="tiny" quaternary type="error" @click="removeImage(index)">移除</n-button>
+        <n-button size="tiny" quaternary type="error" class="image-remove" @click="removeImage(index)">移除</n-button>
       </div>
       <label class="field notes-field"><span>备注</span><n-input v-model:value="form.notes" type="textarea" :rows="2" /></label>
       <template #footer>
@@ -510,6 +576,13 @@ onMounted(load)
         </div>
       </template>
     </n-modal>
+
+    <CharacterAssetPicker
+      v-model:show="assetPickerOpen"
+      :selected-id="assetPickerSelectedId"
+      :disabled-ids="assetPickerDisabledIds"
+      @pick="onAssetPicked"
+    />
 
     <n-modal v-model:show="genOpen" preset="card" :title="`AI 生成参考图 · ${genTarget?.name || ''}`" class="gen-modal">
       <p class="field-hint">有参考图时以现有图为锚保持同一张脸；一张都没有则直接文生图，采用后成为主图。生成的先进候选，采用才进参考图。</p>
@@ -625,7 +698,17 @@ onMounted(load)
 .section-title { margin: 16px 0 8px; font-size: 13px; font-weight: 600; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .appearance-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-.image-row { display: grid; grid-template-columns: minmax(140px, 2fr) 100px minmax(90px, 1fr) auto auto; gap: 6px; align-items: center; margin-bottom: 8px; }
+.image-row { display: grid; grid-template-columns: minmax(200px, 2fr) auto 92px minmax(80px, 1fr) auto auto; gap: 6px; align-items: center; margin-bottom: 8px; }
+.image-asset { display: flex; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 4px 8px 4px 4px; border: 1px solid var(--border, #e4dfd6); border-radius: 8px; background: #fff; font: inherit; text-align: left; cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease; }
+.image-asset:hover { border-color: #6c8683; background: #f6f9f8; }
+.image-asset:focus-visible { outline: 2px solid #315e68; outline-offset: 2px; }
+.image-asset-thumb { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 34px; overflow: hidden; border-radius: 6px; background: #f2efe9; }
+.image-asset-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.image-asset-empty { color: #a89c8c; font-size: 16px; line-height: 1; }
+.image-asset-text { min-width: 0; overflow: hidden; color: #4b453e; font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+.image-asset-text.is-empty { color: #9b8f81; }
+.image-asset-cta { margin-left: auto; flex-shrink: 0; color: #315e68; font-size: 11px; }
+.image-clear, .image-remove { flex-shrink: 0; }
 .notes-field { margin-top: 14px; }
 .modal-footer { display: flex; align-items: center; gap: 8px; }
 .inline-error { padding: 4px 8px; }
@@ -661,6 +744,8 @@ onMounted(load)
 @media (max-width: 800px) {
   .page-head { flex-direction: column; }
   .editor-grid, .appearance-grid, .gen-controls { grid-template-columns: 1fr 1fr; }
+  /* 窄屏：参考图占满整行，其余控件两列排布 */
   .image-row { grid-template-columns: 1fr 1fr; }
+  .image-asset { grid-column: 1 / -1; }
 }
 </style>

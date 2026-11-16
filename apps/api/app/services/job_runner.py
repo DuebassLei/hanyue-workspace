@@ -9,9 +9,11 @@ import asyncio
 import hashlib
 import logging
 import re
+import shutil
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import or_, select, update
 
@@ -23,7 +25,7 @@ from ..core.config import get_settings
 from ..core.db import SessionLocal
 from ..core.deps import default_workspace
 from ..core.security import decrypt_secret, sign_asset_url
-from . import handdraw, image_provider, image_service, publish_state, wechat_article
+from . import handdraw, image_provider, image_service, publish_state, video_render, wechat_article
 
 RETRYABLE_CODES = {"provider_unreachable", "provider_error", "provider_timeout", "rate_limited"}
 MAX_ATTEMPTS = queue.MAX_ATTEMPTS
@@ -43,7 +45,11 @@ def _utcnow() -> datetime:
 
 
 def _ext(mime: str) -> str:
-    return {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(mime, ".bin")
+    return {
+        "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+        "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "audio/wav": ".wav",
+        "video/mp4": ".mp4",
+    }.get(mime, ".bin")
 
 
 def _current_status(job_id: str) -> str | None:
@@ -254,6 +260,7 @@ def _execute(db, job: models.BackgroundJob) -> dict:
         "platform-sync": _handle_platform_sync,
         "platform-publish": _handle_platform_publish,
         "novel": _handle_novel,
+        "video-render": _handle_video_render,
     }
     handler = handlers.get(job.queue)
     if not handler:
@@ -267,11 +274,14 @@ def _store_asset(db, user, workspace_id: str, raw: bytes, mime: str, name: str, 
     path = image_service.storage_path(settings.storage_dir, key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
-    from PIL import Image
-    import io
+    width = height = None
+    if mime.startswith("image/"):
+        # PIL 只校验图片；音频/视频直接信任 ffprobe 与供应商返回
+        from PIL import Image
+        import io
 
-    with Image.open(io.BytesIO(raw)) as image:
-        width, height = image.size
+        with Image.open(io.BytesIO(raw)) as image:
+            width, height = image.size
     asset = models.Asset(
         owner_user_id=user.id,
         workspace_id=workspace_id,
@@ -1103,7 +1113,237 @@ def _handle_novel_continue(db, job: models.BackgroundJob) -> dict:
     return {"outcome": outcome, "warnings": warnings, **meta}
 
 
+def _video_stage(db, job_id: str, *, stage: str, progress: int) -> None:
+    """更新渲染任务的阶段与进度（不覆盖 cancelled 的协作式取消语义）。
+
+    顺带心跳刷新 started_at：整链渲染远超默认租约，recover_stale_running 判活
+    看 started_at，不刷新的话「活着但慢」的任务会被误判僵尸重投/杀死。
+    """
+    db.execute(
+        update(models.BackgroundJob)
+        .where(
+            models.BackgroundJob.id == job_id,
+            models.BackgroundJob.status.notin_(["cancelled", "succeeded", "failed"]),
+        )
+        .values(progress=progress, result={"stage": stage}, started_at=_utcnow())
+    )
+    db.commit()
+
+
+def _handle_video_render(db, job: models.BackgroundJob) -> dict:
+    """图文成片整链渲染：配图 → 配音 → Ken Burns 合成 → 字幕/BGM → 入素材库。
+
+    任何镜头缺图/失败都明确报错并指明镜头序号，绝不丢镜头出「残缺片」。
+    """
+    payload = job.payload or {}
+    project = db.get(models.VideoProject, payload.get("videoProjectId"))
+    if not project or project.owner_user_id != job.owner_user_id or project.deleted_at is not None:
+        raise JobFailure("video_project_not_found", "视频项目不存在")
+    shots = db.scalars(
+        select(models.VideoShot)
+        .where(models.VideoShot.project_id == project.id, models.VideoShot.deleted_at.is_(None))
+        .order_by(models.VideoShot.sort_order, models.VideoShot.id)
+    ).all()
+    if not shots:
+        raise JobFailure("no_shots", "还没有镜头：请先「AI 拆分镜」或手动添加镜头")
+    settings_json = dict(project.settings or {})
+    aspect = settings_json.get("aspectRatio") or "9:16"
+    if aspect not in video_render.RESOLUTIONS:
+        raise JobFailure("invalid_aspect_ratio", f"不支持的画幅：{aspect}")
+    width, height = video_render.RESOLUTIONS[aspect]
+    user = db.get(models.User, job.owner_user_id)
+    workdir = Path(get_settings().storage_dir) / "video_tmp" / project.id
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    total = len(shots)
+    # ---- 阶段 1：逐镜头 AI 生图（已有图的镜头跳过，支持断点续跑） ----
+    _video_stage(db, job.id, stage="images", progress=5)
+    for index, shot in enumerate(shots):
+        if _current_status(job.id) == "cancelled":
+            return {"cancelled": True}
+        if shot.image_asset_id:
+            continue
+        prompt = (shot.image_prompt or "").strip() or (shot.narration or "").strip()
+        if not prompt:
+            raise JobFailure("shot_incomplete", f"第 {index + 1} 个镜头没有旁白也没有配图描述")
+        try:
+            images = image_provider.generate_images(
+                db, job.owner_user_id, prompt=prompt, aspect_ratio=aspect, count=1
+            )
+        except image_provider.ImageProviderUnavailable as exc:
+            raise JobFailure(exc.code, f"第 {index + 1} 个镜头配图失败：{exc.message}") from exc
+        raw, mime = images[0]
+        asset = _store_asset(
+            db, user, project.workspace_id, raw, mime,
+            f"video-shot-{index + 1}-{uuid.uuid4().hex[:6]}",
+            source_type="generated", prompt=prompt,
+            license_note="AI 生成，发布前请确认平台内容规范与商用授权",
+        )
+        shot.image_asset_id = asset.id
+        db.commit()
+        _video_stage(db, job.id, stage="images", progress=5 + int(35 * (index + 1) / total))
+
+    # ---- 阶段 2：逐镜头 TTS 配音 + ffprobe 实测时长 ----
+    _video_stage(db, job.id, stage="voices", progress=42)
+    voice = settings_json.get("voice")
+    rate = settings_json.get("rate")
+    durations: list[int] = []
+    est_ms = 0
+    for index, shot in enumerate(shots):
+        if _current_status(job.id) == "cancelled":
+            return {"cancelled": True}
+        narration = (shot.narration or "").strip()
+        if not narration:
+            raise JobFailure("shot_incomplete", f"第 {index + 1} 个镜头旁白为空")
+        if shot.audio_asset_id:
+            audio_asset = db.get(models.Asset, shot.audio_asset_id)
+            if not audio_asset:
+                raise JobFailure("asset_file_missing", f"第 {index + 1} 个镜头的配音文件已丢失")
+            duration_ms = video_render.probe_duration_ms(
+                image_service.storage_path(get_settings().storage_dir, audio_asset.storage_key)
+            )
+        else:
+            from . import tts_provider
+
+            try:
+                audio_bytes, mime, est_ms = tts_provider.synthesize(narration, voice=voice, rate=rate)
+            except tts_provider.TTSUnavailable as exc:
+                raise JobFailure(exc.code, f"第 {index + 1} 个镜头配音失败：{exc.message}") from exc
+            audio_asset = _store_asset(
+                db, user, project.workspace_id, audio_bytes, mime,
+                f"video-voice-{index + 1}-{uuid.uuid4().hex[:6]}",
+                source_type="generated", prompt=narration[:4000],
+            )
+            shot.audio_asset_id = audio_asset.id
+            duration_ms = max(video_render.probe_duration_ms(
+                image_service.storage_path(get_settings().storage_dir, audio_asset.storage_key)
+            ), est_ms)
+        duration_ms = max(duration_ms or est_ms, video_render.MIN_SHOT_MS)
+        shot.duration_ms = duration_ms
+        durations.append(duration_ms + video_render.TAIL_MS)
+        db.commit()
+        _video_stage(db, job.id, stage="voices", progress=42 + int(18 * (index + 1) / total))
+
+    if sum(durations) > video_render.MAX_TOTAL_MS:
+        raise JobFailure("video_too_long", f"总时长超出上限 {video_render.MAX_TOTAL_MS // 60000} 分钟，请精简镜头")
+
+    # ---- 阶段 3：逐镜头 Ken Burns 片段 → 拼接 ----
+    _video_stage(db, job.id, stage="compose", progress=62)
+    clips: list[Path] = []
+    for index, (shot, duration_ms) in enumerate(zip(shots, durations)):
+        if _current_status(job.id) == "cancelled":
+            return {"cancelled": True}
+        image_asset = db.get(models.Asset, shot.image_asset_id)
+        audio_asset = db.get(models.Asset, shot.audio_asset_id)
+        if not image_asset or not audio_asset:
+            raise JobFailure("asset_file_missing", f"第 {index + 1} 个镜头素材文件缺失")
+        image_path = workdir / f"img_{index}{_ext(image_asset.mime_type)}"
+        image_path.write_bytes(_read_asset_bytes(image_asset))
+        audio_path = workdir / f"aud_{index}.mp3"
+        audio_path.write_bytes(_read_asset_bytes(audio_asset))
+        clip = workdir / f"clip_{index}.mp4"
+        video_render.render_shot_clip(
+            image=image_path, audio=audio_path, duration_ms=duration_ms,
+            motion=shot.motion, width=width, height=height, out=clip,
+        )
+        clips.append(clip)
+        _video_stage(db, job.id, stage="compose", progress=62 + int(18 * (index + 1) / total))
+
+    silent = all(not (shot.narration or "").strip() for shot in shots)
+    current = workdir / "merged.mp4"
+    video_render.concat_clips(clips, current, workdir)
+
+
+    # ---- 阶段 4：字幕烧录（按旁白与实测时长生成 ASS） ----
+    if settings_json.get("subtitles", True) and not silent:
+        _video_stage(db, job.id, stage="subtitles", progress=82)
+        events: list[tuple[int, int, str]] = []
+        cursor = 0
+        for shot, duration_ms in zip(shots, durations):
+            text = (shot.narration or "").strip()
+            if text:
+                speech_ms = max(duration_ms - video_render.TAIL_MS, 400)
+                events.append((cursor, cursor + speech_ms, text))
+            cursor += duration_ms
+        ass_path = workdir / "subs.ass"
+        ass_path.write_text(
+            video_render.build_ass(events, width=width, height=height), encoding="utf-8"
+        )
+        subtitled = workdir / "subtitled.mp4"
+        video_render.burn_subtitles(current, ass_path, subtitled)
+        current = subtitled
+
+
+    # ---- 阶段 5：BGM 垫乐（素材库音频循环，音量受限） ----
+    bgm_asset_id = settings_json.get("bgmAssetId")
+    if bgm_asset_id:
+        _video_stage(db, job.id, stage="bgm", progress=90)
+        bgm = db.get(models.Asset, bgm_asset_id)
+        if not bgm or bgm.owner_user_id != job.owner_user_id:
+            raise JobFailure("asset_not_found", "BGM 素材不存在或无权访问")
+        if not bgm.mime_type.startswith("audio/"):
+            raise JobFailure("invalid_bgm", "BGM 素材必须是音频文件")
+        bgm_path = workdir / f"bgm{_ext(bgm.mime_type)}"
+        bgm_path.write_bytes(_read_asset_bytes(bgm))
+        with_bgm = workdir / "with_bgm.mp4"
+        video_render.mix_bgm(current, bgm_path, float(settings_json.get("bgmVolume") or 0.18), with_bgm)
+        current = with_bgm
+
+    # ---- 收尾：成品入素材库，清理临时目录 ----
+    mp4 = current.read_bytes()
+
+    # 重渲染覆写既有成片素材（每项目恒一条 Asset，外链/签名不失效），首次才新建；
+    # 旧方案每次 insert 新行，多轮试错会把素材库堆成同名 mp4 垃圾场
+    final_asset = (
+        db.get(models.Asset, project.render_asset_id) if project.render_asset_id else None
+    )
+    if final_asset and final_asset.owner_user_id == job.owner_user_id:
+        _overwrite_asset(db, final_asset, mp4, width=width, height=height)
+    else:
+        final_asset = _store_asset(
+            db, user, project.workspace_id, mp4, "video/mp4",
+            f"{project.title or '视频'}-{uuid.uuid4().hex[:6]}.mp4",
+            source_type="video_render",
+        )
+        # Asset 宽高记录为视频分辨率（_store_asset 用 Pillow 读不到视频，这里覆写）
+        final_asset.width, final_asset.height = width, height
+    project.render_asset_id = final_asset.id
+    project.render_error = None
+    project.rendered_at = _utcnow()
+    project.status = "rendered"
+    db.commit()
+    shutil.rmtree(workdir, ignore_errors=True)
+    return {
+        "assetId": final_asset.id,
+        "assetUrl": _signed_asset_url(final_asset.id),
+        "shotCount": total,
+        "durationMs": sum(durations),
+        "resolution": f"{width}x{height}",
+        "subtitles": bool(settings_json.get("subtitles", True)) and not silent,
+        "bgm": bool(bgm_asset_id),
+    }
+
+
+def _overwrite_asset(db, asset: models.Asset, raw: bytes, *, width: int, height: int) -> None:
+    """原地覆写素材文件与元数据（video_render 重渲染专用）。
+
+    storage_key 保持不变 → 既有签名下载链接继续有效；先落盘成功再改元数据，
+    写盘失败时 Asset 仍指向旧文件，不会出现「库里有记录、文件是半截」的裂状态。
+    """
+    settings = get_settings()
+    path = image_service.storage_path(settings.storage_dir, asset.storage_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".writing")
+    tmp.write_bytes(raw)
+    tmp.replace(path)
+    asset.size_bytes = len(raw)
+    asset.width, asset.height = width, height
+    asset.checksum = hashlib.sha256(raw).hexdigest()
+    db.flush()
+
+
 def _read_asset_bytes(asset: models.Asset) -> bytes:
+
     path = image_service.storage_path(get_settings().storage_dir, asset.storage_key)
     if not path.is_file():
         raise JobFailure("asset_file_missing", f"素材文件缺失：{asset.original_name}")

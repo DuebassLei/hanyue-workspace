@@ -31,12 +31,58 @@ def test_preferences_default_persist_validate_and_isolate(client):
     assert first.status_code == 200
     assert (first.json()["theme"], first.json()["source"]) == ("system", "default")
     assert first.json()["defaultTextModelId"] is None
+    assert first.json()["studioImagePreferences"] == {
+        "autoImages": False,
+        "generateCover": True,
+        "coverAspectRatio": "3:4",
+        "inlineAspectRatio": "1:1",
+        "promptSuffix": "",
+    }
 
     updated = client.patch(f"{PREFIX}/preferences", json={"theme": "dark"}, headers=headers)
     assert updated.status_code == 200
     assert (updated.json()["theme"], updated.json()["source"]) == ("dark", "server")
     reread = client.get(f"{PREFIX}/preferences", headers=headers)
     assert reread.json()["theme"] == "dark"
+
+    image_update = client.patch(
+        f"{PREFIX}/preferences",
+        json={
+            "studioImagePreferences": {
+                "autoImages": True,
+                "generateCover": False,
+                "coverAspectRatio": "16:9",
+                "inlineAspectRatio": "4:3",
+                "promptSuffix": "editorial illustration",
+                "unknownField": "ignored",
+            }
+        },
+        headers=headers,
+    )
+    assert image_update.status_code == 200, image_update.text
+    assert image_update.json()["studioImagePreferences"] == {
+        "autoImages": True,
+        "generateCover": False,
+        "coverAspectRatio": "16:9",
+        "inlineAspectRatio": "4:3",
+        "promptSuffix": "editorial illustration",
+    }
+
+    bad_ratio = client.patch(
+        f"{PREFIX}/preferences",
+        json={"studioImagePreferences": {"coverAspectRatio": "999:999"}},
+        headers=headers,
+    )
+    assert bad_ratio.status_code == 422
+    bad_suffix = client.patch(
+        f"{PREFIX}/preferences",
+        json={"studioImagePreferences": {"promptSuffix": "x" * 201}},
+        headers=headers,
+    )
+    assert bad_suffix.status_code == 422
+
+    reread_image = client.get(f"{PREFIX}/preferences", headers=headers)
+    assert reread_image.json()["studioImagePreferences"]["coverAspectRatio"] == "16:9"
 
     bad = client.patch(f"{PREFIX}/preferences", json={"theme": "neon"}, headers=headers)
     assert bad.status_code == 422

@@ -20,3 +20,6 @@ storage/
 
 # 本地运行时配置
 infra/platform-evidence.json
+
+# 视频渲染 / 截图测试产物，不入库
+*.mp4

@@ -107,6 +107,98 @@ const aiModelInfo = ref('')
 const aiTargetLength = ref(600)  // 字数目标
 const aiInsertMode = ref('append') // 'append' | 'replace'
 const aiAutoImages = ref(false)
+const aiGenerateCover = ref(true)
+const aiCoverAspectRatio = ref('3:4')
+const aiInlineAspectRatio = ref('1:1')
+const aiPromptSuffix = ref('')
+const imagePreferencesLoaded = ref(false)
+const imagePreferencesLoading = ref(true)
+const imagePreferencesSaveStatus = ref('idle') // idle | saving | saved | error
+const imagePreferencesError = ref('')
+let imagePreferencesTimer = null
+let imagePreferencesRequestId = 0
+let hydratingImagePreferences = false
+let skipImagePreferencesSave = false
+const AI_IMAGE_ASPECT_OPTIONS = [
+  { value: '3:4', label: '3:4 竖版' },
+  { value: '1:1', label: '1:1 方形' },
+  { value: '4:3', label: '4:3 横版' },
+  { value: '16:9', label: '16:9 宽屏' },
+]
+const aiImagePreferences = computed(() => ({
+  autoImages: aiAutoImages.value,
+  generateCover: aiGenerateCover.value,
+  coverAspectRatio: aiCoverAspectRatio.value,
+  inlineAspectRatio: aiInlineAspectRatio.value,
+  promptSuffix: aiPromptSuffix.value,
+}))
+
+function normalizeImagePromptSuffix(value) {
+  return String(value || '').trim().replace(/[\s,.;:，。；：、]+$/u, '')
+}
+
+function appendImagePromptSuffix(prompt) {
+  const base = String(prompt || '').trim()
+  const suffix = normalizeImagePromptSuffix(aiPromptSuffix.value)
+  return suffix ? `${base.replace(/[\s,.;:，。；：、]+$/u)}, ${suffix}` : base
+}
+
+function scheduleImagePreferencesSave() {
+  if (hydratingImagePreferences || skipImagePreferencesSave || !imagePreferencesLoaded.value) return
+  imagePreferencesSaveStatus.value = 'saving'
+  imagePreferencesError.value = ''
+  clearTimeout(imagePreferencesTimer)
+  imagePreferencesTimer = setTimeout(saveImagePreferences, 400)
+}
+
+async function saveImagePreferences() {
+  imagePreferencesTimer = null
+  const requestId = ++imagePreferencesRequestId
+  imagePreferencesSaveStatus.value = 'saving'
+  try {
+    await api.patch('/preferences', { studioImagePreferences: aiImagePreferences.value })
+    if (requestId === imagePreferencesRequestId) imagePreferencesSaveStatus.value = 'saved'
+  } catch (err) {
+    if (requestId === imagePreferencesRequestId) {
+      imagePreferencesSaveStatus.value = 'error'
+      imagePreferencesError.value = `配图设置保存失败：${err.message}`
+    }
+  }
+}
+
+async function loadImagePreferences() {
+  imagePreferencesLoading.value = true
+  imagePreferencesError.value = ''
+  try {
+    const preferences = await api.get('/preferences')
+    const settings = preferences.studioImagePreferences || {}
+    hydratingImagePreferences = true
+    aiAutoImages.value = settings.autoImages === true
+    aiGenerateCover.value = settings.generateCover !== false
+    aiCoverAspectRatio.value = settings.coverAspectRatio || '3:4'
+    aiInlineAspectRatio.value = settings.inlineAspectRatio || '1:1'
+    aiPromptSuffix.value = settings.promptSuffix || ''
+    skipImagePreferencesSave = true
+    imagePreferencesLoaded.value = true
+    imagePreferencesSaveStatus.value = preferences.source === 'server' ? 'saved' : 'idle'
+    queueMicrotask(() => { skipImagePreferencesSave = false })
+  } catch (err) {
+    imagePreferencesError.value = `配图设置加载失败，将使用默认设置：${err.message}`
+    imagePreferencesLoaded.value = true
+    imagePreferencesSaveStatus.value = 'error'
+  } finally {
+    hydratingImagePreferences = false
+    imagePreferencesLoading.value = false
+  }
+}
+
+watch(
+  [aiAutoImages, aiGenerateCover, aiCoverAspectRatio, aiInlineAspectRatio, aiPromptSuffix],
+  scheduleImagePreferencesSave,
+)
+watch(aiAutoImages, (enabled) => {
+  if (enabled) loadImageProviderStatus()
+})
 const writingStyles = ref([])
 const writingStylesLoading = ref(false)
 const writingStyleKey = ref('article-drafting')
@@ -487,12 +579,20 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
     toast('文章已生成，但未提取到配图提示词')
     return
   }
+  const settings = {
+    coverAspectRatio: aiCoverAspectRatio.value,
+    inlineAspectRatio: aiInlineAspectRatio.value,
+    generateCover: aiGenerateCover.value,
+  }
   const requests = [
-    prompts.coverPrompt ? { prompt: prompts.coverPrompt, purpose: 'cover', label: '封面图' } : null,
+    settings.generateCover && prompts.coverPrompt
+      ? { prompt: prompts.coverPrompt, purpose: 'cover', label: '封面图', aspectRatio: settings.coverAspectRatio }
+      : null,
     ...prompts.inlinePrompts.map((prompt, index) => ({
       prompt,
       purpose: 'inline',
       label: `正文插图 ${index + 1}`,
+      aspectRatio: settings.inlineAspectRatio,
       inlineIndex: index + 1,
       inlineTotal: prompts.inlinePrompts.length,
       // 用于判断用户是否已把这篇 AI 文章应用到编辑区，避免插图落到旧草稿里
@@ -500,16 +600,18 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
     })),
   ].filter(Boolean)
   const results = await Promise.allSettled(requests.map(async (request) => {
+    const prompt = appendImagePromptSuffix(request.prompt)
     const response = await api.post('/ai/image-generations', {
-      prompt: request.prompt,
+      prompt,
       purpose: request.purpose,
-      aspectRatio: request.purpose === 'cover' ? '3:4' : '1:1',
+      aspectRatio: request.aspectRatio,
       count: 1,
     })
     return {
       id: response.jobId,
       status: 'queued',
-      prompt: request.prompt,
+      prompt,
+      aspectRatio: request.aspectRatio,
       label: request.label,
       purpose: request.purpose,
       inlineIndex: request.inlineIndex,
@@ -738,6 +840,17 @@ async function createDraftFromHot(item) {
 const imgProvider = ref({ available: false, note: '', modelCode: null })
 const imgProviderLoaded = ref(false)
 
+async function loadImageProviderStatus() {
+  if (imgProviderLoaded.value) return
+  try {
+    imgProvider.value = await api.get('/ai/image-provider/status')
+  } catch (err) {
+    imgProvider.value = { available: false, note: err.message, modelCode: null }
+  } finally {
+    imgProviderLoaded.value = true
+  }
+}
+
 // 生图表单
 const imgPrompt = ref('')
 const imgAspectRatio = ref('3:4')
@@ -764,14 +877,7 @@ const imgResults = ref([]) // [{assetId, blobUrl, rawUrl, mime, jobId}]
 
 async function openImageTab() {
   rightTab.value = 'image'
-  if (!imgProviderLoaded.value) {
-    try {
-      imgProvider.value = await api.get('/ai/image-provider/status')
-    } catch {
-      // 静默失败：不影响手动填 prompt 发起生图
-    }
-    imgProviderLoaded.value = true
-  }
+  await loadImageProviderStatus()
 }
 
 /** 从当前文章标题 + 正文前 300 字提炼图像 prompt（调用 SSE 流） */
@@ -832,7 +938,14 @@ async function generateImages() {
       aspectRatio: imgAspectRatio.value,
       count: Number(imgCount.value),
     })
-    imgJobs.value.unshift({ id: res.jobId, status: 'queued', prompt: imgPrompt.value.trim(), label: '手动配图' })
+    imgJobs.value.unshift({
+      id: res.jobId,
+      status: 'queued',
+      prompt: imgPrompt.value.trim(),
+      aspectRatio: imgAspectRatio.value,
+      count: Number(imgCount.value),
+      label: '手动配图',
+    })
     startImgPoll()
   } catch (err) {
     imgError.value = err.message
@@ -849,8 +962,8 @@ async function retryImageJob(job) {
     const response = await api.post('/ai/image-generations', {
       prompt: job.prompt,
       purpose: job.purpose || 'cover',
-      aspectRatio: job.purpose === 'cover' ? '3:4' : '1:1',
-      count: 1,
+      aspectRatio: job.aspectRatio || (job.purpose === 'cover' ? '3:4' : '1:1'),
+      count: job.count || 1,
     })
     job.id = response.jobId
     job.status = 'queued'
@@ -1048,11 +1161,13 @@ function releaseImgResults() {
 onMounted(() => {
   loadList()
   loadWritingStyles()
+  loadImagePreferences()
 })
 
 onBeforeUnmount(() => {
   stopImgPoll()
   releaseImgResults()
+  clearTimeout(imagePreferencesTimer)
   // 组件卸载时若有待保存内容，立即同步
   flushAutoSave()
 })
@@ -1078,6 +1193,15 @@ onBeforeUnmount(() => {
           @click="router.push({ name: 'cards', state: { markdown: draftBody } })"
         >
           转为图文卡片
+        </n-button>
+        <n-button
+          quaternary
+          size="small"
+          :disabled="!detail || !draftBody"
+          title="将当前正文带入视频创作，自动拆分镜"
+          @click="router.push({ name: 'videos', state: { videoSource: draftBody, videoTitle: detail?.title || '' } })"
+        >
+          转为视频
         </n-button>
         <n-button quaternary size="small" :disabled="!detail" @click="publishDrawerOpen = true">
           发布
@@ -1433,14 +1557,55 @@ onBeforeUnmount(() => {
                 >{{ opt.label }}</button>
               </div>
             </div>
-            <n-checkbox v-model:checked="aiAutoImages" :disabled="aiRunning || aiTask !== 'article'">
+            <n-checkbox
+              v-model:checked="aiAutoImages"
+              :disabled="aiRunning || aiTask !== 'article' || imagePreferencesLoading"
+            >
               <span>
                 <strong>自动生成配图</strong>
                 <small>成文完成后自动生成封面图和正文插图</small>
               </span>
             </n-checkbox>
+            <section v-if="aiAutoImages" class="ai-image-settings" aria-label="自动配图设置">
+              <div class="ai-image-settings-grid">
+                <div class="field">
+                  <label class="field-label">封面比例</label>
+                  <n-select v-model:value="aiCoverAspectRatio" :options="AI_IMAGE_ASPECT_OPTIONS" />
+                </div>
+                <div class="field">
+                  <label class="field-label">正文插图比例</label>
+                  <n-select v-model:value="aiInlineAspectRatio" :options="AI_IMAGE_ASPECT_OPTIONS" />
+                </div>
+              </div>
+              <n-checkbox v-model:checked="aiGenerateCover" :disabled="aiRunning">
+                同时生成封面图
+              </n-checkbox>
+              <div class="field">
+                <label class="field-label" for="ai-image-prompt-suffix">统一风格后缀</label>
+                <n-input
+                  id="ai-image-prompt-suffix"
+                  v-model:value="aiPromptSuffix"
+                  maxlength="200"
+                  show-count
+                  placeholder="例如：editorial illustration, clean composition"
+                />
+              </div>
+              <p v-if="!imgProvider.available && imgProviderLoaded" class="ai-image-settings-error">
+                当前未配置生图供应商，文章仍可生成，但自动配图任务会失败。
+              </p>
+              <p v-if="imagePreferencesSaveStatus === 'saving'" class="ai-image-settings-status">正在保存配图设置…</p>
+              <p v-else-if="imagePreferencesSaveStatus === 'saved'" class="ai-image-settings-status">配图设置已保存</p>
+              <p v-if="imagePreferencesError" class="ai-image-settings-error">{{ imagePreferencesError }}</p>
+            </section>
+            <p v-else-if="imagePreferencesError" class="ai-image-settings-error">{{ imagePreferencesError }}</p>
             <n-space :size="8" class="studio-actions">
-              <n-button size="small" type="primary" :loading="aiRunning" @click="runAi">
+              <n-button
+                size="small"
+                type="primary"
+                :loading="aiRunning"
+                :disabled="imagePreferencesLoading"
+                @click="runAi"
+              >
                 开始生成
               </n-button>
               <n-button v-if="aiRunning" quaternary size="small" @click="stopAi">中断</n-button>
@@ -2407,6 +2572,27 @@ onBeforeUnmount(() => {
   color: var(--color-text-muted, #8a8178);
   font-size: 11px;
 }
+.ai-image-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3) 28px;
+  padding: var(--space-3);
+  border-left: 2px solid var(--color-border);
+  background: var(--color-surface-muted, var(--color-surface));
+}
+.ai-image-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.ai-image-settings-status,
+.ai-image-settings-error {
+  margin: 0;
+  font-size: 11px;
+}
+.ai-image-settings-status { color: var(--color-text-secondary); }
+.ai-image-settings-error { color: var(--color-danger, #c2413b); }
 .studio-ai-output {
   padding: var(--space-3);
   border-left: 3px solid var(--color-accent);
@@ -2731,6 +2917,7 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 780px) {
+  .ai-image-settings-grid { grid-template-columns: 1fr; }
   .studio-page {
     gap: var(--space-3);
   }
