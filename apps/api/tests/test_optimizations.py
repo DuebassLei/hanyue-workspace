@@ -144,15 +144,23 @@ def test_created_account_has_no_fake_authorization(client):
 
 
 def test_capabilities_expose_wechat_official_only_state(client):
-    """平台收敛后能力矩阵只有公众号：能力与证据报告如实返回。"""
+    """平台收敛后只有公众号真实可用，下线的平台只以未接入占位出现（不可绑定）；能力与证据报告如实返回。"""
     headers = _login(client, "cap-user")
     body = client.get("/api/v1/platforms/capabilities", headers=headers).json()
-    assert len(body["platforms"]) == 1
-    platform = body["platforms"][0]
-    assert platform["platform"] == "wechat_official"
+    platforms = {item["platform"]: item for item in body["platforms"]}
+    # 只有公众号带真实能力，且不可自动发布、但可以推草稿
+    platform = platforms["wechat_official"]
+    assert platform["available"] is True
     assert platform["confirmed"] is True
     assert platform["publish"] is False
     assert platform["draftUpload"] is True
+    # 已下线平台只能作为占位，不能冒充已接入
+    online = [code for code, item in platforms.items() if item["available"]]
+    assert online == ["wechat_official"]
+    for code in ("xiaohongshu", "douyin"):
+        assert code in platforms
+        assert platforms[code]["available"] is False
+        assert platforms[code]["confirmed"] is False
     # 证据报告：公众号一项已核验，无警告、无核验时间戳
     assert body["verifiedCount"] == 1
     assert body["verifiedAt"] is None
