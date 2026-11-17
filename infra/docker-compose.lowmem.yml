@@ -12,18 +12,22 @@ services:
   # ── PostgreSQL：默认 shared_buffers=128MB 但 work_mem/max_connections 按服务器档给，
   #    10 个连接各做一次排序就可能顶到上限。这里全部按 2G 预算重算。
   db:
+    # ⚠️ 每个 -c 后面必须紧跟一个参数值，注释只能写在「-c 之前」。
+    # 把注释插进 -c 和它的值中间，PG 会收到 "-c -c" 并直接
+    #   FATAL: -c -c requires a value
+    # 然后无限重启（2026-11-17 就是这么挂的）。deploy.sh 的 lint_db_command
+    # 会在启动前静态校验这一点。
     command:
       - postgres
       - -c
       - shared_buffers=160MB
-      - -c
       # 每个排序/哈希节点可用内存；设大了并发几条就爆，设小了落盘但能活
+      - -c
       - work_mem=8MB
       - -c
       - maintenance_work_mem=64MB
       - -c
       - effective_cache_size=448MB
-      - -c
       # 默认 100 个连接 × 每连接数 MB 的私有内存，2G 机器用不到这么多
       - -c
       - max_connections=40
@@ -36,7 +40,6 @@ services:
       # 2 核上 JIT 编译的收益抵不上它的内存和启动开销
       - -c
       - jit=off
-      - -c
       # 并行 worker 在 2 核上只会和 api/worker 抢 CPU
       - -c
       - max_parallel_workers_per_gather=1
