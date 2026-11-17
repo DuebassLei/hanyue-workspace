@@ -140,6 +140,73 @@ cmd_init_env() {
   ensure_evidence
 }
 
+# ── 失败诊断 ──────────────────────────────────────────────────
+# compose 只会说「dependency failed to start: container infra-db-1 is unhealthy」，
+# 这句话不含任何原因。db 和 redis 同时挂时（磁盘写满 / 内存不够都长这样），
+# 不给日志和退出码根本没法判断，所以这一步直接摊在终端里。
+# ── 静态校验：lowmem 里 db 的 command 必须是「-c 值」严格交替 ──────────
+# 在 -c 和它的值中间插一行注释，PG 就会收到 "-c -c"，直接
+#   FATAL: -c -c requires a value
+# 然后 restart: unless-stopped 无限重启，而这条报错只有翻容器日志才看得到
+# （compose 只会说依赖失败）。所以启动前把它挡下来。
+lint_db_command() {
+  [ -f "$LOWMEM_FILE" ] || return 0
+  awk '
+    /^  db:/             { in_db = 1; next }
+    in_db && /^  [a-z]/  { in_db = 0 }
+    in_db && /^      - / { n++; item[n] = substr($0, 9) }
+    END {
+      bad = 0
+      for (i = 1; i <= n; i++) {
+        if (item[i] == "-c" && (i == n || item[i+1] == "-c" || item[i+1] ~ /^-/)) {
+          printf "  docker-compose.lowmem.yml: db command 第 %d 项 -c 后面缺参数值\n", i > "/dev/stderr"
+          bad = 1
+        }
+      }
+      exit bad
+    }' "$LOWMEM_FILE"
+}
+
+docker_root_free_gb() {
+  local root
+  root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+  df -Pk "$root" 2>/dev/null | awk 'NR==2{printf "%d", $4/1024/1024}'
+}
+
+dump_failure_context() {
+  local svc id state exit_code free_gb
+  printf '\n' >&2
+  warn "════════════ 启动失败诊断 ════════════"
+  "${COMPOSE[@]}" ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}' >&2 2>/dev/null || true
+  for svc in db redis api worker web; do
+    id="$("${COMPOSE[@]}" ps -aq "$svc" 2>/dev/null | head -n1 || true)"
+    [ -n "$id" ] || continue
+    state="$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null || echo unknown)"
+    case "$state" in running) continue ;; esac
+    exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$id" 2>/dev/null || echo -1)"
+    printf '\n\033[33m──── %s（state=%s exit=%s）日志最后 40 行 ────\033[0m\n' \
+      "$svc" "$state" "$exit_code" >&2
+    docker logs --tail 40 "$id" 2>&1 | sed 's/^/  /' >&2 || true
+    case "$exit_code" in
+      137)
+        warn "$svc 退出码 137：被 OOM killer 杀掉（内存不足）。看 free -m，或调低 docker-compose.lowmem.yml 的 mem_limit" ;;
+      1)
+        if [ "$svc" = "db" ]; then
+          warn "db 退出码 1 常见原因：卷里已有旧密码（改过 POSTGRES_PASSWORD）、密码含特殊字符、.env 用了 CRLF 行尾（file .env 可查）"
+        fi ;;
+    esac
+  done
+  free_gb="$(docker_root_free_gb || true)"
+  if [ -n "${free_gb:-}" ] && [ "${free_gb:-99}" -lt 2 ]; then
+    warn "docker 数据目录只剩 ${free_gb}GB：磁盘写满会让 db/redis 同时起不来（PG 写不了 WAL、Redis 开不了 AOF，都会立刻退出）"
+    docker system df 2>/dev/null | sed 's/^/  /' >&2 || true
+    warn "清理：docker builder prune -af  &&  docker image prune -af"
+  fi
+  printf '\n' >&2
+  warn "全部日志：./scripts/deploy.sh logs <服务>；只看末尾：docker logs --tail 100 <容器名>"
+  warn "══════════════════════════════════════"
+}
+
 wait_healthy() {
   local service="$1" tries="${2:-60}" i=0 id status
   id="$("${COMPOSE[@]}" ps -q "$service" 2>/dev/null || true)"
@@ -168,15 +235,27 @@ cmd_up() {
   fi
   if [ "$LOWMEM_ON" -eq 1 ]; then
     info "已启用小内存档（docker-compose.yml + docker-compose.lowmem.yml；PG shared_buffers=160MB / Redis 128MB / 容器内存上限）"
+    if ! lint_db_command; then
+      die "docker-compose.lowmem.yml 的 db command 有 -c 缺少参数（见上），修正后再启动"
+    fi
   fi
   [ "${1:-}" = "--no-build" ] || build_services
   # 镜像已就绪；--no-build 同时避免 compose 又并行触发一次构建
-  "${COMPOSE[@]}" up -d --no-build
-  wait_healthy db 30 || true
-  wait_healthy redis 20 || true
-  wait_healthy api 60 || true
-  wait_healthy worker 40 || true
-  wait_healthy web 30 || true
+  if ! "${COMPOSE[@]}" up -d --no-build; then
+    dump_failure_context
+    die "启动失败（上方是各容器状态与日志尾部）"
+  fi
+  # db 首次 initdb + 健康检查 10 次重试最坏要 70s，给足 90s
+  local failed=0
+  wait_healthy db 45 || failed=1
+  wait_healthy redis 20 || failed=1
+  wait_healthy api 60 || failed=1
+  wait_healthy worker 40 || failed=1
+  wait_healthy web 30 || failed=1
+  if [ "$failed" -ne 0 ]; then
+    dump_failure_context
+    die "有服务未就绪，见上方诊断"
+  fi
   cmd_access_hint
 }
 
@@ -421,6 +500,14 @@ cmd_doctor() {
     else
       chk_ok "swap ${swap_mb}MB（构建有回旋余地）"
     fi
+  fi
+  # Redis 的 RDB 存盘靠 fork，overcommit_memory=0 时 fork 可能失败（镜像启动就会告警）
+  local oc
+  oc="$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo 1)"
+  if [ "$oc" = "1" ]; then
+    chk_ok "vm.overcommit_memory=1（Redis 后台存盘 fork 安全）"
+  else
+    chk_warn "vm.overcommit_memory=$oc：Redis 后台存盘可能失败，sudo sysctl -w vm.overcommit_memory=1 并写入 /etc/sysctl.conf"
   fi
 
   avail_gb="$(df -Pk "$INFRA_DIR" 2>/dev/null | awk 'NR==2{printf "%d", $4/1024/1024}')"
