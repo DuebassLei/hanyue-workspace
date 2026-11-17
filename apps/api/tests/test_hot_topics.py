@@ -354,3 +354,78 @@ def test_sources_endpoint(client):
     payload = client.get(f"{PREFIX}/hot-topics/sources", headers=headers).json()
     assert payload["platforms"]
     assert "微博" in payload["enabled"]
+    # 灵感雷达移植进来的四路：AIHOT 热点/日报、微信爆文池、微信文章搜索
+    names = {row["platform"] for row in payload["platforms"]}
+    assert {"AIHOT 热点与早报", "AIHOT 日报", "微信 10w+ 爆文池", "微信文章搜索"} <= names
+
+
+def test_aihot_agent_markdown_parsing():
+    from app.services.hot_sources import _rows_aihot_agent
+
+    hot = _rows_aihot_agent(
+        "AIHOT 热点与早报",
+        "第 1 名：[OpenAI 发布新模型](https://example.com/a)\n"
+        "   信源：The Verge、TechCrunch\n"
+        "   来龙去脉：https://aihot.news/story/1\n"
+        "第 2 名：[国产芯片量产](https://example.com/b)\n"
+        "   信源：IT之家\n",
+        "hot",
+    )
+    assert [row["title"] for row in hot] == ["OpenAI 发布新模型", "国产芯片量产"]
+    assert hot[0]["hot"] == 2
+    assert hot[0]["url"] == "https://example.com/a"
+
+    daily = _rows_aihot_agent(
+        "AIHOT 日报",
+        "【模型】\n1. [某模型开源](https://example.com/c) · 某博客\n   模型权重已公开。\n",
+        "daily",
+    )
+    assert daily[0]["title"] == "某模型开源"
+    assert daily[0]["rank"] == 1
+
+
+def test_wechat_10w_snapshot_parsing():
+    from app.services.hot_sources import _rows_wechat_10w
+
+    rows = _rows_wechat_10w({
+        "articles": [
+            {"title": "为什么你总是存不下钱", "userName": "某账号", "clicksCount": "10w+",
+             "oriUrl": "https://mp.weixin.qq.com/s/abc"},
+            {"title": ""},
+        ]
+    })
+    assert len(rows) == 1
+    assert rows[0]["platform"] == "微信 10w+ 爆文池"
+    assert rows[0]["title"].startswith("某账号｜")
+    assert rows[0]["hot"] == 100000
+    assert rows[0]["url"].startswith("https://mp.weixin.qq.com/")
+
+
+def test_wechat_search_html_parsing():
+    from app.services.hot_sources import _rows_wechat_search
+
+    html = (
+        '<a href="/link?url=AAA" target="_blank">为什么年轻人开始<font>反向消费</font></a>'
+        '<a href="/link?url=BBB">短</a>'
+    )
+    rows = _rows_wechat_search(html)
+    assert len(rows) == 1
+    assert rows[0]["title"] == "为什么年轻人开始反向消费"
+    assert rows[0]["url"] == "https://weixin.sogou.com/link?url=AAA"
+    assert _rows_wechat_search("<html></html>") == []
+
+
+def test_wechat_search_skipped_without_keyword(monkeypatch):
+    """没配关键词时跳过而不是报失败，其余源照常返回。"""
+    from app.services import hot_sources
+
+    monkeypatch.delenv("HOT_TOPICS_WECHAT_KEYWORD", raising=False)
+
+    def refuse(url, headers, retries=1):
+        raise AssertionError(f"不该请求外网：{url}")
+
+    monkeypatch.setattr(hot_sources, "_fetch_json", refuse)
+    monkeypatch.setattr(hot_sources.ssrf, "safe_request", refuse)
+    rows, notes = hot_sources.collect(["微信文章搜索"])
+    assert rows == []
+    assert any("未配置关键词" in note for note in notes)

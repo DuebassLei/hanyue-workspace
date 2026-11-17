@@ -1,0 +1,18 @@
+# 后端镜像构建上下文（apps/api）
+# 关键：.env 与 *.db 绝不能被打进镜像——镜像会被推送/共享，密钥与本地数据不能外泄。
+.env
+.env.*
+!.env.example
+.venv
+**/__pycache__
+**/*.pyc
+**/*.db
+**/*.db-journal
+storage
+.tmp-skill-storage
+.pytest_cache
+tests
+scripts
+**/*.log
+Dockerfile
+requirements*.txt.bak

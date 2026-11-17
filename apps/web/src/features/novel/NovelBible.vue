@@ -115,13 +115,13 @@ const STATE_OPTIONS = [
 .novel-bible { min-width: 0; }
 .block-title { margin: 0 0 10px; font-size: 15px; }
 .rules { display: flex; flex-direction: column; gap: 8px; }
-.rules label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #5c564e; }
+.rules label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--paper-ink-soft); }
 h3 { margin: 16px 0 8px; font-size: 13px; }
-.muted { margin: 0; color: #827a71; font-size: 12px; }
+.muted { margin: 0; color: var(--paper-ink-muted); font-size: 12px; }
 .entity-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .entity-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .entity-list strong { font-size: 13px; }
-.entity-list small { color: #888077; font-size: 11px; }
+.entity-list small { color: var(--paper-ink-muted); font-size: 11px; }
 .entity-list :deep(.n-input) { flex: 1 1 120px; min-width: 0; }
 .state-row { display: flex; gap: 4px; }
 </style>

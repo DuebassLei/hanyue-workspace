@@ -15,9 +15,6 @@
 
 from __future__ import annotations
 
-import os
-import time
-
 from fastapi import APIRouter, Query
 
 from .. import schemas
@@ -25,17 +22,6 @@ from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not
 from ..services import hot_topics
 
 router = APIRouter(tags=["hot-topics"])
-
-# 采集一次要打 7 个外部接口。连点会让上游以为我们在刷接口，
-# 也让用户以为「点了没反应」。默认 15 秒内重复请求直接拒绝，可用环境变量关掉。
-_last_refresh: dict[str, float] = {}
-
-
-def _cooldown() -> float:
-    try:
-        return max(0.0, float(os.getenv("HOT_TOPICS_REFRESH_COOLDOWN", "15")))
-    except ValueError:
-        return 15.0
 
 
 @router.get("/hot-topics/sources", response_model=schemas.HotSourcesOut)
@@ -50,19 +36,14 @@ def refresh_hot_topics(
     payload: schemas.HotRefreshIn | None = None,
 ) -> schemas.HotRefreshOut:
     day = (payload.date if payload else None) or hot_topics.today_str()
-    now = time.monotonic()
-    wait = _cooldown()
-    if wait and now - _last_refresh.get("all", 0.0) < wait:
-        raise ApiError(
-            "too_frequent",
-            f"刷新太频繁，请 {int(wait)} 秒后再试",
-            status_code=429,
-        )
-    _last_refresh["all"] = now
-
     try:
+        # 冷却在服务层（services/hot_topics.reserve_refresh）：定时任务与手动刷新
+        # 面对同一份限速状态，路由层不再自己维护一份进程内计数。
+        hot_topics.reserve_refresh()
         result = hot_topics.refresh(db, day=day)
     except hot_topics.HotTopicsError as exc:
+        if exc.code == "too_frequent":
+            raise ApiError(exc.code, exc.message, status_code=429) from exc
         raise ApiError(exc.code, exc.message, status_code=502, retryable=True) from exc
     return schemas.HotRefreshOut(**result)
 

@@ -1,5 +1,6 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   NAlert,
   NButton,
@@ -19,62 +20,24 @@ import {
 import { api } from '../api/client'
 import { useSessionStore } from '../stores/session'
 import { toast } from '../ui/feedback'
-import StatusTag from '../components/StatusTag.vue'
 
 const session = useSessionStore()
-const tab = ref('theme')
+const route = useRoute()
+const router = useRouter()
 
-const connections = ref([])
+// 分栏既能在页内点，也能由外部入口直接指定（?tab=xxx）
+// 模型与 API 已独立成「模型管理」页，不再作为这里的分栏
+const SETTINGS_TABS = ['theme', 'skills', 'data']
+
+function tabFromQuery(value) {
+  const key = String(value || '')
+  return SETTINGS_TABS.includes(key) ? key : 'theme'
+}
+
+const tab = ref(tabFromQuery(route.query.tab))
+
 const skills = ref([])
 const error = ref('')
-
-const showConnection = ref(false)
-const editingId = ref('')
-const connForm = reactive({
-  displayName: '',
-  providerType: 'openai_compatible',
-  baseUrl: '',
-  apiKey: '',
-  modelCode: '',
-  modelType: 'text',
-  capabilities: 'text.generate,text.stream',
-})
-// 模型类型决定能力登记：文本模型用于 AI 成文，生图模型用于素材页 AI 生图
-const MODEL_TYPES = [
-  {
-    value: 'text',
-    label: '文本模型',
-    desc: 'AI 成文、内容优化、卡片摘要',
-    caps: 'text.generate,text.stream',
-  },
-  {
-    value: 'image',
-    label: '生图模型',
-    desc: '素材页 AI 生图、封面配图',
-    caps: 'image.generate',
-  },
-]
-
-function selectModelType(type) {
-  connForm.modelType = type
-  const found = MODEL_TYPES.find((item) => item.value === type)
-  if (found) connForm.capabilities = found.caps
-}
-
-function currentModelType() {
-  return MODEL_TYPES.find((item) => item.value === connForm.modelType)
-}
-
-/** 连接下已登记模型的类型标签与样式 */
-function modelTagInfo(model) {
-  const caps = model.capabilities || []
-  if (caps.includes('image.generate')) return { label: '生图', tagClass: 'tag-info' }
-  if (caps.some((item) => item.startsWith('text.'))) return { label: '文本', tagClass: 'tag-accent' }
-  return { label: '未分类', tagClass: '' }
-}
-
-// 编辑时密钥留空表示不改动；只有显式勾选才清空
-const clearKey = ref(false)
 
 const policy = ref(null)
 // Agent 运行模式与数据路径，全部来自 /agent/status 的真实探测
@@ -144,13 +107,11 @@ const THEMES = [
 
 async function load() {
   try {
-    const [conns, skillList, policyData, statusData] = await Promise.all([
-      api.get('/models/connections'),
+    const [skillList, policyData, statusData] = await Promise.all([
       api.get('/skills'),
       api.get('/agent/policy'),
       api.get('/agent/status').catch(() => null),
     ])
-    connections.value = conns
     skills.value = skillList
     policy.value = policyData
     agentStatus.value = statusData
@@ -162,262 +123,23 @@ async function load() {
 onMounted(() => {
   load()
   loadThemeOptions()
-  refreshLogSummary()
 })
 
-/* ---------------- 系统日志（运维查看器） ---------------- */
-
-const LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-const logService = ref('api')
-const logMinLevel = ref('')
-const logKeyword = ref('')
-const logRequestId = ref('')
-const logEntries = ref([])
-const logOffset = ref(null) // null = tail 模式；数字 = 增量轮询偏移
-const logLoading = ref(false)
-const logError = ref('')
-const logAuto = ref(true)
-const logTruncated = ref(false)
-const logSummary = ref({})
-const logStreamRef = ref(null)
-let logTimer = null
-
-// 用户向上翻阅历史时暂停自动滚底，回到底部后恢复
-const logPinnedToBottom = ref(true)
-
-function onLogStreamScroll() {
-  const el = logStreamRef.value
-  if (!el) return
-  logPinnedToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-}
-
-async function scrollLogToBottom(force = false) {
-  await nextTick()
-  const el = logStreamRef.value
-  if (el && (force || logPinnedToBottom.value)) el.scrollTop = el.scrollHeight
-}
-
-const logErrorCount = computed(() =>
-  Object.values(logSummary.value).reduce((sum, item) => sum + (item.errorCount || 0), 0),
+// 深链到某个分栏时，即使已经在设置页也要切过去
+watch(
+  () => route.query.tab,
+  (value) => {
+    const next = tabFromQuery(value)
+    if (next !== tab.value) tab.value = next
+  },
 )
 
-function logQuery(extra = {}) {
-  const params = new URLSearchParams()
-  params.set('service', extra.service ?? logService.value)
-  if (extra.offset != null) params.set('offset', String(extra.offset))
-  if (logMinLevel.value) params.set('level', logMinLevel.value)
-  if (logKeyword.value.trim()) params.set('keyword', logKeyword.value.trim())
-  if (logRequestId.value.trim()) params.set('requestId', logRequestId.value.trim())
-  return `/logs?${params.toString()}`
-}
-
-async function loadLogsTail() {
-  logLoading.value = true
-  logError.value = ''
-  try {
-    const data = await api.get(logQuery({ offset: null }))
-    logEntries.value = data.entries || []
-    logOffset.value = data.nextOffset ?? 0
-    logTruncated.value = Boolean(data.hasMore)
-    await scrollLogToBottom(true)
-    if (data.services && !data.services.includes(logService.value)) {
-      // 该服务暂无日志文件：保持空列表即可，不强制切换
-    }
-  } catch (err) {
-    logError.value = err.message
-  } finally {
-    logLoading.value = false
-  }
-}
-
-async function pollLogs() {
-  if (document.hidden || logLoading.value) return
-  logLoading.value = true
-  try {
-    if (logOffset.value == null) {
-      await loadLogsTail()
-      return
-    }
-    const data = await api.get(logQuery({ offset: logOffset.value }))
-    if (data.entries?.length) {
-      logEntries.value = [...logEntries.value, ...data.entries].slice(-2000)
-      await scrollLogToBottom()
-    }
-    // nextOffset 归零说明日志轮转/清空：重置为 tail 重新拉尾部
-    logOffset.value = data.nextOffset === 0 ? null : data.nextOffset
-    if (data.truncated) await loadLogsTail()
-  } catch {
-    // 轮询失败静默重试，不打断页面；连续失败由下一次手动刷新暴露
-  } finally {
-    logLoading.value = false
-  }
-}
-
-function startLogPolling() {
-  stopLogPolling()
-  if (logAuto.value) logTimer = setInterval(pollLogs, 2500)
-}
-
-function stopLogPolling() {
-  if (logTimer) {
-    clearInterval(logTimer)
-    logTimer = null
-  }
-}
-
-function toggleLogAuto() {
-  logAuto.value = !logAuto.value
-  startLogPolling()
-}
-
-async function refreshLogSummary() {
-  try {
-    const data = await api.get('/logs/summary')
-    logSummary.value = data.services || {}
-  } catch {
-    /* 概览失败不影响主功能 */
-  }
-}
-
 watch(tab, (value) => {
-  if (value === 'logs') {
-    loadLogsTail()
-    refreshLogSummary()
-    startLogPolling()
-  } else {
-    stopLogPolling()
+  // 页内切分栏时同步 URL，避免再点一次顶栏入口时地址没变、页面不动
+  if (tabFromQuery(route.query.tab) !== value) {
+    router.replace({ query: { ...route.query, tab: value } })
   }
 })
-
-onBeforeUnmount(stopLogPolling)
-
-
-function resetForm() {
-  editingId.value = ''
-  clearKey.value = false
-  connForm.displayName = ''
-  connForm.providerType = 'openai_compatible'
-  connForm.baseUrl = ''
-  connForm.apiKey = ''
-  connForm.modelCode = ''
-  connForm.modelType = 'text'
-  connForm.capabilities = 'text.generate,text.stream'
-}
-
-function openCreate() {
-  resetForm()
-  showConnection.value = true
-}
-
-function openEdit(conn) {
-  resetForm()
-  editingId.value = conn.id
-  connForm.displayName = conn.displayName
-  connForm.providerType = conn.providerType
-  connForm.baseUrl = conn.baseUrl || ''
-  connForm.modelCode = conn.models?.[0]?.modelCode || ''
-  const caps = conn.models?.[0]?.capabilities || ['text.generate', 'text.stream']
-  connForm.capabilities = caps.join(',')
-  connForm.modelType = caps.includes('image.generate') ? 'image' : 'text'
-  showConnection.value = true
-}
-
-async function saveConnection() {
-  error.value = ''
-  if (!connForm.displayName.trim()) {
-    error.value = '请填写连接名称'
-    return
-  }
-  if (connForm.baseUrl && !connForm.baseUrl.startsWith('https://')) {
-    error.value = 'Base URL 必须使用 HTTPS'
-    return
-  }
-  try {
-    if (editingId.value) {
-      const payload = {
-        displayName: connForm.displayName,
-        providerType: connForm.providerType,
-        baseUrl: connForm.baseUrl,
-      }
-      // 只在用户真的输入了新密钥或勾选清空时才传，避免误清已有凭据
-      if (clearKey.value) payload.apiKey = ''
-      else if (connForm.apiKey.trim()) payload.apiKey = connForm.apiKey
-      const updated = await api.patch(`/models/connections/${editingId.value}`, payload)
-      const idx = connections.value.findIndex((c) => c.id === updated.id)
-      if (idx >= 0) connections.value[idx] = updated
-      await syncModelCode(updated, connForm.modelCode, false, connForm.capabilities)
-      showConnection.value = false
-      toast('连接已更新。')
-      return
-    }
-    const conn = await api.post('/models/connections', {
-      displayName: connForm.displayName,
-      providerType: connForm.providerType,
-      baseUrl: connForm.baseUrl,
-      apiKey: connForm.apiKey,
-    })
-    await syncModelCode(conn, connForm.modelCode, true, connForm.capabilities)
-    connections.value.push(conn)
-    showConnection.value = false
-    toast('连接已保存；密钥只在服务端加密存储，接口不会返回明文。')
-  } catch (err) {
-    error.value = err.message
-  }
-}
-
-/** 新增或修改该连接下的第一个模型代号，保持与「模型代号」输入一致 */
-async function syncModelCode(conn, code, isNew = false, capabilities = '') {
-  const trimmed = (code || '').trim()
-  const caps = capabilities
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean)
-  const capList = caps.length ? caps : ['text.generate', 'text.stream']
-  const existing = conn.models?.[0]
-  if (!trimmed) {
-    if (!isNew && existing?.id) {
-      await api.del(`/models/catalog/${existing.id}`)
-      conn.models = []
-    }
-    return
-  }
-  const capsChanged =
-    existing && JSON.stringify(existing.capabilities || []) !== JSON.stringify(capList)
-  if (existing && (existing.modelCode !== trimmed || capsChanged)) {
-    const model = await api.patch(`/models/catalog/${existing.id}`, {
-      modelCode: trimmed,
-      capabilities: capList,
-    })
-    conn.models = [model]
-  } else if (!existing) {
-    const model = await api.post('/models/catalog', {
-      connectionId: conn.id,
-      modelCode: trimmed,
-      capabilities: capList,
-    })
-    conn.models = [model]
-  }
-}
-
-async function testConnection(conn) {
-  error.value = ''
-  try {
-    const result = await api.post(`/models/connections/${conn.id}/test`)
-    conn.status = result.status
-    const detail = result.httpStatus
-      ? `（HTTP ${result.httpStatus}${result.latencyMs ? ` · ${result.latencyMs}ms` : ''}）`
-      : ''
-    toast(`${result.message}${detail}`, result.verified ? 'success' : 'warning')
-    if (!result.verified) error.value = '连接未通过真实连通性验证，状态已如实记录。'
-  } catch (err) {
-    error.value = err.message
-  }
-}
-
-async function removeConnection(conn) {
-  await api.del(`/models/connections/${conn.id}`)
-  connections.value = connections.value.filter((c) => c.id !== conn.id)
-}
 
 const expandedSkillId = ref('')
 
@@ -456,11 +178,11 @@ const RISK_LABELS = {
 // （manifest 校验只认预设，自定义主题不能出现在这里）；拉取失败退回内置快照。
 const THEME_FALLBACK = [
   { value: 'ink-green', label: '墨绿简约 · 知识/职场/干货' },
-  { value: 'deep-blue', label: '深海蓝 · 科技/财经/分析' },
   { value: 'warm-orange', label: '暖橙生活 · 生活/情感/美食' },
   { value: 'mono', label: '极简黑白 · 深度长文/访谈' },
   { value: 'terracotta-warm', label: '暖陶土 · 工具推荐/产品测评' },
   { value: 'blue-business', label: '商务蓝 · 职场干货/产品教程' },
+  { value: 'dispatch', label: '公文 · 通知/报告/政务说明' },
 ]
 const THEME_OPTIONS = ref(THEME_FALLBACK)
 async function loadThemeOptions() {
@@ -476,11 +198,6 @@ async function loadThemeOptions() {
     // 排版服务不可达时用内置快照，不阻塞设置页
   }
 }
-const providerOptions = [
-  { value: 'openai_compatible', label: 'OpenAI 兼容' },
-  { value: 'vendor_native', label: '供应商原生（适配器未接入）' },
-]
-
 const showStyle = ref(false)
 const styleEditingId = ref('')
 // 定制来源：编辑内置风格时记录其 id，保存时创建个人定制副本而非直接修改
@@ -630,20 +347,19 @@ async function removeStyle(skill) {
     <div class="page-head">
       <div>
         <h1 class="page-title">设置</h1>
-        <p class="page-sub">主题、模型、Agent 与数据边界</p>
+        <p class="page-sub">主题、Agent 与数据边界；模型与日志已拆为「系统」菜单下的独立页面</p>
       </div>
+      <RouterLink v-slot="{ navigate }" custom :to="{ name: 'models' }">
+        <n-button secondary @click="navigate">模型管理 →</n-button>
+      </RouterLink>
     </div>
 
     <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
 
     <n-tabs v-model:value="tab" type="line" animated>
       <n-tab name="theme">外观与主题</n-tab>
-      <n-tab name="models">模型与 API</n-tab>
       <n-tab name="skills">Agent 与 Skills</n-tab>
       <n-tab name="data">数据与安全</n-tab>
-      <n-tab name="logs">
-        <span class="log-tab-label">系统日志<span v-if="logErrorCount" class="log-dot" :title="`最近日志含 ${logErrorCount} 条错误`" /></span>
-      </n-tab>
     </n-tabs>
 
     <section v-if="tab === 'theme'" class="card">
@@ -671,46 +387,6 @@ async function removeStyle(skill) {
         <p class="field-hint" style="margin-top: var(--space-2)">
           状态同时用颜色和文字表达；两种主题下均满足普通文字对比度 ≥ 4.5:1。
         </p>
-      </div>
-    </section>
-
-    <section v-if="tab === 'models'" class="card">
-      <div class="row">
-        <h2 class="card-title" style="margin: 0">模型连接</h2>
-        <div class="spacer" />
-        <n-button type="primary" size="small" @click="openCreate">添加连接</n-button>
-      </div>
-      <n-empty v-if="!connections.length" description="未配置时生成请求会明确报错（provider_unavailable），不会产生占位内容。">
-        <template #extra>
-          <n-button type="primary" size="small" @click="openCreate">添加第一个连接</n-button>
-        </template>
-      </n-empty>
-      <div v-else class="list">
-        <div v-for="conn in connections" :key="conn.id" class="list-row">
-          <div class="list-main">
-            <div class="list-title">{{ conn.displayName }}</div>
-            <div class="list-meta">
-              {{ conn.providerType }} · {{ conn.baseUrl || '未设置 Base URL' }} ·
-              密钥 {{ conn.keyMasked || '未配置' }}
-            </div>
-            <div v-if="conn.models.length" class="row row-tight" style="margin-top: 6px">
-              <n-tag
-                v-for="model in conn.models"
-                :key="model.id"
-                size="small"
-                :type="modelTagInfo(model).tagClass === 'tag-info' ? 'info' : modelTagInfo(model).tagClass === 'tag-accent' ? 'warning' : 'default'"
-                round
-              >
-                {{ modelTagInfo(model).label }} · {{ model.modelCode }}
-              </n-tag>
-            </div>
-            <div v-else class="list-meta" style="margin-top: 4px">未登记模型 · 编辑后填写模型代号</div>
-          </div>
-          <StatusTag :status="conn.status" />
-          <n-button quaternary size="small" @click="testConnection(conn)">测试</n-button>
-          <n-button quaternary size="small" @click="openEdit(conn)">编辑</n-button>
-          <n-button quaternary size="small" type="error" @click="removeConnection(conn)">删除</n-button>
-        </div>
       </div>
     </section>
 
@@ -966,80 +642,6 @@ async function removeStyle(skill) {
     </section>
 
     <n-modal
-      v-model:show="showConnection"
-      preset="card"
-      :title="editingId ? '编辑模型连接' : '添加模型连接'"
-      style="width: min(560px, calc(100vw - 32px))"
-    >
-      <n-form label-placement="top">
-        <n-form-item label="连接名称">
-          <n-input v-model:value="connForm.displayName" placeholder="例如：主力文本模型" />
-        </n-form-item>
-        <n-form-item label="供应商类型">
-          <n-select v-model:value="connForm.providerType" :options="providerOptions" />
-          <template v-if="connForm.providerType === 'vendor_native'" #feedback>
-            该协议适配器尚未实现，连接可保存，但「测试」会明确返回 adapter_unavailable，不会静默回退。
-          </template>
-        </n-form-item>
-        <n-form-item label="Base URL">
-          <n-input v-model:value="connForm.baseUrl" placeholder="https://api.example.com/v1" />
-          <template #feedback>
-            仅允许 HTTPS 公网地址：保存时校验字面量，请求前解析 DNS 并拒绝内网 / 环回 /
-            链路本地 / 云元数据地址，且逐跳校验重定向。
-          </template>
-        </n-form-item>
-        <n-form-item label="API Key">
-          <n-input
-            v-model:value="connForm.apiKey"
-            type="password"
-            show-password-on="click"
-            autocomplete="new-password"
-            :placeholder="editingId ? '留空表示不修改当前密钥' : ''"
-          />
-          <template #feedback>
-            {{ editingId ? '保存后不再回显明文；留空即保留原密钥。' : '保存后不再回显明文。' }}
-          </template>
-        </n-form-item>
-        <n-form-item v-if="editingId" :show-label="false">
-          <n-checkbox v-model:checked="clearKey">清空已有密钥（清空后该连接不可调用）</n-checkbox>
-        </n-form-item>
-        <n-form-item label="模型类型">
-          <div class="model-type-grid" role="radiogroup" aria-label="模型类型">
-            <button
-              v-for="item in MODEL_TYPES"
-              :key="item.value"
-              type="button"
-              class="model-type-card"
-              :class="{ 'is-active': connForm.modelType === item.value }"
-              role="radio"
-              :aria-checked="connForm.modelType === item.value"
-              @click="selectModelType(item.value)"
-            >
-              <span class="model-type-name">{{ item.label }}</span>
-              <span class="model-type-desc">{{ item.desc }}</span>
-            </button>
-          </div>
-          <template #feedback>
-            {{ currentModelType()?.desc }}；能力随类型自动登记（{{ currentModelType()?.caps }}），不会被调用未登记的能力。
-          </template>
-        </n-form-item>
-        <n-form-item :label="`模型代号${editingId ? '' : '（可选）'}`">
-          <n-input
-            v-model:value="connForm.modelCode"
-            :placeholder="connForm.modelType === 'image' ? '例如：gemini-2.5-flash-image' : '例如：gpt-4o-mini'"
-          />
-          <template v-if="editingId" #feedback>留空将删除该连接下已登记的模型。</template>
-        </n-form-item>
-      </n-form>
-      <template #footer>
-        <n-space justify="end">
-          <n-button quaternary @click="showConnection = false">取消</n-button>
-          <n-button type="primary" @click="saveConnection">保存</n-button>
-        </n-space>
-      </template>
-    </n-modal>
-
-    <n-modal
       v-model:show="showStyle"
       preset="card"
       :title="styleModalTitle"
@@ -1100,115 +702,6 @@ async function removeStyle(skill) {
 </template>
 
 <style scoped>
-.log-tab-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.log-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-danger);
-}
-.log-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin: var(--space-3) 0;
-}
-.log-service-select {
-  width: 120px;
-}
-.log-level-select {
-  width: 130px;
-}
-.log-keyword-input {
-  width: 180px;
-}
-.log-rid-input {
-  width: 160px;
-}
-.log-summary-chip {
-  font-size: var(--font-xs);
-  padding: 2px 8px;
-  border-radius: 10px;
-}
-.log-summary-chip.is-error {
-  color: var(--color-danger);
-  background: rgba(208, 48, 80, 0.1);
-}
-.log-summary-chip.is-warn {
-  color: var(--color-warning);
-  background: rgba(240, 160, 32, 0.12);
-}
-.log-alert {
-  margin-bottom: var(--space-2);
-}
-.log-truncated-hint {
-  font-size: var(--font-xs);
-  color: var(--color-warning);
-  margin-bottom: var(--space-2);
-}
-.log-stream {
-  max-height: 480px;
-  overflow: auto;
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: var(--space-2) var(--space-3);
-  font-family: 'JetBrains Mono', Consolas, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.7;
-}
-.log-empty {
-  color: var(--color-text-muted);
-  padding: var(--space-4);
-  text-align: center;
-}
-.log-line {
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-.log-ts {
-  color: var(--color-text-muted);
-  margin-right: 6px;
-}
-.log-level {
-  display: inline-block;
-  min-width: 58px;
-  font-weight: 600;
-  margin-right: 6px;
-}
-.level-error .log-level,
-.level-critical .log-level,
-.level-error .log-msg,
-.level-critical .log-msg {
-  color: var(--color-danger);
-}
-.level-warning .log-level,
-.level-warning .log-msg {
-  color: var(--color-warning);
-}
-.level-debug .log-msg {
-  color: var(--color-text-muted);
-}
-.log-logger {
-  color: var(--color-info);
-  margin-right: 6px;
-}
-.log-rid {
-  color: var(--color-text-muted);
-  margin-right: 6px;
-  cursor: pointer;
-  text-decoration: underline dotted;
-}
-.log-line.level-continuation {
-  padding-left: 18px;
-  color: var(--color-text-muted);
-}
-
 .status-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1291,54 +784,6 @@ async function removeStyle(skill) {
   color: var(--color-text-primary);
   white-space: nowrap;
   overflow-x: auto;
-}
-
-.model-type-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.model-type-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  cursor: pointer;
-  text-align: left;
-  font: inherit;
-  color: inherit;
-  transition: border-color 0.15s, background 0.15s;
-}
-
-.model-type-card:hover {
-  border-color: var(--color-border-strong);
-  background: var(--color-surface-raised);
-}
-
-.model-type-card.is-active {
-  border-color: var(--color-accent);
-  background: var(--color-accent-soft);
-  box-shadow: 0 0 0 1px var(--color-accent);
-}
-
-.model-type-name {
-  font-size: var(--font-body);
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.model-type-card.is-active .model-type-name {
-  color: var(--color-accent);
-}
-
-.model-type-desc {
-  font-size: var(--font-xs);
-  color: var(--color-text-muted);
 }
 
 </style>

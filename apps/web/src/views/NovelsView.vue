@@ -25,7 +25,7 @@ const actionError = ref('')
 
 // 任务错误 → 人话。映射不到的原样显示 errorMessage，方便按 errorCode 查供应商日志。
 const JOB_ERROR_TEXT = {
-  provider_unavailable: '文本模型未配置或订阅已失效，请到「设置 → 模型连接」检查并测试通过后重试',
+  provider_unavailable: '文本模型未配置或订阅已失效，请到「模型管理」检查并测试通过后重试',
 }
 
 const failedJobMessage = computed(() => {
@@ -229,11 +229,11 @@ onMounted(loadProjects)
 </template>
 
 <style scoped>
-.novel-page { padding: 22px clamp(12px, 2vw, 26px) 40px; color: #302d29; max-width: 100%; overflow-x: hidden; box-sizing: border-box; }
+.novel-page { padding: 22px clamp(12px, 2vw, 26px) 40px; color: var(--paper-ink); max-width: 100%; overflow-x: hidden; box-sizing: border-box; }
 .page-head { margin-bottom: 16px; }
 .page-head h1 { margin: 0; font-size: 24px; font-weight: 680; }
-.page-head p { margin: 5px 0 0; color: #827a71; font-size: 13px; }
-.job-note, .list-loading { margin: 8px 0 12px; color: #817970; font-size: 13px; }
+.page-head p { margin: 5px 0 0; color: var(--paper-ink-muted); font-size: 13px; }
+.job-note, .list-loading { margin: 8px 0 12px; color: var(--paper-ink-muted); font-size: 13px; }
 .novel-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 20px; align-items: start; }
 .novel-main { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -241,8 +241,8 @@ onMounted(loadProjects)
 .novel-model-slot { flex: 0 1 420px; min-width: 240px; }
 .no-chapters { min-width: 0; }
 .no-chapters h2 { margin: 0 0 8px; font-size: 16px; }
-.plain { margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 inherit; background: #f7f4ee; padding: 10px; }
-.muted { margin: 0; color: #827a71; font-size: 13px; }
+.plain { margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 inherit; background: var(--paper-sunken); padding: 10px; }
+.muted { margin: 0; color: var(--paper-ink-muted); font-size: 13px; }
 .workbench { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr); gap: 16px; align-items: start; }
 .work-col { min-width: 0; display: flex; flex-direction: column; gap: 18px; }
 .novel-page :deep(.n-alert) { margin-bottom: 12px; }

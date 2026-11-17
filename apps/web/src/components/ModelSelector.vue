@@ -83,8 +83,8 @@ async function clearDefault() {
 <style scoped>
 .model-selector { min-width: 0; }
 .model-selector-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.model-selector-label { color: #827a71; font-size: 12px; white-space: nowrap; }
+.model-selector-label { color: var(--color-text-muted); font-size: 12px; white-space: nowrap; }
 .model-selector-select { flex: 1 1 220px; min-width: 180px; max-width: 420px; }
-.model-selector-hint { margin: 4px 0 0; color: #948b81; font-size: 11px; line-height: 1.5; }
-.model-selector-warn { color: #9b3e37; }
+.model-selector-hint { margin: 4px 0 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.5; }
+.model-selector-warn { color: var(--color-danger); }
 </style>

@@ -1093,7 +1093,7 @@ async function bindWechat() {
 
 .platform-nav-item.is-active .platform-nav-icon {
   background: var(--color-accent);
-  color: #fff;
+  color: var(--color-on-accent);
 }
 
 .platform-nav-copy {
@@ -1124,7 +1124,7 @@ async function bindWechat() {
 }
 
 .platform-nav-state.is-ready {
-  background: var(--color-success, #18a058);
+  background: var(--color-success);
 }
 
 .platform-detail {

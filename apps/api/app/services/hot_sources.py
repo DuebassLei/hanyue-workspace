@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import os
+import re
+from urllib.parse import quote
 
 import httpx
 
@@ -72,10 +74,30 @@ AIHOT_SOURCES: tuple[tuple[str, str, str], ...] = (
     ("AI·资讯", "https://aihot.news/api/v1/items?limit=50&window=24h", "feed"),
 )
 
+# AIHOT 给 agent 的 Markdown 接口：Top 榜带信源与「来龙去脉」链接，日报带分类摘要。
+# 和上面的 JSON 接口内容重叠但不相同——JSON 是 24h 资讯流，这里是编辑过的 Top 与早报，
+# 所以单独成两个平台，不和「AI·热点 / AI·资讯」混进同一个榜。
+AIHOT_AGENT_UA = "aihot-skill/2.0.0 (+https://aihot.news/aihot-skill/)"
+AIHOT_AGENT_SOURCES: tuple[tuple[str, str, str], ...] = (
+    ("AIHOT 热点与早报", "https://aihot.news/api/v1/agent/hot", "hot"),
+    ("AIHOT 日报", "https://aihot.news/api/v1/agent/daily", "daily"),
+)
+
+# 微信 10w+ 爆文池：公开的爆款文章榜（标题、公众号、阅读量、原文链接）。
+# 数据是第三方维护的快照，地址可用环境变量替换；没配置时用默认公开地址。
+WECHAT_10W_DEFAULT = "https://raw.githubusercontent.com/alchaincyf/wechat-article/main/articles.json"
+WECHAT_10W_UA = UA
+
+# 微信文章搜索：搜狗微信搜索的公开结果页。没有官方 JSON 接口，只能解析 HTML。
+# 关键词来自环境变量，没配就不采集——不能替用户决定搜什么。
+WECHAT_SEARCH_UA = UA
+
 ALL_PLATFORMS = tuple(
     [name for name, *_ in DIRECT_SOURCES]
     + [name for name, _ in AGG_SOURCES]
     + [name for name, _, _ in AIHOT_SOURCES]
+    + [name for name, _, _ in AIHOT_AGENT_SOURCES]
+    + ["微信 10w+ 爆文池", "微信文章搜索"]
 )
 
 
@@ -238,6 +260,109 @@ def _rows_aihot(platform: str, payload, kind: str) -> list[dict]:
     return rows
 
 
+_AGENT_HOT_RE = re.compile(
+    r"第\s*(\d+)\s*名：\[(.*?)\]\((.*?)\)\s*\n\s*信源：(.*?)(?:\n\s*来龙去脉：(.*?))?(?=\n第|\n\n|\Z)",
+    re.DOTALL,
+)
+_AGENT_DAILY_RE = re.compile(
+    r"(\d+)\.\s*\[(.*?)\]\((.*?)\)(?:\s*·\s*([^\n]+))?\n\s+([^\n]+)"
+)
+
+
+def _rows_aihot_agent(platform: str, text: str, kind: str) -> list[dict]:
+    """解析 AIHOT agent 接口的 Markdown。解析不到就返回空列表，不算失败。"""
+    rows: list[dict] = []
+    if kind == "hot":
+        for match in _AGENT_HOT_RE.finditer(text or ""):
+            rank, title, url, sources, _story = match.groups()
+            title = title.strip()
+            if not title:
+                continue
+            source_count = len([part for part in sources.split("、") if part.strip()])
+            rows.append({
+                "platform": platform,
+                "rank": int(rank),
+                "title": title,
+                "hot": source_count or None,
+                "url": url.strip(),
+            })
+        return rows
+
+    for section in re.split(r"【(.*?)】", text or "")[2::2]:
+        for match in _AGENT_DAILY_RE.finditer(section):
+            index, title, url, _source, _summary = match.groups()
+            title = title.strip()
+            if not title:
+                continue
+            rows.append({
+                "platform": platform,
+                "rank": int(index),
+                "title": title,
+                "hot": None,
+                "url": url.strip(),
+            })
+    return rows
+
+
+def _rows_wechat_10w(payload) -> list[dict]:
+    """微信 10w+ 爆文。兼容两种快照结构：`{articles:[...]}` 或直接是数组。"""
+    raw = payload.get("articles") if isinstance(payload, dict) else payload
+    rows: list[dict] = []
+    for index, item in enumerate(raw or [], 1):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        account = str(item.get("userName") or item.get("account_name") or "").strip()
+        # 榜单条目的身份是标题；公众号名放进标题前缀会让同一篇文章跨日无法合并，
+        # 所以只在标题本身不含账号时补一个短前缀，方便人一眼看出是谁写的。
+        shown = f"{account}｜{title}" if account and account not in title else title
+        clicks = str(item.get("clicksCount") or item.get("clicks") or "").strip()
+        rows.append({
+            "platform": "微信 10w+ 爆文池",
+            "rank": index,
+            "title": shown[:200],
+            "hot": _to_int(clicks.replace("w+", "0000").replace("+", "")),
+            "url": str(item.get("oriUrl") or item.get("url") or "").strip(),
+        })
+    return rows
+
+
+def _rows_wechat_search(html: str) -> list[dict]:
+    """搜狗微信搜索结果页。页面改版导致解析为空时返回空列表，不抛。"""
+    rows: list[dict] = []
+    for index, match in enumerate(
+        re.finditer(
+            r'<a[^>]+href="(/link\?url=[^"]+)"[^>]*>(.*?)</a>', html or "", re.DOTALL
+        ),
+        1,
+    ):
+        href, inner = match.groups()
+        title = re.sub(r"<[^>]+>", "", inner)
+        title = re.sub(r"\s+", " ", title).strip()
+        if len(title) < 6:
+            continue
+        rows.append({
+            "platform": "微信文章搜索",
+            "rank": index,
+            "title": title[:200],
+            "hot": None,
+            "url": "https://weixin.sogou.com" + href,
+        })
+        if len(rows) >= 20:
+            break
+    return rows
+
+
+def _wechat_10w_url() -> str:
+    return os.getenv("HOT_TOPICS_WECHAT_10W_URL", WECHAT_10W_DEFAULT).strip()
+
+
+def _wechat_search_keyword() -> str:
+    return os.getenv("HOT_TOPICS_WECHAT_KEYWORD", "").strip()
+
+
 def collect(platforms: list[str] | None = None) -> tuple[list[dict], list[str]]:
     """采集所有启用的平台。
 
@@ -285,6 +410,58 @@ def collect(platforms: list[str] | None = None) -> tuple[list[dict], list[str]]:
         except Exception as exc:  # noqa: BLE001
             notes.append(f"{name}：失败（{type(exc).__name__}）")
 
+    for name, url, kind in AIHOT_AGENT_SOURCES:
+        if name not in wanted:
+            continue
+        try:
+            response = ssrf.safe_request(
+                "GET",
+                url,
+                headers={"User-Agent": AIHOT_AGENT_UA, "Accept": "text/plain,*/*"},
+                timeout=_timeout(),
+            )
+            if response.status_code >= 300:
+                raise HotSourcesError(f"HTTP {response.status_code}")
+            got = _rows_aihot_agent(name, response.text, kind)
+            rows.extend(got)
+            notes.append(f"{name}：{len(got)} 条")
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"{name}：失败（{type(exc).__name__}）")
+
+    if "微信 10w+ 爆文池" in wanted:
+        url = _wechat_10w_url()
+        try:
+            payload = _fetch_json(url, {"User-Agent": WECHAT_10W_UA})
+            got = _rows_wechat_10w(payload)
+            rows.extend(got)
+            notes.append(f"微信 10w+ 爆文池：{len(got)} 条")
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"微信 10w+ 爆文池：失败（{type(exc).__name__}）")
+
+    if "微信文章搜索" in wanted:
+        keyword = _wechat_search_keyword()
+        if not keyword:
+            notes.append("微信文章搜索：未配置关键词（HOT_TOPICS_WECHAT_KEYWORD），已跳过")
+            ok += 1
+        else:
+            try:
+                response = ssrf.safe_request(
+                    "GET",
+                    f"https://weixin.sogou.com/weixin?type=2&query={quote(keyword)}",
+                    headers={"User-Agent": WECHAT_SEARCH_UA, "Accept": "text/html"},
+                    timeout=_timeout(),
+                )
+                if response.status_code >= 300:
+                    raise HotSourcesError(f"HTTP {response.status_code}")
+                got = _rows_wechat_search(response.text)
+                rows.extend(got)
+                notes.append(f"微信文章搜索（{keyword}）：{len(got)} 条")
+                ok += 1
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"微信文章搜索：失败（{type(exc).__name__}）")
+
     if ok == 0:
         raise HotSourcesError("所有热点源都不可用：" + "；".join(notes), notes)
     return rows, notes
@@ -298,4 +475,9 @@ def source_catalog() -> list[dict]:
         {"platform": name, "kind": "aggregate"} for name, _ in AGG_SOURCES
     ] + [
         {"platform": name, "kind": "aihot"} for name, _, _ in AIHOT_SOURCES
+    ] + [
+        {"platform": name, "kind": "aihot-agent"} for name, _, _ in AIHOT_AGENT_SOURCES
+    ] + [
+        {"platform": "微信 10w+ 爆文池", "kind": "wechat-10w"},
+        {"platform": "微信文章搜索", "kind": "wechat-search"},
     ]

@@ -69,6 +69,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("storyboard_shots", "deleted_at", "TIMESTAMP"),
     # 角色库：AI 生成的候选参考图（采用前挂在角色卡上）
     ("characters", "pending_images", "JSON"),
+    ("video_shots", "intensity", "FLOAT"),
+    ("video_shots", "focus", "JSON"),
 ]
 
 # keyset 分页与队列恢复都按时间列做 seek，缺索引会退化成全表排序。
@@ -95,6 +97,11 @@ _INDEXES: list[tuple[str, str]] = [
     # 视频创作：列表按「最近改动」取；镜头按序读
     ("ix_video_projects_owner_updated", "video_projects (owner_user_id, updated_at DESC, id DESC)"),
     ("ix_video_shots_project_order", "video_shots (project_id, sort_order)"),
+    # 定时任务：启动装载与对账扫 enabled；列表按 scope+owner 取；历史按 task 分页
+    ("ix_sched_enabled_next", "scheduled_tasks (enabled, next_run_at)"),
+    ("ix_sched_scope_owner_fired", "scheduled_tasks (scope, owner_user_id, last_fired_at DESC)"),
+    ("ix_sched_runs_task_time", "scheduled_task_runs (task_id, triggered_at DESC, id DESC)"),
+    ("ix_sched_runs_status", "scheduled_task_runs (status)"),
 ]
 
 

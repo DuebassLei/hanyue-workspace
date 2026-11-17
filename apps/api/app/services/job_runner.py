@@ -25,7 +25,8 @@ from ..core.config import get_settings
 from ..core.db import SessionLocal
 from ..core.deps import default_workspace
 from ..core.security import decrypt_secret, sign_asset_url
-from . import handdraw, image_provider, image_service, publish_state, video_render, wechat_article
+from . import handdraw, hot_topics, image_provider, image_service, publish_state, video_render, wechat_article
+from . import scheduled_tasks
 
 RETRYABLE_CODES = {"provider_unreachable", "provider_error", "provider_timeout", "rate_limited"}
 MAX_ATTEMPTS = queue.MAX_ATTEMPTS
@@ -63,7 +64,18 @@ def _current_status(job_id: str) -> str | None:
 
 
 def _write_terminal(db, job_id: str, **values) -> bool:
-    """条件写回终态：cancelled 的任务不允许被成功/失败覆盖。"""
+    """条件写回终态：cancelled 的任务不允许被成功/失败覆盖。
+
+    定时任务的触发账本（scheduled_task_runs）也在这里回写——这是 job 写终态的
+    唯一入口，回写放在别处就必然有漏网路径，两处状态就会长期不一致。
+    """
+    # 用列查询而不是 ORM 对象：identity map 里可能还是领取时的旧值。
+    meta = db.execute(
+        select(
+            models.BackgroundJob.payload,
+            models.BackgroundJob.started_at,
+        ).where(models.BackgroundJob.id == job_id)
+    ).first()
     changed = db.execute(
         update(models.BackgroundJob)
         .where(
@@ -73,7 +85,20 @@ def _write_terminal(db, job_id: str, **values) -> bool:
         .values(**values)
     )
     db.commit()
-    return changed.rowcount == 1
+    ok = changed.rowcount == 1
+    if ok and meta is not None:
+        payload = meta.payload or {}
+        if payload.get("scheduledRunId"):
+            scheduled_tasks.sync_run_from_job(
+                db,
+                job_id,
+                status=str(values.get("status") or ""),
+                error_code=values.get("error_code"),
+                error_message=values.get("error_message"),
+                started_at=meta.started_at,
+                completed_at=values.get("completed_at"),
+            )
+    return ok
 
 
 def mark_failed(job_id: str, code: str, message: str) -> None:
@@ -253,6 +278,82 @@ def _advance_publish_job_on_failure(db, publish_job: models.PublishJob, error_co
         )
 
 
+def _handle_hot_topics(db, job: models.BackgroundJob) -> dict:
+    """定时拉热点（docs/scheduled-tasks.md §2.1）。
+
+    手动刷新走 `POST /hot-topics/refresh`，定时走这里，两条路径都调同一个
+    `hot_topics.refresh()`，口径只有一份。全源失败必须标 failed——
+    返回「跑完了，0 个事件」是把失败伪装成成功。
+    """
+    payload = job.payload or {}
+    platforms = payload.get("platforms") or None
+    try:
+        return hot_topics.refresh(db, platforms=platforms)
+    except hot_topics.HotTopicsError as exc:
+        raise JobFailure(
+            exc.code,
+            exc.message,
+            retryable=exc.code in {"all_sources_failed"},
+        ) from exc
+
+
+def _handle_hot_topics_digest(db, job: models.BackgroundJob) -> dict:
+    """定时「热点选题简报」：按赛道挑高分热点，可选为每条建草稿。
+
+    只读已有榜单、不触发采集——采集是系统级任务的事，这里再采集一次就是重复打外网。
+    草稿只写进 job.owner 自己的创作空间，不碰簇的全局状态。
+    """
+    payload = job.payload or {}
+    user = db.get(models.User, job.owner_user_id)
+    if user is None:
+        raise JobFailure("owner_missing", "定时任务所属的用户已不存在")
+    workspace = default_workspace(db, user)
+    try:
+        return hot_topics.build_digest(
+            db,
+            user,
+            workspace,
+            tracks=payload.get("tracks") or None,
+            min_score=int(payload.get("min_score", 60)),
+            limit=int(payload.get("limit", 3)),
+            create_drafts=bool(payload.get("create_drafts", True)),
+        )
+    except hot_topics.HotTopicsError as exc:
+        raise JobFailure(exc.code, exc.message) from exc
+
+
+def _handle_script(db, job: models.BackgroundJob) -> dict:
+    """通用脚本任务：按 job.kind 找到 manifest 声明的脚本函数并执行。
+
+    manifest 声明 queue=script 的类型都会落到这里。脚本只依赖 scheduled_scripts.base
+    的契约，本函数负责把后台任务上下文翻译成 ScriptContext，并把脚本的可预期失败
+    映射成 JobFailure（保留 retryable 语义，复用现有的重试/终态/账本机制）。
+    """
+    from . import script_registry
+    from ..scheduled_scripts.base import ScriptContext, ScriptFailure
+
+    payload = job.payload or {}
+    runner = script_registry.runner_for_kind(job.kind)
+    if runner is None:
+        raise JobFailure("script_not_found", f"未找到脚本任务的 runner：{job.kind}")
+
+    # 控制字段不进脚本参数——脚本只该看到 manifest 里声明的那些参数
+    params = {k: v for k, v in payload.items() if k not in ("scheduledTaskId", "scheduledRunId")}
+    ctx = ScriptContext(
+        db=db,
+        owner_user_id=job.owner_user_id,
+        task_id=str(payload.get("scheduledTaskId") or ""),
+        run_id=str(payload.get("scheduledRunId") or ""),
+        job_id=job.id,
+        task_type=job.kind,
+    )
+    try:
+        result = runner(params, ctx)
+    except ScriptFailure as exc:
+        raise JobFailure(exc.code, exc.message, retryable=exc.retryable) from exc
+    return result if isinstance(result, dict) else {"summary": str(result)}
+
+
 def _execute(db, job: models.BackgroundJob) -> dict:
     handlers = {
         "ai-image": _handle_ai_image,
@@ -261,6 +362,9 @@ def _execute(db, job: models.BackgroundJob) -> dict:
         "platform-publish": _handle_platform_publish,
         "novel": _handle_novel,
         "video-render": _handle_video_render,
+        "hot-topics": _handle_hot_topics,
+        "topic-digest": _handle_hot_topics_digest,
+        "script": _handle_script,
     }
     handler = handlers.get(job.queue)
     if not handler:
@@ -933,7 +1037,7 @@ def _novel_complete(
     if not candidates:
         raise JobFailure(
             "provider_unavailable",
-            "尚未配置可用的文本模型连接；请在「设置 → 模型连接」登记并测试通过后重试",
+            "尚未配置可用的文本模型连接；请在「系统 → 模型管理」登记并测试通过后重试",
             retryable=False,
         )
 
@@ -1130,6 +1234,15 @@ def _video_stage(db, job_id: str, *, stage: str, progress: int) -> None:
     db.commit()
 
 
+def _video_motion_options(settings_json: dict, shot_intensity, shot_focus) -> dict:
+    has_shot_override = shot_intensity is not None or shot_focus is not None
+    return {
+        "intensity": shot_intensity if shot_intensity is not None else settings_json.get("motionIntensity", 0.12),
+        "focus": shot_focus if shot_focus is not None else settings_json.get("motionFocus", {"x": 0.5, "y": 0.5}),
+        "legacy": "motionIntensity" not in settings_json and not has_shot_override,
+    }
+
+
 def _handle_video_render(db, job: models.BackgroundJob) -> dict:
     """图文成片整链渲染：配图 → 配音 → Ken Burns 合成 → 字幕/BGM → 入素材库。
 
@@ -1168,7 +1281,12 @@ def _handle_video_render(db, job: models.BackgroundJob) -> dict:
             raise JobFailure("shot_incomplete", f"第 {index + 1} 个镜头没有旁白也没有配图描述")
         try:
             images = image_provider.generate_images(
-                db, job.owner_user_id, prompt=prompt, aspect_ratio=aspect, count=1
+                db,
+                job.owner_user_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+                count=1,
+                model_id=settings_json.get("imageModelId") or None,
             )
         except image_provider.ImageProviderUnavailable as exc:
             raise JobFailure(exc.code, f"第 {index + 1} 个镜头配图失败：{exc.message}") from exc
@@ -1242,9 +1360,11 @@ def _handle_video_render(db, job: models.BackgroundJob) -> dict:
         audio_path = workdir / f"aud_{index}.mp3"
         audio_path.write_bytes(_read_asset_bytes(audio_asset))
         clip = workdir / f"clip_{index}.mp4"
+        motion_options = _video_motion_options(settings_json, shot.intensity, shot.focus)
         video_render.render_shot_clip(
             image=image_path, audio=audio_path, duration_ms=duration_ms,
             motion=shot.motion, width=width, height=height, out=clip,
+            **motion_options,
         )
         clips.append(clip)
         _video_stage(db, job.id, stage="compose", progress=62 + int(18 * (index + 1) / total))
@@ -1267,7 +1387,10 @@ def _handle_video_render(db, job: models.BackgroundJob) -> dict:
             cursor += duration_ms
         ass_path = workdir / "subs.ass"
         ass_path.write_text(
-            video_render.build_ass(events, width=width, height=height), encoding="utf-8"
+            video_render.build_ass(
+                events, width=width, height=height,
+                subtitle_animation=settings_json.get("subtitleAnimation"),
+            ), encoding="utf-8"
         )
         subtitled = workdir / "subtitled.mp4"
         video_render.burn_subtitles(current, ass_path, subtitled)

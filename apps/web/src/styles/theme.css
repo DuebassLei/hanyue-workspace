@@ -12,11 +12,57 @@
   --color-accent-hover: #36ad6a;
   --color-accent-soft: rgba(24, 160, 88, 0.12);
   --color-on-accent: #fff;
+  --color-surface-muted: rgb(247, 247, 250);
+  --color-text-tertiary: rgb(145, 150, 156);
+  /* 反相面上的叠加层：压在图片 / 视频上的按钮与遮罩，两个主题都用深底浅字 */
+  --color-inverse-scrim: rgba(20, 26, 22, 0.72);
+  --color-inverse-scrim-strong: rgba(20, 26, 22, 0.88);
+  --color-inverse-border: rgba(255, 255, 255, 0.4);
+  --color-inverse-on-scrim: #fff;
+
   --color-info: #2080f0;
   --color-success: #18a058;
   --color-warning: #f0a020;
   --color-danger: #d03050;
   --color-overlay: rgba(0, 0, 0, 0.4);
+
+  /* 反相面：AI 气泡这类「深底浅字」的浮层，暗色下要翻成浅底深字 */
+  --color-inverse-bg: rgb(31, 34, 37);
+  --color-inverse-fg: #fff;
+  --color-inverse-hover: rgba(255, 255, 255, 0.15);
+  --color-inverse-danger: #fca5a5;
+
+  /* 纸质调性：分镜 / 视频 / 小说模块共用一套暖纸视觉语言，与中性色分开维护 */
+  --paper-bg: #fbfaf6;
+  --paper-surface: #fbfaf7;
+  --paper-sunken: #f7f4ee;
+  --paper-header: #f8f6f1;
+  --paper-hover: #f6f3ed;
+  --paper-active: #f3efe7;
+  --paper-line: #e1ddd6;
+  --paper-line-strong: #d9d6cf;
+  --paper-ink: #302d29;
+  --paper-ink-soft: #5c564e;
+  --paper-ink-muted: #827a71;
+  --paper-accent: #315e68;
+  --paper-accent-soft: #e1ebea;
+  --paper-accent-tint: #f1f6f5;
+  --paper-accent-line: #cfd9d7;
+  --paper-on-accent: #fff;
+  --paper-thumb: #eceae4;
+  --paper-image-outline: rgba(255, 255, 255, 0.9);
+  --paper-image-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+  --paper-scrim: rgba(30, 28, 25, 0.6);
+  --paper-scrim-strong: rgba(40, 39, 34, 0.78);
+  --paper-on-scrim: #fff;
+  --paper-on-danger: #fff;
+  --paper-success: #39715e;
+  --paper-danger: #9b3e37;
+  --paper-danger-soft: #faf3f2;
+  --paper-danger-line: #e5c4c1;
+  --paper-warning: #9a6230;
+  --paper-warning-soft: #fff8e8;
+  --paper-warning-line: #e3c98f;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 18px 40px rgba(0, 0, 0, 0.12);
@@ -49,7 +95,12 @@
     'Microsoft YaHei', sans-serif;
 }
 
+html[data-theme='light'] {
+  color-scheme: light;
+}
+
 html[data-theme='dark'] {
+  color-scheme: dark;
   --color-bg: rgb(16, 16, 20);
   --color-surface: rgb(24, 24, 28);
   --color-surface-raised: rgba(255, 255, 255, 0.06);
@@ -62,14 +113,54 @@ html[data-theme='dark'] {
   --color-accent-hover: #7fe7c4;
   --color-accent-soft: rgba(99, 226, 183, 0.16);
   --color-on-accent: #000;
+  --color-surface-muted: rgba(255, 255, 255, 0.06);
+  --color-text-tertiary: rgba(255, 255, 255, 0.4);
   --color-info: #70c0e8;
   --color-success: #63e2b7;
   --color-warning: #f2c97d;
   --color-danger: #e88080;
   --color-overlay: rgba(0, 0, 0, 0.62);
+
+  /* 暗色下反相面翻成浅底深字 */
+  --color-inverse-bg: rgba(255, 255, 255, 0.92);
+  --color-inverse-fg: rgb(20, 20, 24);
+  --color-inverse-hover: rgba(0, 0, 0, 0.08);
+  --color-inverse-danger: #c0392b;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
   --shadow-lg: 0 18px 40px rgba(0, 0, 0, 0.5);
+
+  /* 暗色下的「暖炭」：保留色相偏暖的调性，避免变成冷灰 */
+  --paper-bg: #181715;
+  --paper-surface: #1d1c19;
+  --paper-sunken: #151412;
+  --paper-header: #201f1c;
+  --paper-hover: rgba(255, 255, 255, 0.055);
+  --paper-active: rgba(143, 201, 212, 0.14);
+  --paper-line: rgba(255, 255, 255, 0.09);
+  --paper-line-strong: rgba(255, 255, 255, 0.2);
+  --paper-ink: rgba(255, 255, 255, 0.9);
+  --paper-ink-soft: rgba(255, 255, 255, 0.72);
+  --paper-ink-muted: rgba(255, 255, 255, 0.52);
+  --paper-accent: #8fc9d4;
+  --paper-accent-soft: rgba(143, 201, 212, 0.16);
+  --paper-accent-tint: rgba(143, 201, 212, 0.09);
+  --paper-accent-line: rgba(143, 201, 212, 0.3);
+  --paper-on-accent: #0b1214;
+  --paper-thumb: rgba(255, 255, 255, 0.07);
+  --paper-image-outline: rgba(255, 255, 255, 0.9);
+  --paper-image-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+  --paper-scrim: rgba(0, 0, 0, 0.62);
+  --paper-scrim-strong: rgba(0, 0, 0, 0.78);
+  --paper-on-scrim: #fff;
+  --paper-on-danger: #fff;
+  --paper-success: #7fd6b4;
+  --paper-danger: #e88080;
+  --paper-danger-soft: rgba(232, 128, 128, 0.1);
+  --paper-danger-line: rgba(232, 128, 128, 0.32);
+  --paper-warning: #f2c97d;
+  --paper-warning-soft: rgba(242, 201, 125, 0.1);
+  --paper-warning-line: rgba(242, 201, 125, 0.32);
 }
 
 * {

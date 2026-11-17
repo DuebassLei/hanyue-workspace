@@ -9,6 +9,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -905,6 +906,9 @@ def _default_video_settings() -> dict:
         "subtitles": True,
         "bgmAssetId": None,
         "bgmVolume": 0.18,           # BGM 相对旁白的音量
+        "motionIntensity": 0.12,
+        "motionFocus": {"x": 0.5, "y": 0.5},
+        "subtitleAnimation": "fade_in",
     }
 
 
@@ -942,5 +946,66 @@ class VideoShot(Base, TimestampMixin):
     audio_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     motion: Mapped[str] = mapped_column(String(16), default="zoom_in")
+    intensity: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    focus: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class ScheduledTask(Base, TimestampMixin):
+    """定时任务定义（docs/scheduled-tasks.md §4.1）。
+
+    这张表是唯一真相：APScheduler 的内存 jobstore 只是它的运行期投影。
+    `next_run_at` 同时干两件事——界面展示「下次触发」、回调里做多副本 CAS 令牌；
+    真正的时间计算只发生在 APScheduler 的 trigger 里，业务代码不另算一份。
+    """
+
+    __tablename__ = "scheduled_tasks"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # system：全局数据类任务（拉热点），全库同类只应有一条；user：按 owner 隔离
+    scope: Mapped[str] = mapped_column(String(16), default="user", index=True)
+    # system 任务也必须有真实 owner：background_jobs.owner_user_id 是必填外键
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    task_type: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    params: Mapped[dict] = mapped_column(JSON, default=dict)
+    # cron | interval
+    schedule_kind: Mapped[str] = mapped_column(String(16), default="cron")
+    cron: Mapped[str] = mapped_column(String(120), default="")
+    interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    misfire_grace_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[str] = mapped_column(String(24), default="")
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    # 自动暂停原因；手动停用时为空（两者在界面上要能区分开）
+    paused_reason: Mapped[str] = mapped_column(String(300), default="")
+
+
+class ScheduledTaskRun(Base):
+    """定时任务的触发账本（docs/scheduled-tasks.md §4.2）。
+
+    `status` 的终态以 background_jobs 为准，由 job_runner 写终态时同一处回写；
+    启动时再对账一次修正漏写。跳过的触发（上次未落定、错过宽限）也记在这里，
+    否则「为什么这次没跑」在界面上无从解释。
+    """
+
+    __tablename__ = "scheduled_task_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    task_id: Mapped[str] = mapped_column(ForeignKey("scheduled_tasks.id"), index=True)
+    # 跳过的 run 没有 job；终态回写靠它定位
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    triggered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # schedule | manual
+    source: Mapped[str] = mapped_column(String(16), default="schedule")
+    # queued / running / succeeded / failed / skipped / cancelled / missed
+    status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    skip_reason: Mapped[str] = mapped_column(String(300), default="")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

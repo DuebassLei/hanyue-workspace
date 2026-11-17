@@ -32,12 +32,18 @@ export const NAV_GROUPS = [
     items: [
       { name: 'publishing', label: '发布管理', short: '发布' },
       { name: 'wechat-layout', label: '微信排版', short: '排版' },
+      // 定时任务是「到点自动干活」，和发布/排版同属运营流程，不放进系统设置里
+      { name: 'schedules', label: '定时任务', short: '定时' },
     ],
   },
   {
     key: 'system',
     label: '系统',
-    items: [{ name: 'settings', label: '设置', short: '我的' }],
+    items: [
+      { name: 'models', label: '模型管理', short: '模型' },
+      { name: 'logs', label: '系统日志', short: '日志' },
+      { name: 'settings', label: '设置', short: '我的' },
+    ],
   },
 ]
 

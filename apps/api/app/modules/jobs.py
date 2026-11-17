@@ -17,6 +17,7 @@ from ..core.deps import ApiError, CurrentUser, DbSession, not_found
 from ..core.queue import backend_name
 from ..core.config import get_settings
 from ..core.security import sign_asset_url
+from ..services import scheduled_tasks
 
 settings = get_settings()
 
@@ -155,4 +156,14 @@ def cancel_job(job_id: str, user: CurrentUser, db: DbSession) -> dict:
     job.status = "cancelled"
     job.completed_at = datetime.now(timezone.utc)
     db.commit()
+    # 定时任务触发的手动取消也要落账：否则 runs 会一直显示「执行中」，直到下次重启对账
+    payload = job.payload or {}
+    if payload.get("scheduledRunId"):
+        scheduled_tasks.sync_run_from_job(
+            db,
+            job.id,
+            status="cancelled",
+            started_at=job.started_at,
+            completed_at=job.completed_at,
+        )
     return _out(job)

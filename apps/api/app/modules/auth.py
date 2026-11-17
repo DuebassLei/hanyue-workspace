@@ -9,10 +9,12 @@ from sqlalchemy import select
 from .. import models, schemas
 from ..core.config import get_settings
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace
+from ..core.logging import get_logger
 from ..core.security import create_token, decode_token
 
 router = APIRouter(tags=["auth"])
 settings = get_settings()
+logger = get_logger(__name__)
 
 # 形如 Asia/Shanghai、America/Argentina/Buenos_Aires，或 UTC；不校验该时区在当前系统是否可解析
 # （Windows 上缺 tzdata 时 zoneinfo 会抛错，不能因此把一个合法时区判成非法）。
@@ -58,6 +60,15 @@ def login(payload: schemas.LoginRequest, db: DbSession) -> schemas.LoginResponse
         db.flush()
     workspace = default_workspace(db, user)
     db.commit()
+    # 系统级定时任务（拉热点等）需要一个真实 owner 才能落 background_jobs
+    # （owner_user_id 是必填外键），所以绑到首个登录用户。多用户下只有第一条会留下。
+    # 失败不能影响登录：调度器出问题只记日志，不把用户挡在门外。
+    try:
+        from ..services import scheduled_tasks
+
+        scheduled_tasks.ensure_system_tasks(db, user.id, user.timezone)
+    except Exception as exc:  # pragma: no cover - 兜底不影响主流程
+        logger.warning("播种系统定时任务失败（不影响登录）：%s", exc)
     return schemas.LoginResponse(
         token=create_token(user.id), user=_user_out(user), workspace_id=workspace.id
     )

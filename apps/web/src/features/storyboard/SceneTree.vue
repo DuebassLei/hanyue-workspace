@@ -30,20 +30,20 @@ const emit = defineEmits(['select', 'create', 'delete', 'create-shot'])
 </template>
 
 <style scoped>
-.scene-tree { border-right: 1px solid var(--border-color, #d9d6cf); padding: 22px 14px; background: #f5f2eb; min-height: 560px; }
+.scene-tree { border-right: 1px solid var(--paper-line-strong); padding: 22px 14px; background: var(--paper-sunken); min-height: 560px; }
 .tree-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; }
-.eyebrow { color:#8c8175; font-size:10px; letter-spacing:1.4px; }
-h2 { margin:4px 0 0; font-size:18px; font-weight:650; color:#26231f; }
-.icon-button, .scene-actions button { border:0; background:transparent; cursor:pointer; color:#5b4e45; font-size:20px; }
-.icon-button { width:32px; height:32px; border:1px solid #cfc7bd; background:#fffdf9; }
-.tree-empty { color:#8c8175; font-size:13px; line-height:1.6; padding:16px 8px; }
+.eyebrow { color:var(--paper-ink-muted); font-size:10px; letter-spacing:1.4px; }
+h2 { margin:4px 0 0; font-size:18px; font-weight:650; color:var(--paper-ink); }
+.icon-button, .scene-actions button { border:0; background:transparent; cursor:pointer; color:var(--paper-ink-soft); font-size:20px; }
+.icon-button { width:32px; height:32px; border:1px solid var(--paper-line-strong); background:var(--paper-surface); }
+.tree-empty { color:var(--paper-ink-muted); font-size:13px; line-height:1.6; padding:16px 8px; }
 .scene-node { display:flex; align-items:center; gap:4px; border-left:2px solid transparent; padding:9px 4px 9px 8px; }
-.scene-node.active { border-left-color:#2f6170; background:#e7eeed; }
-.scene-select { display:flex; gap:10px; flex:1; min-width:0; text-align:left; border:0; background:transparent; cursor:pointer; }
-.scene-index { font:11px ui-monospace, SFMono-Regular, Consolas, monospace; color:#9d8f83; padding-top:2px; }
+.scene-node.active { border-left-color:var(--paper-accent); background:var(--paper-accent-soft); }
+.scene-select { display:flex; gap:10px; flex:1; min-width:0; text-align:left; border:0; background:transparent; color:inherit; cursor:pointer; }
+.scene-index { font:11px ui-monospace, SFMono-Regular, Consolas, monospace; color:var(--paper-ink-muted); padding-top:2px; }
 .scene-copy { min-width:0; display:flex; flex-direction:column; gap:3px; }
-.scene-copy strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#2f2b27; font-size:13px; }
-.scene-copy small { color:#978d83; font-size:11px; }
+.scene-copy strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--paper-ink); font-size:13px; }
+.scene-copy small { color:var(--paper-ink-muted); font-size:11px; }
 .scene-actions { display:flex; gap:2px; opacity:0; }
 .scene-node:hover .scene-actions, .scene-node.active .scene-actions { opacity:1; }
 .scene-actions button { font-size:15px; width:22px; height:22px; }

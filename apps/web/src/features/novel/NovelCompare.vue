@@ -36,10 +36,10 @@ const right = computed(() => {
 .block-title { margin: 0 0 10px; font-size: 15px; }
 .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width: 0; }
 .compare-col { min-width: 0; }
-.compare-col h3 { margin: 0 0 6px; font-size: 13px; color: #5c564e; }
-.tag { font-weight: 500; color: #9a6230; }
-.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 inherit; background: #f7f4ee; padding: 10px; max-height: 320px; overflow: auto; }
-.muted { margin: 0; color: #827a71; font-size: 12px; }
+.compare-col h3 { margin: 0 0 6px; font-size: 13px; color: var(--paper-ink-soft); }
+.tag { font-weight: 500; color: var(--paper-warning); }
+.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 inherit; background: var(--paper-sunken); padding: 10px; max-height: 320px; overflow: auto; }
+.muted { margin: 0; color: var(--paper-ink-muted); font-size: 12px; }
 @media (max-width: 800px) {
   .compare-grid { grid-template-columns: 1fr; }
 }

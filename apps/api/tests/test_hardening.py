@@ -78,15 +78,16 @@ def test_secret_encryption_uses_random_nonce():
     "url",
     [
         "http://example.com/v1",
-        "https://localhost/v1",
-        "https://[::1]/v1",
+        "https://user:pass@example.com/v1",
+        "https://example.com:8080/v1",
+        "https://example.com/v1#frag",
+        "http://10.0.0.5:11434/v1",
+        "http://192.168.1.8/v1",
+        "http://169.254.169.254/latest/meta-data",
         "https://2130706433/v1",
         "https://0x7f000001/v1",
         "https://127.1/v1",
         "https://0177.0.0.1/v1",
-        "https://user:pass@example.com/v1",
-        "https://example.com:8080/v1",
-        "https://example.com/v1#frag",
     ],
 )
 def test_ssrf_rejects_obfuscated_internal_addresses(url):
@@ -95,6 +96,23 @@ def test_ssrf_rejects_obfuscated_internal_addresses(url):
     with pytest.raises(ssrf.UnsafeUrl):
         ssrf.validate_base_url(url)
     assert ssrf.validate_base_url("https://api.example.com/v1") == "https://api.example.com/v1"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:3425/v1",
+        "http://localhost:11434/v1",
+        "http://localhost.localdomain:8000/v1",
+        "http://[::1]:8080/v1",
+        "https://127.0.0.1/v1",
+    ],
+)
+def test_ssrf_allows_loopback_http_on_any_port(url):
+    """本机模型服务（Ollama、自建代理）只监听环回地址的明文 HTTP，必须可配置。"""
+    from app.core import ssrf
+
+    assert ssrf.validate_base_url(url) == url.rstrip("/")
 
 
 def test_pin_url_fixes_the_validated_ip(monkeypatch):
@@ -167,11 +185,11 @@ def test_trusted_host_allows_private_resolution_but_keeps_other_checks(monkeypat
     # 未登记的域名解析到同一内网 IP 仍然被拦截
     with pytest.raises(ssrf.UnsafeUrl, match="禁止访问的地址"):
         ssrf.assert_safe_url("https://other.example.com/v1")
-    # 白名单不能绕过字面量黑名单与协议/端口限制
+    # 白名单不能绕过协议/端口限制，也不能放行非环回的本机别名
     with pytest.raises(ssrf.UnsafeUrl):
         ssrf.validate_base_url("http://lab.iwhalecloud.com/v1")
     with pytest.raises(ssrf.UnsafeUrl):
-        ssrf.validate_base_url("https://localhost/v1")
+        ssrf.validate_base_url("https://metadata.google.internal/v1")
 
 
 def test_trusted_hosts_rejects_wildcards_and_blanks(monkeypatch):

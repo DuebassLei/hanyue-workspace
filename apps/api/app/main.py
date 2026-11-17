@@ -6,7 +6,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 
+from . import models
 from .core import pagination, queue
 from .core.config import get_settings
 from .core.db import SessionLocal, init_db
@@ -33,6 +35,7 @@ from .modules import (
     publishing,
     skills,
     novels,
+    schedules,
     stickers,
     storyboards,
     topics,
@@ -41,7 +44,7 @@ from .modules import (
     workspaces,
 )
 from .services import handdraw as handdraw_import
-from .services import skill_registry
+from .services import scheduled_tasks, scheduler, skill_registry
 
 settings = get_settings()
 configure_logging(settings)
@@ -64,7 +67,29 @@ async def lifespan(app: FastAPI):
         if stale or recovered:
             logger.info("API 启动恢复：崩溃遗留 %s 个、未开始 %s 个", stale, recovered)
     _sweep_video_tmp()
+    _start_scheduler()
     yield
+    scheduler.stop()
+
+
+def _start_scheduler() -> None:
+    """定时任务：先对账，再装配调度器（docs/scheduled-tasks.md §2.2 / §2.6）。
+
+    调度器起不来不能拖垮整个 API——接口与表还能用，用户至少能看到「为什么没跑」。
+    system 类型任务主要由登录路径播种（modules/auth.py），这里补一次：
+    从旧库升级上来、库里已有用户但没有 system 任务的情况。
+    """
+    try:
+        with SessionLocal() as session:
+            first_user = session.scalar(select(models.User).order_by(models.User.created_at))
+            if first_user is not None:
+                scheduled_tasks.ensure_system_tasks(session, first_user.id, first_user.timezone)
+            report = scheduled_tasks.reconcile_runs(session)
+            if any(report.values()):
+                logger.info("定时任务启动对账：%s", report)
+            scheduler.start(session)
+    except Exception as exc:
+        logger.exception("定时调度器启动失败，定时任务不会触发（接口与表仍可用）：%s", exc)
 
 
 def _sweep_video_tmp() -> None:
@@ -128,6 +153,7 @@ for module in (
     stickers,
     storyboards,
     videos,
+    schedules,
 ):
     app.include_router(module.router, prefix=settings.api_prefix)
 

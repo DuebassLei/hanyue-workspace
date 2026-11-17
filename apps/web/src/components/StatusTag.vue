@@ -31,6 +31,12 @@ const MAP = {
   idle: { text: '待运行', cls: 'tag-muted' },
   stopped_by_user: { text: '已由用户终止', cls: 'tag-muted' },
   missing_credential: { text: '缺少凭据', cls: 'tag-danger' },
+  unauthorized: { text: '凭据被拒', cls: 'tag-danger' },
+  invalid_base_url: { text: '地址不合法', cls: 'tag-danger' },
+  adapter_unavailable: { text: '协议未接入', cls: 'tag-danger' },
+  provider_unavailable: { text: '供应商不可用', cls: 'tag-danger' },
+  provider_unreachable: { text: '连接失败', cls: 'tag-danger' },
+  endpoint_not_supported: { text: '无 /models 接口', cls: 'tag-warning' },
   untested: { text: '未测试', cls: 'tag-warning' },
 }
 

@@ -138,12 +138,12 @@ onMounted(() => { if (props.show) load() })
 <style scoped>
 .asset-picker-modal :deep(.n-card__content) { padding-top: 12px; }
 .picker-bar { display: flex; gap: 8px; }
-.picker-hint { margin: 8px 0 12px; color: #8c8175; font-size: 12px; }
-.picker-error { color: #c2453d; font-size: 13px; }
-.picker-loading { padding: 40px 0; text-align: center; color: #8a8178; font-size: 13px; }
-.picker-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 48px 0; color: #8a8178; }
+.picker-hint { margin: 8px 0 12px; color: var(--paper-ink-muted); font-size: 12px; }
+.picker-error { color: var(--paper-danger); font-size: 13px; }
+.picker-loading { padding: 40px 0; text-align: center; color: var(--paper-ink-muted); font-size: 13px; }
+.picker-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 48px 0; color: var(--paper-ink-muted); }
 .picker-empty-icon { font-size: 28px; opacity: 0.6; }
-.picker-empty-title { color: #5c564e; font-size: 14px; font-weight: 600; }
+.picker-empty-title { color: var(--paper-ink-soft); font-size: 14px; font-weight: 600; }
 .picker-empty-sub { font-size: 12px; }
 .picker-grid {
   display: grid;
@@ -158,16 +158,16 @@ onMounted(() => { if (props.show) load() })
   flex-direction: column;
   gap: 6px;
   padding: 8px;
-  border: 1px solid #e0dcd4;
+  border: 1px solid var(--paper-line);
   border-radius: 10px;
-  background: #fbfaf7;
+  background: var(--paper-surface);
   cursor: pointer;
   text-align: left;
   transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
-.picker-item:hover:not(:disabled) { border-color: #6c8683; background: #f2f5f4; box-shadow: 0 2px 8px rgba(49, 94, 104, 0.12); }
-.picker-item:focus-visible { outline: 2px solid #315e68; outline-offset: 2px; }
-.picker-item.is-selected { border-color: #315e68; background: #eaf2f1; box-shadow: 0 0 0 2px rgba(49, 94, 104, 0.18); }
+.picker-item:hover:not(:disabled) { border-color: var(--paper-accent); background: var(--paper-accent-tint); box-shadow: 0 2px 8px color-mix(in srgb, var(--paper-accent) 12%, transparent); }
+.picker-item:focus-visible { outline: 2px solid var(--paper-accent); outline-offset: 2px; }
+.picker-item.is-selected { border-color: var(--paper-accent); background: var(--paper-accent-soft); box-shadow: 0 0 0 2px color-mix(in srgb, var(--paper-accent) 24%, transparent); }
 .picker-item.is-disabled { cursor: not-allowed; opacity: 0.45; }
 .picker-preview {
   position: relative;
@@ -177,8 +177,8 @@ onMounted(() => { if (props.show) load() })
   aspect-ratio: 3 / 4;
   overflow: hidden;
   border-radius: 7px;
-  background: #eceae4;
-  color: #9b9287;
+  background: var(--paper-thumb);
+  color: var(--paper-ink-muted);
   font-size: 12px;
 }
 .picker-preview img { width: 100%; height: 100%; object-fit: cover; }
@@ -189,22 +189,22 @@ onMounted(() => { if (props.show) load() })
   left: 6px;
   padding: 1px 7px;
   border-radius: 999px;
-  background: #315e68;
-  color: #fff;
+  background: var(--paper-accent);
+  color: var(--paper-on-accent);
   font-size: 11px;
   line-height: 18px;
 }
-.picker-badge-muted { background: rgba(60, 56, 50, 0.7); }
+.picker-badge-muted { background: var(--paper-scrim); }
 .picker-size {
   position: absolute;
   right: 6px;
   bottom: 6px;
   padding: 0 6px;
   border-radius: 4px;
-  background: rgba(30, 28, 25, 0.6);
-  color: #fff;
+  background: var(--paper-scrim);
+  color: var(--paper-on-scrim);
   font-size: 10px;
   line-height: 16px;
 }
-.picker-name { overflow: hidden; font-size: 12px; color: #5c564e; white-space: nowrap; text-overflow: ellipsis; }
+.picker-name { overflow: hidden; font-size: 12px; color: var(--paper-ink-soft); white-space: nowrap; text-overflow: ellipsis; }
 </style>

@@ -5,8 +5,8 @@ import {
 } from 'naive-ui'
 import { api, apiUrl } from '../api/client'
 import { toast } from '../ui/feedback'
-import ModelSelector from '../components/ModelSelector.vue'
 import CharacterAssetPicker from '../features/character/CharacterAssetPicker.vue'
+import { providerOptions, resolveSelectedModelId } from '../composables/imageProviders.js'
 
 const APPEARANCE_FIELDS = [
   { key: 'hair', label: '发型' },
@@ -68,7 +68,16 @@ const genStyle = ref(localStorage.getItem(GEN_STYLE_KEY) || 'manga')
 const genPromptOverride = ref('')
 const genBusy = ref(false)
 const genError = ref('')
+const genImageProviders = ref([])
+const genImageModelId = ref('')
+const genImageModelsLoading = ref(false)
 let genPollTimer = null
+const genImageModelOptions = computed(() => providerOptions(genImageProviders.value))
+const genImageModelHint = computed(() => (
+  genImageModelOptions.value.length
+    ? '这次生成用选中的模型。环境变量供应商会在列表里标成第一项。'
+    : '还没有可用的生图模型。到设置里启用带生图能力的连接后再来。'
+))
 
 const genTarget = computed(() => characters.value.find((item) => item.id === genTargetId.value) || null)
 const pendingActive = computed(() => (genTarget.value?.pendingImages || []).filter(
@@ -359,6 +368,19 @@ function adoptSuggestions() {
   toast(adopted.length ? `已采纳 ${adopted.length} 个字段（只填空白，不覆盖你写过的）` : '没有可采纳的字段')
 }
 
+async function loadGenImageProviders() {
+  genImageModelsLoading.value = true
+  try {
+    const status = await api.get('/ai/image-provider/status')
+    genImageProviders.value = status.providers || []
+    genImageModelId.value = resolveSelectedModelId(genImageProviders.value, genImageModelId.value)
+  } catch (err) {
+    genError.value = err.message
+  } finally {
+    genImageModelsLoading.value = false
+  }
+}
+
 function openGenerate(item) {
   genTargetId.value = item.id
   genAngle.value = 'front'
@@ -366,15 +388,21 @@ function openGenerate(item) {
   genError.value = ''
   genOpen.value = true
   load()
+  loadGenImageProviders()
 }
 
 async function runGenerate() {
   genError.value = ''
+  if (!genImageModelOptions.value.length) {
+    genError.value = '没有可用的生图模型'
+    return
+  }
   genBusy.value = true
   try {
     await api.post(`/characters/${genTargetId.value}/images/generate`, {
       angle: genAngle.value,
       style: genStyle.value,
+      modelId: genImageModelId.value || null,
       ...(genPromptOverride.value.trim() ? { promptOverride: genPromptOverride.value.trim() } : {}),
     })
     await load()
@@ -589,14 +617,25 @@ onMounted(load)
       <div class="gen-controls">
         <label class="field"><span>角度</span><n-select v-model:value="genAngle" :options="ANGLES" /></label>
         <label class="field"><span>风格</span><n-select v-model:value="genStyle" :options="GEN_STYLES" /></label>
+        <label class="field"><span>生图模型</span>
+          <n-select
+            v-model:value="genImageModelId"
+            :options="genImageModelOptions"
+            :loading="genImageModelsLoading"
+            :disabled="genImageModelsLoading || !genImageModelOptions.length"
+            :consistent-menu-width="false"
+            placeholder="没有可用的生图模型"
+            aria-label="选择角色参考图的生图模型"
+          />
+        </label>
       </div>
-      <ModelSelector label="图像模型" />
+      <p class="field-hint">{{ genImageModelHint }}</p>
       <details class="gen-prompt-details">
         <summary>编辑最终提示词（默认按外貌设定自动合成）</summary>
         <n-input v-model:value="genPromptOverride" type="textarea" :rows="3" placeholder="留空 = 用模板合成；填写 = 整体替换" />
       </details>
       <div class="gen-actions">
-        <n-button type="primary" :loading="genBusy" @click="runGenerate">生成一张</n-button>
+        <n-button type="primary" :loading="genBusy" :disabled="genImageModelsLoading || !genImageModelOptions.length" @click="runGenerate">生成一张</n-button>
         <span v-if="pendingActive.length" class="field-hint">{{ pendingActive.length }} 张正在生成…</span>
       </div>
       <n-alert v-if="genError" type="error" :bordered="false">{{ genError }}</n-alert>

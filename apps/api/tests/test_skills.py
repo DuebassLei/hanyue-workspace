@@ -29,7 +29,7 @@ def _create_style(client, headers, key: str, **overrides):
         "displayName": f"{key} 风格",
         "description": "测试用风格",
         "allowedToolIds": ["generate_article"],
-        "manifest": {"tone": "克制", "styleRules": ["少用形容词"], "defaultTheme": "deep-blue"},
+        "manifest": {"tone": "克制", "styleRules": ["少用形容词"], "defaultTheme": "blue-business"},
     }
     payload.update(overrides)
     return client.post("/api/v1/skills", json=payload, headers=headers)

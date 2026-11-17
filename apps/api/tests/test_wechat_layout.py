@@ -143,10 +143,10 @@ def test_theme_changes_output_style():
 
     default = wechat_layout.render_document("# 标题", None, [])["html"]
     blue = wechat_layout.render_document(
-        "# 标题", wechat_layout.PRESET_THEMES["deep-blue"]["tokens"], []
+        "# 标题", wechat_layout.PRESET_THEMES["blue-business"]["tokens"], []
     )["html"]
     assert "#0F6E56" in default
-    assert "#185FA5" in blue
+    assert "#003BB3" in blue
     assert default != blue
 
 
@@ -211,7 +211,7 @@ def test_follow_block_has_layered_call_to_action_and_escapes_content():
 def test_new_heading_styles_and_presets_normalize():
     from app.services import wechat_layout
 
-    for theme_id in ("news-ink", "paper-cinnabar", "magazine-slate", "friendly-pill"):
+    for theme_id in ("news-ink", "paper-cinnabar", "notebook", "friendly-pill"):
         tokens = wechat_layout.PRESET_THEMES[theme_id]["tokens"]
         normalized = wechat_layout.normalize_tokens(tokens)
         html = wechat_layout.render_document("# 主标题\n\n## 小标题\n\n- 一条", normalized, [])["html"]
@@ -228,6 +228,54 @@ def test_new_heading_styles_and_presets_normalize():
         "## 小标题", wechat_layout.PRESET_THEMES["news-ink"]["tokens"], []
     )["html"]
     assert "0.8px solid" in hairline
+    banner = wechat_layout.render_document(
+        "# 主标题", wechat_layout.PRESET_THEMES["dispatch"]["tokens"], []
+    )["html"]
+    assert "background:#8C2F2F" in banner
+    assert "text-align:center" in banner
+    poster = wechat_layout.render_document(
+        "# 主标题", wechat_layout.PRESET_THEMES["poster"]["tokens"], []
+    )["html"]
+    assert "font-size:27.0px" in poster
+    notebook = wechat_layout.render_document(
+        "# 主标题\n\n- 一条", wechat_layout.PRESET_THEMES["notebook"]["tokens"], []
+    )["html"]
+    assert "list-style-type:square" in notebook
+    margin = wechat_layout.render_document(
+        "# 主标题", wechat_layout.PRESET_THEMES["margin-note"]["tokens"], []
+    )["html"]
+    assert "0<br/>1" in margin
+    assert "background:#5C4B8A" in margin
+    sealed = wechat_layout.render_document(
+        "# 主标题", wechat_layout.PRESET_THEMES["seal"]["tokens"], []
+    )["html"]
+    assert sealed.count("border-top:1px solid #A63D2F") == 1
+    assert "border-left:1px solid #A63D2F" in sealed
+    lead = wechat_layout.render_document(
+        "# 主标题\n\n先说这一段。\n\n再说普通的一段。",
+        wechat_layout.PRESET_THEMES["lead-in"]["tokens"],
+        [],
+    )["html"]
+    assert 'font-size:18.0px;line-height:1.9;letter-spacing:0.3px;color:#8A8680' in lead
+    assert lead.count("font-size:16.0px") == 1
+    eyebrow = wechat_layout.render_document(
+        "# 主标题", wechat_layout.PRESET_THEMES["eyebrow"]["tokens"], []
+    )["html"]
+    assert "本期" in eyebrow
+    assert "letter-spacing:2px" in eyebrow
+    kicker = wechat_layout.render_document(
+        "# 主标题", wechat_layout.PRESET_THEMES["kicker"]["tokens"], []
+    )["html"]
+    assert "letter-spacing:3px" in kicker
+    assert "text-align:center" in kicker
+    framed = wechat_layout.render_document(
+        "# 主标题", wechat_layout.PRESET_THEMES["framed"]["tokens"], []
+    )["html"]
+    assert framed.count("1px solid #7A3E2E") == 2
+    rail = wechat_layout.render_document(
+        "# 主标题", wechat_layout.PRESET_THEMES["rail"]["tokens"], []
+    )["html"]
+    assert "border-left:4px solid #1F6F78" in rail
 
 
 # ---------- 主题 API ----------
@@ -239,18 +287,18 @@ def test_theme_crud_and_preset_protection(client):
     assert listing.status_code == 200, listing.text
     data = listing.json()
     assert data["defaultThemeId"] == "ink-green"
-    assert len(data["presets"]) == 10
+    assert len(data["presets"]) == 18
     assert all(item["editable"] is False for item in data["presets"])
 
     created = client.post(
         "/api/v1/wechat-mp/themes",
-        json={"name": "我的蓝", "baseThemeId": "deep-blue", "tokens": {"bodySize": 15}},
+        json={"name": "我的蓝", "baseThemeId": "blue-business", "tokens": {"bodySize": 15}},
         headers=headers,
     )
     assert created.status_code == 201, created.text
     theme = created.json()
     assert theme["tokens"]["bodySize"] == 15
-    assert theme["tokens"]["primaryColor"] == "#185FA5"
+    assert theme["tokens"]["primaryColor"] == "#003BB3"
 
     bad = client.post(
         "/api/v1/wechat-mp/themes",
@@ -336,8 +384,53 @@ def test_components_endpoint(client):
     components = res.json()["components"]
     assert {item["id"] for item in components} == {
         "lead", "card", "stat", "steps", "compare", "layers", "checklist",
-        "quote-card", "follow", "sign",
+        "quote-card", "follow", "sign", "support", "cheer", "mini-support",
     }
+
+
+def test_cheer_component_renders_warm_card_and_optional_art():
+    from app.services import wechat_layout
+
+    body = (
+        ":::cheer 喜欢就支持一下吧！ / 你的每一次互动，都是我持续创作的动力～ / 有你真好！\n"
+        "点赞 | 喜欢就点个赞吧，感谢你的支持\n"
+        "转发 | 分享给更多朋友，让美好一起传递\n"
+        "推荐 | 推荐给身边的人，让更多人看到\n"
+        "插图 | {{image1}}\n"
+        ":::"
+    )
+    result = wechat_layout.render_document(body, None, ["https://mmbiz.qpic.cn/cat.jpg"])
+    html = result["html"]
+    assert result["warnings"] == [], result["warnings"]
+    assert "喜欢就支持一下吧！" in html
+    assert "有你真好！" in html
+    assert "点赞" in html and "转发" in html and "推荐" in html
+    assert "https://mmbiz.qpic.cn/cat.jpg" in html
+    assert html.count("https://mmbiz.qpic.cn/cat.jpg") == 1  # 插图占位已消费，不再追加到文末
+    assert wechat_layout.lint_html(html) == []
+
+    missing = wechat_layout.render_document(
+        ":::cheer\n点赞 | 说明\n插图 | {{image9}}\n:::", None, []
+    )
+    assert any("插图占位" in item["message"] for item in missing["warnings"])
+
+
+def test_mini_support_renders_three_icons():
+    from app.services import wechat_layout
+
+    result = wechat_layout.render_document(
+        ":::mini-support 支持一下\n点赞\n转发\n推荐\n:::", None, []
+    )
+    html = result["html"]
+    assert result["warnings"] == [], result["warnings"]
+    assert "支持一下" in html
+    assert "👍" in html and "🔁" in html and "❤️" in html
+    assert "点赞" in html and "转发" in html and "推荐" in html
+    assert wechat_layout.lint_html(html) == []
+
+    # 不写标题也应零告警
+    plain = wechat_layout.render_document(":::mini-support\n点赞\n:::", None, [])
+    assert plain["warnings"] == [], plain["warnings"]
 
 
 def test_theme_schema_covers_known_keys():
@@ -413,7 +506,7 @@ def test_theme_prefs_validation_and_invariants(client):
     other = _headers(client, "layout-prefs-other")
     created = client.post(
         "/api/v1/wechat-mp/themes",
-        json={"name": "他人主题", "baseThemeId": "deep-blue"},
+        json={"name": "他人主题", "baseThemeId": "blue-business"},
         headers=other,
     )
     foreign_id = created.json()["id"]
@@ -575,23 +668,23 @@ def test_push_stores_layout_snapshot_and_renders_with_theme(
             "idempotencyKey": "layout-push-1",
             "title": "带主题的草稿",
             "body": "# 标题\n\n正文内容",
-            "themeId": "deep-blue",
+            "themeId": "blue-business",
             "assetIds": [cover],
         },
         headers=headers,
     )
     assert res.status_code == 201, res.text
     job_id = res.json()["id"]
-    assert res.json()["themeId"] == "deep-blue"
+    assert res.json()["themeId"] == "blue-business"
 
     from app.services import job_runner
 
     with SessionLocal() as db:
         job = db.get(models.PublishJob, job_id)
-        assert job.theme_id == "deep-blue"
-        assert job.layout_snapshot["primaryColor"] == "#185FA5"
+        assert job.theme_id == "blue-business"
+        assert job.layout_snapshot["primaryColor"] == "#003BB3"
         job_runner._handle_platform_publish(
             db,
             type("J", (), {"payload": {"publishJobId": job_id}, "owner_user_id": job.owner_user_id})(),
         )
-    assert "#185FA5" in captured["article"]["content"]
+    assert "#003BB3" in captured["article"]["content"]

@@ -136,7 +136,7 @@ async def _collect_text(db, user_id: str, prompt: str, model_id: str | None) -> 
         raise ScriptError("provider_unavailable", "所有文本模型均不可用 → " + "；".join(failures)[:500])
     raise ScriptError(
         "provider_unavailable",
-        "尚未配置可用的文本模型连接；请在「设置 → 模型连接」登记并测试通过后重试",
+        "尚未配置可用的文本模型连接；请在「系统 → 模型管理」登记并测试通过后重试",
     )
 
 

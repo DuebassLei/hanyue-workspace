@@ -224,6 +224,22 @@ class ConnectionPatch(CamelModel):
     status: str | None = None
 
 
+class ModelProbeIn(CamelModel):
+    """配置弹窗里的「拉取模型列表 / 测试模型」入参。
+
+    允许直接用还没保存的地址与密钥探测；带了 connectionId 时，空的 apiKey 与
+    baseUrl 回落到该连接已存的凭据与地址（编辑时不必重新输入密钥）。
+    """
+
+    base_url: str = ""
+    api_key: str = ""
+    provider_type: str = "openai_compatible"
+    connection_id: str | None = None
+    model_code: str = ""
+    # text / image：决定模型级测试是真发一次 1 token 对话，还是只核对模型列表
+    kind: str = "text"
+
+
 class CatalogIn(CamelModel):
     connection_id: str
     model_code: str
@@ -264,6 +280,23 @@ class CatalogOut(CamelModel):
     is_default: bool = False
     # 空能力的历史模型按文本模型处理，与网关 _is_text_model 保持一致
     is_text_model: bool = False
+
+
+class ModelStatusOut(CamelModel):
+    """顶栏「当前文本 / 生图模型」状态条。
+
+    只看配置链路是否完整（模型启用、连接存在、凭据已登记），不发真实请求：
+    顶栏每次进站都要读，不能因为探测供应商把启动拖慢，也不该吞掉供应商额度。
+    """
+
+    kind: str  # text | image
+    # ok 可用 / blocked 链路断（红色）/ unchecked 没测过或没设默认（灰色）/ none 没配（灰色）
+    state: str
+    model_code: str | None = None
+    display_name: str | None = None
+    connection_name: str | None = None
+    connection_status: str | None = None
+    message: str
 
 
 class TextGenerationIn(CamelModel):
@@ -900,9 +933,17 @@ class StickerSetOut(CamelModel):
     cover_url: str | None = None
     # 画风签名（锚点反推的一致性锚），仅详情接口回显
     anchor_desc: str = ""
+    # 本集选定的生图模型；空表示环境变量 / 首个可用连接
+    image_model_id: str | None = None
     created_at: datetime
     updated_at: datetime
     images: list[StickerImageOut] = []
+
+
+class StickerImageModelIn(CamelModel):
+    """空串 / 省略表示环境变量供应商（或回退到首个可用连接）。"""
+
+    model_id: str | None = Field(default=None, max_length=64)
 
 
 class StickerStylesOut(CamelModel):
@@ -1252,6 +1293,14 @@ class NovelProjectListItem(CamelModel):
 
 
 # ---------- video（图文成片） ----------
+VideoMotion = Literal["zoom_in", "zoom_out", "pan_left", "pan_right", "still"]
+
+
+class VideoFocus(CamelModel):
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+
+
 class VideoSettingsIn(CamelModel):
     aspect_ratio: Literal["9:16", "16:9"] = "9:16"
     voice: str = Field(default="zh-CN-XiaoxiaoNeural", max_length=64)
@@ -1259,6 +1308,11 @@ class VideoSettingsIn(CamelModel):
     subtitles: bool = True
     bgm_asset_id: str | None = None
     bgm_volume: float = Field(default=0.18, ge=0.02, le=0.6)
+    motion_intensity: float = Field(default=0.12, ge=0, le=0.25)
+    motion_focus: VideoFocus = Field(default_factory=lambda: VideoFocus(x=0.5, y=0.5))
+    subtitle_animation: Literal["fade_in"] = "fade_in"
+    # 镜头配图使用的生图模型；空表示环境变量 / 首个可用连接
+    image_model_id: str | None = Field(default=None, max_length=64)
 
 
 class VideoProjectCreate(CamelModel):
@@ -1277,14 +1331,18 @@ class VideoProjectPatch(CamelModel):
 class VideoShotIn(CamelModel):
     narration: str = Field(default="", max_length=1000)
     image_prompt: str = Field(default="", max_length=1000)
-    motion: Literal["zoom_in", "zoom_out", "pan_left", "pan_right"] = "zoom_in"
+    motion: VideoMotion = "zoom_in"
+    intensity: float | None = Field(default=None, ge=0, le=0.25)
+    focus: VideoFocus | None = None
 
 
 class VideoShotPatch(CamelModel):
     narration: str | None = Field(default=None, max_length=1000)
     image_prompt: str | None = Field(default=None, max_length=1000)
-    motion: Literal["zoom_in", "zoom_out", "pan_left", "pan_right"] | None = None
+    motion: VideoMotion | None = None
     image_asset_id: str | None = None
+    intensity: float | None = Field(default=None, ge=0, le=0.25)
+    focus: VideoFocus | None = None
 
 
 class VideoShotOut(CamelModel):
@@ -1298,6 +1356,8 @@ class VideoShotOut(CamelModel):
     audio_url: str | None = None
     duration_ms: int
     motion: str
+    intensity: float | None = None
+    focus: VideoFocus | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -1337,3 +1397,41 @@ class VideoBreakdownRequest(CamelModel):
 
 class VideoRenderRequest(CamelModel):
     reset: bool = False
+
+
+# ---------- 定时任务（docs/scheduled-tasks.md §3）----------
+class ScheduleCreateIn(CamelModel):
+    """新建定时任务。`scope` 不接受客户端指定——由任务类型自己决定。"""
+
+    task_type: str = Field(min_length=1, max_length=64)
+    name: str | None = Field(default=None, max_length=120)
+    params: dict = Field(default_factory=dict)
+    schedule_kind: str = Field(default="cron", pattern="^(cron|interval)$")
+    cron: str = Field(default="", max_length=120)
+    interval_seconds: int | None = Field(default=None, ge=1, le=31 * 24 * 3600)
+    timezone: str | None = Field(default=None, max_length=64)
+    misfire_grace_seconds: int | None = Field(default=None, ge=1, le=24 * 3600)
+    enabled: bool = True
+
+
+class ScheduleUpdateIn(CamelModel):
+    """局部更新：只改传上来的字段，未传的保持原值。"""
+
+    name: str | None = Field(default=None, max_length=120)
+    params: dict | None = None
+    schedule_kind: str | None = Field(default=None, pattern="^(cron|interval)$")
+    cron: str | None = Field(default=None, max_length=120)
+    interval_seconds: int | None = Field(default=None, ge=1, le=31 * 24 * 3600)
+    timezone: str | None = Field(default=None, max_length=64)
+    misfire_grace_seconds: int | None = Field(default=None, ge=1, le=24 * 3600)
+    enabled: bool | None = None
+
+
+class SchedulePreviewIn(CamelModel):
+    """保存前预览未来触发时间：cron 最容易配错，让人先看见结果。"""
+
+    schedule_kind: str = Field(default="cron", pattern="^(cron|interval)$")
+    cron: str = Field(default="", max_length=120)
+    interval_seconds: int | None = Field(default=None, ge=1, le=31 * 24 * 3600)
+    timezone: str | None = Field(default=None, max_length=64)
+    count: int = Field(default=3, ge=1, le=10)

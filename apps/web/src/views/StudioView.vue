@@ -21,6 +21,7 @@ import { useModelSelectionStore } from '../stores/modelSelection'
 import { articleBodyFromOutput, parseArticleOutput } from '../utils/aiArticle'
 import PublishDrawer from '../features/publish/PublishDrawer.vue'
 import DraftLibraryModal from '../features/studio/DraftLibraryModal.vue'
+import { providerOptions, resolveSelectedModelId } from '../composables/imageProviders.js'
 import { toast } from '../ui/feedback'
 
 const route = useRoute()
@@ -606,6 +607,7 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
       purpose: request.purpose,
       aspectRatio: request.aspectRatio,
       count: 1,
+      modelId: imgModelId.value || null,
     })
     return {
       id: response.jobId,
@@ -837,15 +839,22 @@ async function createDraftFromHot(item) {
 
 // ─── 配图 Tab ────────────────────────────────────────────────
 // 提供商状态
-const imgProvider = ref({ available: false, note: '', modelCode: null })
+const imgProvider = ref({ available: false, note: '', modelCode: null, providers: [] })
 const imgProviderLoaded = ref(false)
+const imgModelId = ref('')
+const imgModelOptions = computed(() => providerOptions(imgProvider.value.providers))
+const selectedImgProvider = computed(
+  () => (imgProvider.value.providers || []).find((item) => (item.modelId || '') === imgModelId.value) || null,
+)
 
 async function loadImageProviderStatus() {
   if (imgProviderLoaded.value) return
   try {
-    imgProvider.value = await api.get('/ai/image-provider/status')
+    const status = await api.get('/ai/image-provider/status')
+    imgProvider.value = { ...status, providers: status.providers || [] }
+    imgModelId.value = resolveSelectedModelId(imgProvider.value.providers, imgModelId.value)
   } catch (err) {
-    imgProvider.value = { available: false, note: err.message, modelCode: null }
+    imgProvider.value = { available: false, note: err.message, modelCode: null, providers: [] }
   } finally {
     imgProviderLoaded.value = true
   }
@@ -937,6 +946,7 @@ async function generateImages() {
       prompt: imgPrompt.value.trim(),
       aspectRatio: imgAspectRatio.value,
       count: Number(imgCount.value),
+      modelId: imgModelId.value || null,
     })
     imgJobs.value.unshift({
       id: res.jobId,
@@ -964,6 +974,7 @@ async function retryImageJob(job) {
       purpose: job.purpose || 'cover',
       aspectRatio: job.aspectRatio || (job.purpose === 'cover' ? '3:4' : '1:1'),
       count: job.count || 1,
+      modelId: imgModelId.value || null,
     })
     job.id = response.jobId
     job.status = 'queued'
@@ -1567,6 +1578,18 @@ onBeforeUnmount(() => {
               </span>
             </n-checkbox>
             <section v-if="aiAutoImages" class="ai-image-settings" aria-label="自动配图设置">
+              <div class="field">
+                <label class="field-label">生图模型</label>
+                <n-select
+                  v-model:value="imgModelId"
+                  :options="imgModelOptions"
+                  :loading="!imgProviderLoaded"
+                  :disabled="aiRunning || !imgModelOptions.length"
+                  :consistent-menu-width="false"
+                  placeholder="没有可用的生图模型"
+                  aria-label="选择自动配图的生图模型"
+                />
+              </div>
               <div class="ai-image-settings-grid">
                 <div class="field">
                   <label class="field-label">封面比例</label>
@@ -1754,13 +1777,25 @@ onBeforeUnmount(() => {
               <span class="studio-section-label studio-section-label-flush">AI 配图</span>
               <p class="studio-tool-description">
                 {{ imgProvider.available
-                  ? `使用 ${imgProvider.modelCode || '已配置模型'} 生成配图`
-                  : '未配置生图供应商，请在「设置 → 模型连接」添加支持 image.generate 的模型' }}
+                  ? `使用 ${selectedImgProvider?.label || imgProvider.modelCode || '已配置模型'} 生成配图`
+                  : '未配置生图供应商，请在「模型管理」添加支持 image.generate 的模型' }}
               </p>
             </div>
           </div>
 
           <div class="studio-tool-stack">
+            <div class="field">
+              <label class="field-label">生图模型</label>
+              <n-select
+                v-model:value="imgModelId"
+                :options="imgModelOptions"
+                :loading="!imgProviderLoaded"
+                :disabled="imgBusy || !imgModelOptions.length"
+                :consistent-menu-width="false"
+                placeholder="没有可用的生图模型"
+                aria-label="选择配图的生图模型"
+              />
+            </div>
             <!-- Prompt 输入 -->
             <div class="field">
               <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: var(--space-1)">
@@ -2080,7 +2115,7 @@ onBeforeUnmount(() => {
 }
 .studio-new-draft:hover {
   background: var(--color-accent);
-  color: #fff;
+  color: var(--color-on-accent);
 }
 .studio-library-link {
   display: block;
@@ -2340,7 +2375,7 @@ onBeforeUnmount(() => {
   border-color: color-mix(in srgb, var(--color-border) 88%, transparent);
   border-radius: var(--radius-lg);
   background: var(--color-surface);
-  box-shadow: 0 1px 2px rgba(32, 39, 35, 0.03), var(--shadow-md);
+  box-shadow: var(--shadow-md);
 }
 .studio-doc-head {
   display: flex;
@@ -2569,7 +2604,7 @@ onBeforeUnmount(() => {
 }
 .studio-model-usage {
   margin: 0;
-  color: var(--color-text-muted, #8a8178);
+  color: var(--color-text-muted);
   font-size: 11px;
 }
 .ai-image-settings {
@@ -2592,7 +2627,7 @@ onBeforeUnmount(() => {
   font-size: 11px;
 }
 .ai-image-settings-status { color: var(--color-text-secondary); }
-.ai-image-settings-error { color: var(--color-danger, #c2413b); }
+.ai-image-settings-error { color: var(--color-danger); }
 .studio-ai-output {
   padding: var(--space-3);
   border-left: 3px solid var(--color-accent);

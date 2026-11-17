@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import Any
 
 from fastapi import APIRouter, Query, Response
 from fastapi.responses import StreamingResponse
@@ -158,6 +161,71 @@ def test_connection(connection_id: str, user: CurrentUser, db: DbSession) -> dic
     }
 
 
+def _probe_credentials(
+    payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession
+) -> tuple[str, str]:
+    """取「这次探测用哪个地址、哪把钥匙」。
+
+    弹窗里可能还没保存连接：优先用表单里的值；编辑已有连接且密钥留空时，
+    回落该连接已存的密文，避免为了测试逼用户重新粘贴一次 Key。
+    """
+    base_url = (payload.base_url or "").strip()
+    api_key = (payload.api_key or "").strip()
+    if payload.connection_id:
+        conn = db.get(models.ModelConnection, payload.connection_id)
+        if not conn or conn.owner_user_id != user.id:
+            raise not_found("模型连接")
+        base_url = base_url or conn.base_url
+        api_key = api_key or decrypt_secret(conn.credential_ciphertext)
+    try:
+        validated = ssrf.validate_base_url(base_url)
+    except ssrf.UnsafeUrl as exc:
+        raise ApiError("invalid_base_url", str(exc)) from exc
+    if not validated:
+        raise ApiError("missing_base_url", "请先填写 Base URL")
+    return validated, api_key
+
+
+@router.post("/models/probe/models")
+def probe_models(
+    payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession
+) -> dict:
+    """按当前填写的地址与密钥拉一次供应商模型列表，供「模型代号」下拉选择。
+
+    只读：不落库、不改连接状态，拉不到就是拉不到，不返回占位列表。
+    """
+    base_url, api_key = _probe_credentials(payload, user, db)
+    result = provider_probe.fetch_models(base_url, api_key, payload.provider_type)
+    return {
+        "status": result["status"],
+        "message": result["message"],
+        "httpStatus": result["httpStatus"],
+        "latencyMs": result["latencyMs"],
+        "modelCount": result["modelCount"],
+        "truncated": result["truncated"],
+        "models": result["models"],
+    }
+
+
+@router.post("/models/probe/test")
+def probe_model(
+    payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession
+) -> dict:
+    """测试当前表单这套配置：连接是否通、这个模型代号到底能不能用。
+
+    文本模型会真发一次 1 token 的请求；生图模型只核对模型列表，不替用户花钱出图。
+    同样只读：结果不写入连接状态，保存后的状态以列表页「测试」为准。
+    """
+    base_url, api_key = _probe_credentials(payload, user, db)
+    return provider_probe.probe_model(
+        base_url=base_url,
+        api_key=api_key,
+        provider_type=payload.provider_type,
+        model_code=payload.model_code,
+        kind=payload.kind,
+    )
+
+
 @router.get("/models/catalog", response_model=list[schemas.CatalogOut])
 def list_catalog(user: CurrentUser, db: DbSession) -> list[schemas.CatalogOut]:
     connection_ids = [
@@ -225,6 +293,169 @@ def delete_catalog(model_id: str, user: CurrentUser, db: DbSession) -> None:
         raise not_found("模型")
     db.delete(entry)
     db.commit()
+
+
+# 连接已测过且失败的几种结论。连接一旦测过，之后再改密钥 / 地址都会被重置回
+# untested，所以这里都是最近一次真实探测的结论，而不是陈年旧账。
+FAILED_CONNECTION_STATUS = {
+    "unauthorized": "凭据被供应商拒绝",
+    "adapter_unavailable": "供应商协议适配器未接入",
+    "invalid_base_url": "Base URL 不合法",
+    "provider_unavailable": "供应商不可用",
+    "provider_unreachable": "供应商连接失败",
+    "endpoint_not_supported": "供应商未提供 /models 接口",
+}
+
+
+def _status_item(
+    kind: str,
+    *,
+    state: str,
+    message: str,
+    entry: Any = None,
+    conn: Any = None,
+) -> schemas.ModelStatusOut:
+    return schemas.ModelStatusOut(
+        kind=kind,
+        state=state,
+        message=message,
+        model_code=entry.model_code if entry else None,
+        display_name=(entry.display_name or entry.model_code) if entry else None,
+        connection_name=conn.display_name if conn else None,
+        connection_status=conn.status if conn else None,
+    )
+
+
+def _current_text_model(db, user_id: str) -> schemas.ModelStatusOut:
+    """与 ai_gateway 候选链同口径：默认模型优先，否则取第一个可用文本模型。"""
+    described = ai_gateway.describe_default_model(db, user_id)
+    default_id = described["id"]
+    is_default = bool(default_id) and ai_gateway._validate_entry(db, user_id, default_id)[2] is None
+    entry = db.get(models.ModelCatalogEntry, default_id) if is_default else None
+    if entry is None:
+        # 默认模型不可用时的真实降级目标：候选链里第一个校验通过的文本模型
+        for _conn, _code, entry_id in ai_gateway._text_candidates(db, user_id):
+            if entry_id and ai_gateway._validate_entry(db, user_id, entry_id)[2] is None:
+                entry = db.get(models.ModelCatalogEntry, entry_id)
+                break
+
+    if entry is None:
+        return _status_item(
+            "text",
+            state="blocked",
+            message="没有可用的文本模型：生成请求会直接报错，请到设置里检查连接与 API Key",
+        )
+    conn = db.get(models.ModelConnection, entry.connection_id)
+    failure = FAILED_CONNECTION_STATUS.get(conn.status) if conn else "连接已被删除"
+    if not is_default:
+        # 没设默认、或默认失效后降级到了这个模型：生成能成功，但不在用户「以为」的那个模型上。
+        # 连接已测过失败仍然算红；其余是配置示意的偏差，算灰色并说清降级目标。
+        if failure:
+            return _status_item(
+                "text",
+                state="blocked",
+                message=f"最近一次连接测试失败：{failure}",
+                entry=entry,
+                conn=conn,
+            )
+        if described["ignored"]:
+            message = (
+                f"默认模型不可用（{described['ignored']['message']}），"
+                "未手动指定时会自动使用本模型"
+            )
+        else:
+            message = "尚未设置默认模型，未手动指定时会自动使用本模型"
+        return _status_item(
+            "text", state="unchecked", message=message, entry=entry, conn=conn
+        )
+    if failure:
+        return _status_item(
+            "text",
+            state="blocked",
+            message=f"最近一次连接测试失败：{failure}",
+            entry=entry,
+            conn=conn,
+        )
+    if conn.status != "connected":
+        return _status_item(
+            "text",
+            state="unchecked",
+            message="连接尚未测试，到设置里测试后才能确认可用",
+            entry=entry,
+            conn=conn,
+        )
+    return _status_item(
+        "text", state="ok", message="默认文本模型，生成时会优先使用", entry=entry, conn=conn
+    )
+
+
+def _current_image_model(db, user_id: str) -> schemas.ModelStatusOut:
+    """与 image_provider.resolve_image_provider 同口径：环境变量供应商优先。"""
+    env_model = os.getenv("IMAGE_PROVIDER_MODEL", "").strip()
+    if env_model:
+        ready = bool(
+            os.getenv("IMAGE_PROVIDER_BASE_URL", "").strip()
+            and os.getenv("IMAGE_PROVIDER_API_KEY", "").strip()
+        )
+        return _status_item(
+            "image",
+            state="ok" if ready else "blocked",
+            message="环境变量供应商" if ready else "环境变量供应商配置不完整（缺少地址或密钥）",
+            # 环境变量供应商没有 catalog 行，只借用展示字段
+            entry=SimpleNamespace(model_code=env_model, display_name=env_model),
+            conn=SimpleNamespace(display_name="环境变量", status=None),
+        )
+
+    entries = db.scalars(
+        select(models.ModelCatalogEntry)
+        .where(models.ModelCatalogEntry.enabled.is_(True))
+        .order_by(models.ModelCatalogEntry.created_at)
+    ).all()
+    candidate = None
+    for entry in entries:
+        if "image.generate" not in (entry.capabilities or []):
+            continue
+        conn = db.get(models.ModelConnection, entry.connection_id)
+        if not conn or conn.owner_user_id != user_id:
+            continue
+        candidate = candidate or (entry, conn)
+        # 与解析顺序一致：第一个「地址 + 密钥」齐全的就是实际会用的那个
+        if conn.base_url and conn.credential_ciphertext:
+            failure = FAILED_CONNECTION_STATUS.get(conn.status)
+            if failure:
+                return _status_item(
+                    "image",
+                    state="blocked",
+                    message=f"最近一次连接测试失败：{failure}",
+                    entry=entry,
+                    conn=conn,
+                )
+            state = "ok" if conn.status == "connected" else "unchecked"
+            message = (
+                "生图会使用该模型"
+                if state == "ok"
+                else "连接尚未测试，到设置里测试后才能确认可用"
+            )
+            return _status_item("image", state=state, message=message, entry=entry, conn=conn)
+    if candidate:
+        entry, conn = candidate
+        return _status_item(
+            "image",
+            state="blocked",
+            message="图像模型所属连接缺少地址或 API Key",
+            entry=entry,
+            conn=conn,
+        )
+    return _status_item(
+        "image",
+        state="none",
+        message="未接入图像生成供应商，配图需指定已上传素材；可在设置里添加带生图能力的模型",
+    )
+
+
+@router.get("/models/status", response_model=list[schemas.ModelStatusOut])
+def model_status(user: CurrentUser, db: DbSession) -> list[schemas.ModelStatusOut]:
+    return [_current_text_model(db, user.id), _current_image_model(db, user.id)]
 
 
 @router.post("/ai/text-generations")

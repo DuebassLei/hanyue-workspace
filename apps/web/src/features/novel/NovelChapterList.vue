@@ -43,14 +43,14 @@ const STATUS_LABEL = {
 <style scoped>
 .chapter-list { min-width: 0; }
 .block-title { margin: 0 0 10px; font-size: 15px; }
-.empty-hint { margin: 0; color: #827a71; font-size: 13px; }
+.empty-hint { margin: 0; color: var(--paper-ink-muted); font-size: 13px; }
 .chapter-items { list-style: none; margin: 0; padding: 0; }
-.chapter-row { display: flex; align-items: flex-start; gap: 8px; width: 100%; padding: 8px 4px; border: 0; border-bottom: 1px solid #e1ddd6; background: transparent; text-align: left; cursor: pointer; color: inherit; }
-.chapter-row.is-active { background: #f3efe7; }
-.chapter-order { flex: none; width: 1.6em; color: #888077; font-size: 12px; }
+.chapter-row { display: flex; align-items: flex-start; gap: 8px; width: 100%; padding: 8px 4px; border: 0; border-bottom: 1px solid var(--paper-line); background: transparent; text-align: left; cursor: pointer; color: inherit; }
+.chapter-row.is-active { background: var(--paper-active); }
+.chapter-order { flex: none; width: 1.6em; color: var(--paper-ink-muted); font-size: 12px; }
 .chapter-main { min-width: 0; }
 .chapter-main strong, .chapter-main small { display: block; }
 .chapter-main strong { font-size: 13px; overflow-wrap: anywhere; }
-.chapter-main small { margin-top: 2px; color: #888077; font-size: 11px; }
-.stale-mark { color: #9a6230; }
+.chapter-main small { margin-top: 2px; color: var(--paper-ink-muted); font-size: 11px; }
+.stale-mark { color: var(--paper-warning); }
 </style>

@@ -2,13 +2,43 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    TZ=Asia/Shanghai
 
 WORKDIR /app
 
+# 国内构建：把 Debian 源换成国内镜像（$APT_MIRROR，如 mirrors.aliyun.com）。
+# 只替换主机名、保留路径，sources.list 与 debian.sources 两种写法都覆盖；
+# 用 "//host" 作锚点避免误伤注释。留空则完全不动。
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then \
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+            [ -f "$f" ] || continue; \
+            sed -i "s|//deb.debian.org|//$APT_MIRROR|g; s|//security.debian.org|//$APT_MIRROR|g" "$f"; \
+        done; \
+        echo "apt 源已切到 $APT_MIRROR，实际生效的源："; \
+        grep -hE '^(deb |URIs:)' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null | head -4 || true; \
+    fi
+
+# tzdata：Worker 侧同样要解析任务时区（scheduled_tasks 用 zoneinfo）
+# libpq5：psycopg 运行期系统库兜底
+# ffmpeg/ffprobe：图文成片由 worker 执行（job_runner → video_render），必须装在消费者镜像里
+# fonts-wqy-microhei + fontconfig：ASS 硬字幕的 Microsoft YaHei 需别名到开源中文字体
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 tzdata ffmpeg fonts-wqy-microhei fontconfig \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY apps/api/docker/fonts-cjk-alias.conf /etc/fonts/conf.d/99-cjk-alias.conf
+RUN fc-cache -f >/dev/null
+
+# 国内构建可传 --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_INDEX_URL=
+
 # 构建上下文为仓库根目录（infra/docker-compose.yml 中的 context: ..）
 COPY apps/api/requirements.txt apps/api/requirements-prod.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -r requirements-prod.txt
+RUN pip install --no-cache-dir --retries 5 --timeout 60 ${PIP_INDEX_URL:+--index-url $PIP_INDEX_URL} \
+        -r requirements.txt -r requirements-prod.txt
 
 # Worker 与 API 共用同一套领域模型与服务，保证两种执行后端语义一致
 COPY apps/api/app ./app

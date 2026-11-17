@@ -28,6 +28,7 @@ import CommandPalette from './features/shell/CommandPalette.vue'
 import AccentMenu from './features/shell/AccentMenu.vue'
 import FontMenu from './features/shell/FontMenu.vue'
 import AccountMenu from './features/shell/AccountMenu.vue'
+import ModelStatusBar from './features/shell/ModelStatusBar.vue'
 import AccountDrawer from './features/shell/AccountDrawer.vue'
 
 const route = useRoute()
@@ -124,6 +125,104 @@ const groupIcons = {
   ]),
 }
 
+// 二级菜单图标：与一级分组同一套 stroke 画法，按 NAV_GROUPS 的 item.name 取用
+const itemIcons = {
+  overview: strokeIcon([
+    h('rect', { x: '3', y: '3', width: '6', height: '6', rx: '1.2' }),
+    h('rect', { x: '11', y: '3', width: '6', height: '6', rx: '1.2' }),
+    h('rect', { x: '3', y: '11', width: '6', height: '6', rx: '1.2' }),
+    h('rect', { x: '11', y: '11', width: '6', height: '6', rx: '1.2' }),
+  ]),
+  'hot-topics': strokeIcon([
+    h('circle', { cx: '10', cy: '10', r: '2.6' }),
+    h('path', {
+      d: 'M10 2.5v2.8M10 14.7v2.8M2.5 10h2.8M14.7 10h2.8M4.7 4.7l2 2M13.3 13.3l2 2M15.3 4.7l-2 2M6.7 13.3l-2 2',
+    }),
+  ]),
+  calendar: strokeIcon([
+    h('rect', { x: '3', y: '4.5', width: '14', height: '12', rx: '2' }),
+    h('path', { d: 'M6.5 3v3M13.5 3v3M3 9h14' }),
+  ]),
+  studio: strokeIcon([
+    h('path', {
+      d: 'M5 3.5h6l4 4v9a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 4 16.5v-11A2 2 0 0 1 5 3.5Z',
+    }),
+    h('path', { d: 'M11 3.5v4h4M7 11h6M7 14h4' }),
+  ]),
+  cards: strokeIcon([
+    h('rect', { x: '3', y: '4', width: '14', height: '12', rx: '2' }),
+    h('circle', { cx: '7', cy: '8', r: '1.1' }),
+    h('path', { d: 'M3.5 14.5 8 10l2.5 2.5L13 9l3.5 5' }),
+  ]),
+  images: strokeIcon([
+    h('rect', { x: '3', y: '5', width: '12', height: '11', rx: '2' }),
+    h('circle', { cx: '6.5', cy: '8.5', r: '1' }),
+    h('path', { d: 'M3.5 14 7 10.5l2.5 2.5L12 9.5l2.5 3' }),
+    h('path', { d: 'M16 2.5v3M14.5 4h3' }),
+  ]),
+  stickers: strokeIcon([
+    h('path', {
+      d: 'M4 3.5h9l4 4v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1Z',
+    }),
+    h('path', { d: 'M13 3.5v4h4M7 10h6M7 13h4' }),
+  ]),
+  storyboards: strokeIcon([
+    h('rect', { x: '3', y: '3.5', width: '14', height: '13', rx: '1.5' }),
+    h('path', { d: 'M3 10h14M10 3.5v13' }),
+  ]),
+  videos: strokeIcon([
+    h('rect', { x: '3', y: '4.5', width: '14', height: '11', rx: '2' }),
+    h('path', { d: 'm8.5 8 4 2-4 2V8Z' }),
+  ]),
+  characters: strokeIcon([
+    h('circle', { cx: '10', cy: '7', r: '3' }),
+    h('path', { d: 'M4.5 17a5.5 5.5 0 0 1 11 0' }),
+  ]),
+  novels: strokeIcon([
+    h('path', {
+      d: 'M10 5.5C8 4.2 5.5 4 3 4.2v11c2.5-.2 5 0 7 1.3 2-1.3 4.5-1.5 7-1.3v-11c-2.5-.2-5 0-7 1.3Z',
+    }),
+    h('path', { d: 'M10 5.5v11' }),
+  ]),
+  prompts: strokeIcon([
+    h('path', { d: 'm4.5 15.5 8-8 2 2-8 8-3 1 1-3Z' }),
+    h('path', { d: 'M15 3v3M13.5 4.5h3M17 8v2M16 9h2' }),
+  ]),
+  assets: strokeIcon([
+    h('path', {
+      d: 'M3 6a2 2 0 0 1 2-2h3l2 2h5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z',
+    }),
+  ]),
+  publishing: strokeIcon([
+    h('path', { d: 'M10 13V4m0 0L7 7m3-3 3 3' }),
+    h('path', { d: 'M4 13v2.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V13' }),
+  ]),
+  'wechat-layout': strokeIcon([
+    h('rect', { x: '3', y: '4', width: '14', height: '12', rx: '2' }),
+    h('path', { d: 'M6 8h8M6 11h8M6 14h5' }),
+  ]),
+  models: strokeIcon([
+    h('rect', { x: '5', y: '5', width: '10', height: '10', rx: '1.5' }),
+    h('path', {
+      d: 'M8 2.5v2.5M12 2.5v2.5M8 15v2.5M12 15v2.5M2.5 8H5M2.5 12H5M15 8h2.5M15 12h2.5',
+    }),
+  ]),
+  logs: strokeIcon([
+    h('rect', { x: '3', y: '4', width: '14', height: '12', rx: '2' }),
+    h('path', { d: 'm6.5 8 2 2-2 2M11 12.5h3' }),
+  ]),
+  settings: strokeIcon([
+    h('path', { d: 'M4 6h12M4 10h12M4 14h12' }),
+    h('circle', { cx: '8', cy: '6', r: '2' }),
+    h('circle', { cx: '13', cy: '10', r: '2' }),
+    h('circle', { cx: '7', cy: '14', r: '2' }),
+  ]),
+  schedules: strokeIcon([
+    h('circle', { cx: '10', cy: '10', r: '6.5' }),
+    h('path', { d: 'M10 6.5V10l2.6 1.6' }),
+  ]),
+}
+
 const menuOptions = NAV_GROUPS.map((group) => ({
   label: group.label,
   key: group.key,
@@ -131,6 +230,7 @@ const menuOptions = NAV_GROUPS.map((group) => ({
   children: group.items.map((item) => ({
     label: item.label,
     key: item.name,
+    icon: itemIcons[item.name],
   })),
 }))
 
@@ -252,6 +352,7 @@ onBeforeUnmount(() => {
                 <span class="current-page">{{ crumbs[crumbs.length - 1]?.label }}</span>
               </div>
               <div class="topbar-actions">
+                <ModelStatusBar @manage-models="go('models')" />
                 <button type="button" class="tool-btn" aria-label="搜索菜单" title="搜索 Ctrl K" @click="paletteOpen = true">
                   <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
                     <circle cx="9" cy="9" r="4.5" />

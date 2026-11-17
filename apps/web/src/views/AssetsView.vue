@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { NAlert, NButton, NInput, NInputNumber, NModal, NSelect } from 'naive-ui'
-import { api, fetchBlobUrl } from '../api/client'
+import { api, apiUrl, fetchBlobUrl } from '../api/client'
 import { confirm, toast } from '../ui/feedback'
 
 const OPERATIONS = [
@@ -20,6 +20,14 @@ const SOURCE_OPTIONS = [
   { value: 'generated', label: 'AI 生成' },
   { value: 'derived', label: '处理派生' },
 ]
+
+const MEDIA_OPTIONS = [
+  { value: 'image', label: '图片' },
+  { value: 'video', label: '视频' },
+  { value: 'audio', label: '音频' },
+]
+
+const MEDIA_NOUN = { image: '图片', video: '视频', audio: '音频' }
 
 const FORMAT_OPTIONS = [
   { value: 'png', label: 'PNG' },
@@ -80,24 +88,31 @@ const MAX_POLL_ROUNDS = 120 // 1.5s × 120 = 3 分钟，避免任务卡住时无
 
 const keyword = ref('')
 const searching = ref(false)
-const filters = reactive({ sourceType: '', format: '', days: 0 })
+const filters = reactive({ mediaType: '', sourceType: '', format: '', days: 0 })
 const filterOpen = ref(false) // 窄屏下筛选面板的抽屉开关
 const panelOpen = ref(false) // 右侧图像处理 / 任务抽屉
 const panelTab = ref('process')
 let searchTimer = null
 let assetSeq = 0
+const THUMB_CONCURRENCY = 6
 
 const selected = computed(() => assets.value.find((a) => a.id === selectedId.value) || null)
 const optionHint = computed(() => OPERATIONS.find((o) => o.value === operation.value)?.hint)
 const activeFilterCount = computed(
-  () => [filters.sourceType, filters.format, filters.days].filter(Boolean).length,
+  () => [filters.mediaType, filters.sourceType, filters.format, filters.days].filter(Boolean).length,
 )
 const hasFilters = computed(() => Boolean(keyword.value.trim()) || activeFilterCount.value > 0)
+const resultLabel = computed(() => {
+  const noun = MEDIA_NOUN[filters.mediaType] || '素材'
+  const narrowed = Boolean(keyword.value.trim() || filters.sourceType || filters.format || filters.days)
+  return narrowed ? `匹配 ${assets.value.length} 个${noun}` : `${assets.value.length} 个${noun}`
+})
 
 function assetsUrl(q = keyword.value) {
   const params = new URLSearchParams()
   const text = (q || '').trim()
   if (text) params.set('q', text)
+  if (filters.mediaType) params.set('mediaType', filters.mediaType)
   if (filters.sourceType) params.set('sourceType', filters.sourceType)
   if (filters.format) params.set('format', filters.format)
   if (filters.days) params.set('days', String(filters.days))
@@ -114,17 +129,45 @@ function releaseThumbs() {
   thumbs.value = {}
 }
 
+function mediaKind(asset) {
+  const mime = asset?.mimeType || ''
+  if (mime.startsWith('video/')) return 'video'
+  if (mime.startsWith('audio/')) return 'audio'
+  if (mime.startsWith('image/')) return 'image'
+  return 'file'
+}
+
+function mediaGlyph(asset) {
+  const kind = mediaKind(asset)
+  if (kind === 'video') return '▶'
+  if (kind === 'audio') return '♪'
+  return '▣'
+}
+
+function isImage(asset) {
+  return mediaKind(asset) === 'image'
+}
+
 async function loadThumbs(requestId) {
   const map = {}
-  const snapshot = assets.value.slice(0, 60)
-  for (const asset of snapshot) {
-    try {
-      map[asset.id] = await fetchBlobUrl(`/assets/${asset.id}/raw`)
-    } catch {
-      map[asset.id] = ''
+  // 并发拉取缩略图：串行会让首屏随素材数量线性变慢，也是此前加载态的并发窗口来源
+  const snapshot = assets.value.filter(isImage)
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < snapshot.length) {
+      const asset = snapshot[cursor]
+      cursor += 1
+      if (requestId !== assetSeq) return
+      try {
+        map[asset.id] = await fetchBlobUrl(`/assets/${asset.id}/raw`)
+      } catch {
+        map[asset.id] = ''
+      }
     }
-    if (requestId !== assetSeq) break
   }
+  await Promise.all(
+    Array.from({ length: Math.min(THUMB_CONCURRENCY, snapshot.length) }, () => worker()),
+  )
   if (requestId !== assetSeq) {
     // 已有更新的请求接管，丢弃本次缩略图并释放临时 blob，避免串图
     for (const url of Object.values(map)) if (url) URL.revokeObjectURL(url)
@@ -139,18 +182,30 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [list, recent] = await Promise.all([api.get(assetsUrl()), fetchJobsPage()])
+    // 任务列表只是附属信息，拉取失败不该让整个图库变成错误页
+    const [listResult, recentResult] = await Promise.allSettled([
+      api.get(assetsUrl()),
+      fetchJobsPage(),
+    ])
+    if (listResult.status === 'rejected') throw listResult.reason
     if (requestId !== assetSeq) return
+    const list = listResult.value
     assets.value = list
-    jobs.value = recent.items || []
-    jobsCursor.value = recent.nextCursor || ''
-    jobsHasMore.value = Boolean(recent.nextCursor)
-    jobsLoadedMore.value = false
+    if (recentResult.status === 'fulfilled') {
+      const recent = recentResult.value
+      jobs.value = recent.items || []
+      jobsCursor.value = recent.nextCursor || ''
+      jobsHasMore.value = Boolean(recent.nextCursor)
+      jobsLoadedMore.value = false
+    }
     reconcileSelection(list)
+    // 只有确实存在排队/执行中的任务才需要轮询，否则空转会把列表的刷新序号抢走
+    if (hasActiveJobs()) startPolling()
     await loadThumbs(requestId)
   } catch (err) {
     if (requestId === assetSeq) error.value = err.message
   } finally {
+    // loading 是所有请求共用的骨架屏开关：被新请求接管时也要收尾，否则界面会卡在骨架屏
     if (requestId === assetSeq) loading.value = false
   }
 }
@@ -168,7 +223,10 @@ async function searchAssets() {
   } catch (err) {
     if (requestId === assetSeq) error.value = `搜索素材失败：${err.message}`
   } finally {
-    if (requestId === assetSeq) searching.value = false
+    if (requestId === assetSeq) {
+      searching.value = false
+      loading.value = false
+    }
   }
 }
 
@@ -190,6 +248,7 @@ function searchNow() {
 
 function setFilter(key, value) {
   filters[key] = filters[key] === value ? '' : value
+  if (key === 'mediaType' && filters.mediaType && filters.mediaType !== 'image') filters.format = ''
   searchNow()
 }
 
@@ -200,6 +259,7 @@ function setDays(value) {
 
 function resetFilters() {
   keyword.value = ''
+  filters.mediaType = ''
   filters.sourceType = ''
   filters.format = ''
   filters.days = 0
@@ -207,12 +267,17 @@ function resetFilters() {
 }
 
 async function refreshAssets() {
+  if (loading.value) return
   const requestId = ++assetSeq
-  const list = await api.get(assetsUrl())
-  if (requestId !== assetSeq) return
-  assets.value = list
-  reconcileSelection(list)
-  await loadThumbs(requestId)
+  try {
+    const list = await api.get(assetsUrl())
+    if (requestId !== assetSeq) return
+    assets.value = list
+    reconcileSelection(list)
+    await loadThumbs(requestId)
+  } finally {
+    if (requestId === assetSeq) loading.value = false
+  }
 }
 
 function fetchJobsPage(cursor = '') {
@@ -260,8 +325,13 @@ function stopPolling() {
   pollTimer = null
 }
 
+function hasActiveJobs() {
+  return jobs.value.some((job) => ['queued', 'running'].includes(job.status))
+}
+
 function startPolling() {
   if (pollTimer) return
+  if (!hasActiveJobs()) return
   pollRounds = 0
   pollTimer = setInterval(async () => {
     pollRounds += 1
@@ -270,6 +340,8 @@ function startPolling() {
       error.value = '任务轮询超时（3 分钟），请刷新页面或到任务状态页确认结果'
       return
     }
+    // 首屏还在加载时不要插一脚刷新，否则会顶掉正在进行的请求
+    if (loading.value) return
     try {
       const data = await fetchJobsPage()
       const latest = data.items || []
@@ -311,6 +383,7 @@ async function onUpload(event) {
     )
     // 新素材可能不匹配当前筛选条件，重置筛选确保上传结果可见
     keyword.value = ''
+    filters.mediaType = ''
     filters.sourceType = ''
     filters.format = ''
     filters.days = 0
@@ -357,7 +430,7 @@ function buildOptions() {
 }
 
 async function runOperation() {
-  if (!selected.value) return
+  if (!selected.value || !isImage(selected.value)) return
   error.value = ''
   try {
     const res = await api.post('/image-jobs/async', {
@@ -545,6 +618,22 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="filter-group">
+          <span class="filter-group-label">类型</span>
+          <button
+            v-for="item in MEDIA_OPTIONS"
+            :key="item.value"
+            type="button"
+            class="filter-item"
+            :class="{ 'is-active': filters.mediaType === item.value }"
+            :aria-pressed="filters.mediaType === item.value"
+            @click="setFilter('mediaType', item.value)"
+          >
+            <span class="filter-dot" :class="`dot-${item.value}`" aria-hidden="true" />
+            {{ item.label }}
+          </button>
+        </div>
+
+        <div class="filter-group">
           <span class="filter-group-label">来源</span>
           <button
             v-for="item in SOURCE_OPTIONS"
@@ -569,6 +658,7 @@ onBeforeUnmount(() => {
             class="filter-item"
             :class="{ 'is-active': filters.format === item.value }"
             :aria-pressed="filters.format === item.value"
+            :disabled="filters.mediaType === 'video' || filters.mediaType === 'audio'"
             @click="setFilter('format', item.value)"
           >
             {{ item.label }}
@@ -614,7 +704,7 @@ onBeforeUnmount(() => {
           <div class="spacer" />
           <span v-if="searching" class="field-hint">搜索中…</span>
           <span v-else class="field-hint">
-            {{ hasFilters ? `匹配 ${assets.length} 个素材` : `${assets.length} 个素材` }}
+            {{ resultLabel }}
           </span>
         </div>
 
@@ -648,14 +738,19 @@ onBeforeUnmount(() => {
               :aria-label="`查看大图：${asset.originalName}`"
               @click="openPreview(asset)"
             >
-              <img v-if="thumbs[asset.id]" :src="thumbs[asset.id]" :alt="asset.originalName" />
-              <span v-else class="gallery-placeholder" aria-hidden="true">▣</span>
+              <img v-if="isImage(asset) && thumbs[asset.id]" :src="thumbs[asset.id]" :alt="asset.originalName" />
+              <span v-else class="gallery-placeholder" aria-hidden="true">{{ mediaGlyph(asset) }}</span>
             </button>
             <div class="gallery-actions">
               <button class="gallery-action" type="button" @click.stop="openPreview(asset)">
                 预览
               </button>
-              <button class="gallery-action is-primary" type="button" @click.stop="openProcess(asset)">
+              <button
+                v-if="isImage(asset)"
+                class="gallery-action is-primary"
+                type="button"
+                @click.stop="openProcess(asset)"
+              >
                 处理
               </button>
             </div>
@@ -721,8 +816,8 @@ onBeforeUnmount(() => {
 
         <div v-if="panelTab === 'process'" class="drawer-body">
           <div v-if="selected" class="drawer-target">
-            <img v-if="thumbs[selected.id]" :src="thumbs[selected.id]" alt="" class="drawer-target-img" />
-            <div v-else class="drawer-target-img is-empty" aria-hidden="true">▣</div>
+            <img v-if="isImage(selected) && thumbs[selected.id]" :src="thumbs[selected.id]" alt="" class="drawer-target-img" />
+            <div v-else class="drawer-target-img is-empty" aria-hidden="true">{{ mediaGlyph(selected) }}</div>
             <div class="drawer-target-text">
               <span class="drawer-target-name" :title="selected.originalName">
                 {{ selected.originalName }}
@@ -731,6 +826,9 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div v-else class="field-hint drawer-hint">在左侧网格中选择一张素材后再执行处理。</div>
+          <div v-if="selected && !isImage(selected)" class="field-hint drawer-hint">
+            音视频素材不支持图像处理，可在预览里播放。
+          </div>
 
           <label class="field">
             <span class="field-label">操作</span>
@@ -825,7 +923,7 @@ onBeforeUnmount(() => {
         <div class="drawer-foot">
           <n-button quaternary size="small" :disabled="!selected" @click="remove(selected)">删除素材</n-button>
           <div class="spacer" />
-          <n-button type="primary" size="small" :disabled="!selected" @click="runOperation">执行处理</n-button>
+          <n-button type="primary" size="small" :disabled="!selected || !isImage(selected)" @click="runOperation">执行处理</n-button>
         </div>
       </aside>
     </div>
@@ -840,10 +938,22 @@ onBeforeUnmount(() => {
       <div class="preview-body">
         <div class="preview-figure">
           <img
-            v-if="previewAsset && (thumbs[previewAsset.id] || previewAsset.url)"
+            v-if="previewAsset && isImage(previewAsset) && (thumbs[previewAsset.id] || previewAsset.url)"
             :src="thumbs[previewAsset.id] || previewAsset.url"
             :alt="previewAsset.originalName"
             class="preview-image"
+          />
+          <video
+            v-else-if="previewAsset && mediaKind(previewAsset) === 'video' && previewAsset.url"
+            class="preview-media"
+            controls
+            :src="apiUrl(previewAsset.url)"
+          />
+          <audio
+            v-else-if="previewAsset && mediaKind(previewAsset) === 'audio' && previewAsset.url"
+            class="preview-media"
+            controls
+            :src="apiUrl(previewAsset.url)"
           />
           <div v-else class="gallery-placeholder" style="height: 240px">▣</div>
         </div>
@@ -880,7 +990,7 @@ onBeforeUnmount(() => {
               >
                 {{ interrogating ? '反推中…' : '反推提示词' }}
               </n-button>
-              <p v-if="interrogateError" class="field-hint" style="margin: 6px 0 0; color: var(--n-error-color)">
+              <p v-if="interrogateError" class="field-hint" style="margin: 6px 0 0; color: var(--color-danger)">
                 {{ interrogateError }}
               </p>
             </template>
@@ -980,6 +1090,10 @@ onBeforeUnmount(() => {
   color: var(--color-accent);
   font-weight: 600;
 }
+.filter-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .filter-dot {
   width: 8px;
   height: 8px;
@@ -988,13 +1102,22 @@ onBeforeUnmount(() => {
   background: var(--color-border-strong);
 }
 .dot-upload {
-  background: #7ba392;
+  background: var(--color-success);
 }
 .dot-generated {
-  background: #8a7ba3;
+  background: var(--color-accent);
 }
 .dot-derived {
-  background: #a3927b;
+  background: var(--color-warning);
+}
+.dot-image {
+  background: var(--color-success);
+}
+.dot-video {
+  background: var(--color-info);
+}
+.dot-audio {
+  background: var(--color-warning);
 }
 .filter-reset {
   align-self: flex-start;
@@ -1090,16 +1213,16 @@ onBeforeUnmount(() => {
 }
 .gallery-action {
   padding: 3px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.4);
+  border: 1px solid var(--color-inverse-border);
   border-radius: var(--radius-sm);
-  background: rgba(20, 26, 22, 0.72);
-  color: #fff;
+  background: var(--color-inverse-scrim);
+  color: var(--color-inverse-on-scrim);
   font-family: inherit;
   font-size: var(--font-xs);
   cursor: pointer;
 }
 .gallery-action:hover {
-  background: rgba(20, 26, 22, 0.88);
+  background: var(--color-inverse-scrim-strong);
 }
 .gallery-action.is-primary {
   background: var(--color-accent);
@@ -1181,7 +1304,7 @@ onBeforeUnmount(() => {
   z-index: 60;
   display: flex;
   justify-content: flex-end;
-  background: rgba(20, 26, 22, 0.36);
+  background: var(--color-overlay);
 }
 .drawer {
   display: flex;
@@ -1331,6 +1454,11 @@ onBeforeUnmount(() => {
   max-height: 62vh;
   object-fit: contain;
 }
+.preview-media {
+  display: block;
+  width: 100%;
+  max-height: 62vh;
+}
 .preview-side {
   display: flex;
   flex-direction: column;
@@ -1384,7 +1512,7 @@ onBeforeUnmount(() => {
     position: fixed;
     inset: 0;
     z-index: 55;
-    background: rgba(20, 26, 22, 0.36);
+    background: var(--color-overlay);
   }
 }
 

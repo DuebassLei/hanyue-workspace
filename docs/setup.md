@@ -92,22 +92,37 @@ cd apps/api
 
 Worker 启动时调用 `recover_pending()` 重投「状态为 `queued` 且 `started_at` 为空」的任务，这就是断线恢复。未配置 `REDIS_URL` 时它会打印提示并返回 0，不会伪装成已在消费。
 
-### 方式 C：Docker Compose
+### 方式 C：Docker Compose（推荐用于部署）
+
+完整说明见 **`docs/docker-deploy.md`**（架构、发版、备份恢复、SQLite → PG 迁移、排障）。
 
 ```bash
 cd infra
-cp .env.example .env             # 必做：填入 SECRET_KEY 与 POSTGRES_PASSWORD
-docker compose config            # 校验 YAML 与变量替换
-docker compose up -d --build     # api + worker + redis + postgres
-docker compose ps                # 四个服务应均为 healthy
-docker compose logs -f worker    # 观察消费者
-docker compose down              # 停止，数据卷保留
+./scripts/deploy.sh doctor       # 环境自检：daemon / compose v2 / 内存磁盘 / 端口 / 配置
+./scripts/deploy.sh init-env     # 生成 .env（随机 SECRET_KEY / POSTGRES_PASSWORD）+ 证据文件
+vi .env                          # 检查 WEB_PORT、TZ；需要生图/公众号再填凭据
+./scripts/deploy.sh up           # 构建并启动 web + api + worker + redis + db
+./scripts/deploy.sh ps           # 五个服务应全部 healthy
+./scripts/deploy.sh logs worker  # 观察消费者
+./scripts/deploy.sh down         # 停止，数据卷保留
 ```
+
+Docker 装在 WSL Ubuntu 子系统里（没有 Docker Desktop）时，daemon 要手动起、compose v2 要单独装，
+见 `docs/docker-deploy.md` 的附录「在 WSL2（原生 Docker Engine）里跑」。
+
+对外只暴露 `web`（`WEB_PORT`，默认 8080，nginx 托管前端并反代 `/api`）；
+`api` 仅绑定 `127.0.0.1:API_PORT` 供宿主机调试。不用脚本时等价命令：
+`cp .env.example .env && docker compose up -d --build`。
+
+2 核 2G 的机器可以正常跑（空载约 500–650 MB）：`deploy.sh` 检测到物理内存 < 3 GB 会自动叠加
+`infra/docker-compose.lowmem.yml`；镜像在打包机构建后 `save-images` 导入，目标机只 `up -d --no-build`。
+见 `docs/docker-deploy.md` §2.3。
 
 `SECRET_KEY` 与 `POSTGRES_PASSWORD` 使用 `${VAR:?}` 强制注入，未填写时 `docker compose config` 会直接报错（不会再拿弱默认值启动）。镜像以非 root 运行，api 有 `/health` 健康检查，worker 每轮向 Redis 写 30 秒心跳供健康检查判定。
 
 | 服务 | 内容 | 关键配置 |
 |---|---|---|
+| `web` | nginx + 前端 dist | `WEB_PORT`、反代 `api:8000`、SPA 回退、上传上限 25m |
 | `api` | uvicorn，端口 8000 | `DATABASE_URL=postgresql+psycopg://...`、`REDIS_URL`、`PLATFORM_EVIDENCE_FILE` |
 | `worker` | `python worker.py` | 与 api 共用数据库、Redis、存储卷和生图凭据 |
 | `redis` | `redis:7-alpine`，开启 AOF | 队列持久化 |
@@ -127,7 +142,7 @@ IMAGE_PROVIDER_MODEL=gpt-image-1
 
 compose 还会注入 `ENVIRONMENT=production` / `ALLOW_DEV_LOGIN=false`；后端启动门禁会再次校验密钥强度与开发登录开关，配置不合格会拒绝启动。
 
-改完需 `docker compose up -d --build` 或至少 `docker compose up -d --force-recreate api worker`。
+改完需 `./scripts/deploy.sh up`（或 `docker compose up -d --build`）；只改了变量则 `./scripts/deploy.sh restart api worker`。
 
 ## 3. 配置优先级与 `.env`
 
@@ -197,9 +212,9 @@ IMAGE_PROVIDER_MODEL=gpt-image-1
 | 响应 | `{"data":[{"b64_json":"..."}]}` 或 `{"data":[{"url":"https://..."}]}`，OpenAI 兼容格式 |
 | 尺寸映射 | `1:1`→1024×1024，`3:4`/`9:16`→1024×1536，`4:3`/`16:9`→1536×1024 |
 | 图片校验 | Pillow 校验有效性，≤ 20 MB、≤ 1600 万像素 |
-| 出站安全 | 仅公网 HTTPS；拒绝 `http://`、`localhost`、内网/保留网段、云元数据地址；3xx 逐跳重新校验 |
+| 出站安全 | 公网仅 HTTPS（端口限 443/8443）；拒绝公网 `http://`、内网/保留网段、云元数据地址；3xx 逐跳重新校验。本机环回地址（`localhost` / `127.0.0.1` / `::1`）允许 HTTP 与任意端口，供本机模型服务使用 |
 
-> 自建在 `http://localhost:xxxx` 的生图服务会被 SSRF 防护拒绝，这是设计 §12.1 的强制约束，不是配置错误。若必须用本地服务，请自行评估风险后在隔离网络内提供公网可解析的 HTTPS 端点，不要关闭 `core/ssrf.py` 的校验。
+> 自建在 `http://localhost:xxxx` 或 `http://127.0.0.1:xxxx` 的模型服务可以直接配置为 Base URL：环回地址不可达其他机器，SSRF 防护对其放行 HTTP 与任意端口。局域网地址（如 `192.168.x.x`、`10.x.x.x`）仍会被拒绝——内网自建网关请用域名并登记到 `SSRF_TRUSTED_HOSTS`（见 `core/ssrf.py`），不要关闭校验。
 
 ### 一键验证脚本
 
@@ -330,15 +345,15 @@ Invoke-RestMethod -Method Post -Headers $headers -Uri "$base/wechat-mp/bind" `
 # 列出预设与自定义主题
 curl -s localhost:8000/api/v1/wechat-mp/themes -H "Authorization: Bearer $TOKEN"
 
-# 基于 deep-blue 复制一份，只改字号与主色
+# 基于 blue-business 复制一份，只改字号与主色
 curl -s -X POST localhost:8000/api/v1/wechat-mp/themes \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"我的蓝","baseThemeId":"deep-blue","tokens":{"bodySize":17,"primaryColor":"#1F4E79"}}'
+  -d '{"name":"我的蓝","baseThemeId":"blue-business","tokens":{"bodySize":17,"primaryColor":"#1F4E79"}}'
 
 # 只渲染不推送，看 HTML / 字数 / 兼容性告警
 curl -s -X POST localhost:8000/api/v1/wechat-mp/drafts/render \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"body":"# 标题\n\n正文**加粗**\n\n- 要点","themeId":"deep-blue"}'
+  -d '{"body":"# 标题\n\n正文**加粗**\n\n- 要点","themeId":"blue-business"}'
 ```
 
 可调参数：`bodySize`(14~20)、`bodyLineHeight`(1.4~2.4)、`letterSpacing`(0~2)、`paragraphGap`(0.5~3)、`indent`(0~2)、`imageRadius`(0~16)、`align`、`h1Style`(bar/block/center/number)、`h2Style`(tag/underline/plain)、`listMarker`(dot/number/none)、`fontFamily`（仅系统字体栈）以及 `textColor`/`mutedColor`/`primaryColor`/`primarySoft`/`quoteBg`/`dividerColor`。
@@ -349,11 +364,44 @@ curl -s -X POST localhost:8000/api/v1/wechat-mp/drafts/render \
 
 ```bash
 cd apps/api
-./.venv/Scripts/python.exe -m pytest -q              # 当前 176 passed
+./.venv/Scripts/python.exe -m pytest -q              # 当前 484 passed
 ./.venv/Scripts/python.exe -m compileall -q app ../worker/worker.py
 cd ../web && npm run build                           # 前端构建
 cd ../../infra && docker compose config             # 容器配置校验
 ```
+
+## 6.1 定时任务
+
+页面 `/schedules`，设计见 [`scheduled-tasks.md`](scheduled-tasks.md)。首期只接一个类型：**拉取热点榜单**（`hot_topics.refresh`），默认 `0 8,12,18 * * *`、时区随用户（默认 `Asia/Shanghai`）。
+
+启动时会做两件事，日志里可以对照：
+
+| 日志 | 含义 |
+|---|---|
+| `定时调度器已启动，装载任务 N 个` | 调度器正常；N 为 enabled 的任务数 |
+| `SCHEDULER_ENABLED=false，定时调度器未启动` | 总开关被关掉，接口与表仍可用但不会到点触发 |
+| `定时调度器启动失败，定时任务不会触发` | 装配异常；接口照常，先看堆栈 |
+| `已播种 system 定时任务 hot_topics.refresh` | 首次登录/启动时创建了系统级任务 |
+
+system 级任务（如拉热点）**全库只有一条**，绑定到首个登录用户——`background_jobs.owner_user_id` 是必填外键，没有真实 owner 的任务跑不起来。热点表本身不按用户隔离，所以按用户各建一条只会变成 N 倍采集。
+
+验证三步（不需要等真正到点）：
+
+```bash
+# 1. 看清单与下次触发（nextRunAt 是 UTC，前端会转本地时间）
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/api/v1/schedules
+
+# 2. 预览 cron 的未来三次（配错表达式这里就会报 400 invalid_cron）
+curl -s -X POST http://127.0.0.1:8000/api/v1/schedules/preview \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"scheduleKind":"cron","cron":"0 8,12,18 * * *","timezone":"Asia/Shanghai"}'
+
+# 3. 立即执行一次（source=manual，不消耗定时槽位；真实打采集源，约 10 秒）
+curl -s -X POST http://127.0.0.1:8000/api/v1/schedules/<taskId>/run \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+失败行为是明确的：连续 3 次失败自动停用任务并写明原因（界面标红），不推送任何通知——项目没有通知渠道，与其假装「已提醒你」不如让人一眼看见红色。
 
 ## 7. 故障排查
 

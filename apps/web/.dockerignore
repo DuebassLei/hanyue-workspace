@@ -1,0 +1,11 @@
+# 前端镜像构建上下文（apps/web）
+node_modules
+dist
+.pytest_cache
+.env
+.env.*
+*.log
+design-demos
+tests
+scripts
+Dockerfile

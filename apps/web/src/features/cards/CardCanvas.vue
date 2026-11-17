@@ -649,7 +649,7 @@ function px(value) {
 .safe-zone {
   position: absolute;
   z-index: 30;
-  border: 1px dashed rgba(244, 63, 94, 0.6);
+  border: 1px dashed color-mix(in srgb, var(--color-danger) 60%, transparent);
   pointer-events: none;
 }
 
@@ -659,8 +659,8 @@ function px(value) {
   left: 0;
   font-size: 9px;
   font-family: monospace;
-  color: #f43f5e;
-  background: rgba(255, 255, 255, 0.9);
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-surface) 92%, transparent);
   padding: 0 4px;
   white-space: nowrap;
 }

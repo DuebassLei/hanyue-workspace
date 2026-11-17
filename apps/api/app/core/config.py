@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     job_lease_seconds: int = 300
     # 分级租约：图文成片整链渲染天然远超普通任务（生图+配音+编码），单独放宽
     job_lease_video_render_seconds: int = 1800
+    # ── 定时任务（docs/scheduled-tasks.md §8）──────────────────────────
+    # 总开关。false 时完全不装载调度器，接口与表照常存在，用于排障。
+    scheduler_enabled: bool = True
+    # 错过触发点的宽限秒数（默认值，单个任务可覆盖）：超过即丢弃本次，记 missed。
+    scheduler_misfire_grace: int = 300
+    # 连续失败达到该次数自动暂停任务；0 表示不自动暂停。
+    scheduler_max_consecutive_failures: int = 3
+    # system 任务（如拉热点）的写权限：dev=仅开发态可经接口改 / any=任何登录用户 /
+    # never=一律只读，由 seed 维护。users 表没有角色字段，所以不用虚构管理员角色。
+    scheduler_system_write: str = "dev"
     # 单次上传硬上限（即使不带签名上传会话也生效）
     max_upload_bytes: int = 20 * 1024 * 1024
     # 运行日志：级别、落盘目录（留空则 storage/logs）、单文件上限与保留份数

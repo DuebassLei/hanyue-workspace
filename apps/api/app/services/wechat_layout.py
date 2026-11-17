@@ -28,7 +28,7 @@ NUMERIC_RANGES: dict[str, tuple[float, float]] = {
 
 ENUMS: dict[str, set[str]] = {
     "align": {"left", "justify", "center"},
-    "h1Style": {"bar", "block", "number", "center", "underline", "number-divider", "capsule"},
+    "h1Style": {"bar", "block", "number", "center", "underline", "number-divider", "capsule", "banner", "margin-note", "seal", "lead-in", "eyebrow", "kicker", "framed", "rail"},
     "h2Style": {"tag", "underline", "plain", "bar", "strong", "capsule", "hairline"},
     "listMarker": {"dot", "square", "number", "circle"},
 }
@@ -40,6 +40,9 @@ ROW_BLOCKS = {
     "compare": 2,
     "layers": 2,
     "checklist": 2,
+    "support": 2,
+    "cheer": 2,
+    "mini-support": 1,
 }
 FREE_BLOCKS = {"card", "follow", "sign", "lead", "quote-card"}
 FENCE_BLOCKS = ROW_BLOCKS.keys() | FREE_BLOCKS
@@ -128,6 +131,30 @@ LAYOUT_COMPONENTS: tuple[dict, ...] = (
         "snippet": "\n\n:::sign\n作者 | 你的公众号名\n:::\n",
         "sampleBody": ":::sign\n狸知 · 公众号排版样文\n:::",
     },
+    {
+        "id": "support",
+        "label": "支持一下",
+        "description": "文末三列互动卡：点赞、转发、推荐。围栏名后写 `标题 / 副标题`，每行 `动作 | 说明`",
+        "category": "互动",
+        "snippet": "\n\n:::support 喜欢就支持一下吧 / 你的每一次互动，都是我持续创作的动力\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友\n推荐 | 推荐给身边的人\n:::\n",
+        "sampleBody": ":::support 喜欢就支持一下吧 / 你的每一次互动，都是我持续创作的动力\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::",
+    },
+    {
+        "id": "cheer",
+        "label": "暖心支持卡",
+        "description": "手绘暖色支持卡：爱心标题 / 胶囊副标题 / 气泡 + 三色互动卡；围栏名后写 `标题 / 副标题 / 气泡`，每行 `动作 | 说明`，可选 `插图 | {{image1}}`",
+        "category": "互动",
+        "snippet": "\n\n:::cheer 喜欢就支持一下吧！ / 你的每一次互动，都是我持续创作的动力～ / 有你真好！\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::\n",
+        "sampleBody": ":::cheer 喜欢就支持一下吧！ / 你的每一次互动，都是我持续创作的动力～ / 有你真好！\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::",
+    },
+    {
+        "id": "mini-support",
+        "label": "轻互动",
+        "description": "极简版：只留点赞 / 转发 / 推荐图标与动作名，样式跟随主题；围栏名后可写一行小标题，每行一个动作",
+        "category": "互动",
+        "snippet": "\n\n:::mini-support\n点赞\n转发\n推荐\n:::\n",
+        "sampleBody": ":::mini-support 支持一下\n点赞\n转发\n推荐\n:::",
+    },
 )
 
 _COLOR_KEYS = (
@@ -180,17 +207,6 @@ PRESET_THEMES: dict[str, dict] = {
         "name": "墨绿简约",
         "description": "左侧竖线标题，适合知识、职场、干货",
         "tokens": _base_tokens(),
-    },
-    "deep-blue": {
-        "id": "deep-blue",
-        "name": "深海蓝",
-        "description": "色块标签标题，适合科技、财经、分析",
-        "tokens": _base_tokens(
-            primaryColor="#185FA5",
-            primarySoft="#E6F1FB",
-            textColor="#2C2C2A",
-            quoteBg="#F4F7FA",
-        ),
     },
     "warm-orange": {
         "id": "warm-orange",
@@ -317,30 +333,6 @@ PRESET_THEMES: dict[str, dict] = {
             listMarker="circle",
         ),
     },
-    "magazine-slate": {
-        "id": "magazine-slate",
-        "name": "杂志",
-        "description": "窄栏、大留白、细线引用，适合品牌故事、访谈、生活方式",
-        "tokens": _base_tokens(
-            bodySize=15,
-            bodyLineHeight=2.0,
-            letterSpacing=0.4,
-            paragraphGap=1.5,
-            textColor="#2A2A2A",
-            mutedColor="#8A8A8A",
-            primaryColor="#4A5D6E",
-            primarySoft="#EEF1F4",
-            quoteBg="#F7F7F6",
-            dividerColor="#D9DDE1",
-            strongColor="#4A5D6E",
-            align="left",
-            indent=0,
-            imageRadius=0,
-            h1Style="center",
-            h2Style="plain",
-            listMarker="circle",
-        ),
-    },
     "friendly-pill": {
         "id": "friendly-pill",
         "name": "亲和",
@@ -361,6 +353,239 @@ PRESET_THEMES: dict[str, dict] = {
             imageRadius=16,
             h1Style="capsule",
             h2Style="capsule",
+            listMarker="dot",
+        ),
+    },
+    "notebook": {
+        "id": "notebook",
+        "name": "手帐",
+        "description": "短色块贴在标题左侧，方块列表、段距紧，适合教程笔记和清单",
+        "tokens": _base_tokens(
+            bodySize=15,
+            bodyLineHeight=1.75,
+            letterSpacing=0.2,
+            paragraphGap=0.9,
+            textColor="#3D342B",
+            mutedColor="#8C8175",
+            primaryColor="#C4553A",
+            primarySoft="#F8E6DF",
+            quoteBg="#F6F1EA",
+            dividerColor="#E4D8CC",
+            strongColor="#C4553A",
+            align="left",
+            imageRadius=4,
+            h1Style="block",
+            h2Style="bar",
+            listMarker="square",
+        ),
+    },
+    "dispatch": {
+        "id": "dispatch",
+        "name": "公文",
+        "description": "通栏色条标题、首行缩进、两端对齐，适合通知、报告和政务说明",
+        "tokens": _base_tokens(
+            bodySize=15,
+            bodyLineHeight=1.9,
+            letterSpacing=0.4,
+            paragraphGap=1.2,
+            textColor="#2C2C2A",
+            mutedColor="#6F6A62",
+            primaryColor="#8C2F2F",
+            primarySoft="#F6EEEE",
+            quoteBg="#F7F4EF",
+            dividerColor="#D9D3C8",
+            strongColor="#8C2F2F",
+            align="justify",
+            indent=2,
+            imageRadius=0,
+            h1Style="banner",
+            h2Style="hairline",
+            listMarker="number",
+        ),
+    },
+    "poster": {
+        "id": "poster",
+        "name": "海报",
+        "description": "超大标题几乎不装饰，段距拉得很开，适合封面导语和品牌短文",
+        "tokens": _base_tokens(
+            bodySize=17,
+            bodyLineHeight=1.85,
+            letterSpacing=0.6,
+            paragraphGap=2.4,
+            textColor="#1A1A1A",
+            mutedColor="#8A8680",
+            primaryColor="#1A1A1A",
+            primarySoft="#F2F0EC",
+            quoteBg="#F4F2EE",
+            dividerColor="#1A1A1A",
+            strongColor="#1A1A1A",
+            align="left",
+            imageRadius=0,
+            h1Style="center",
+            h2Style="underline",
+            listMarker="circle",
+        ),
+    },
+    "margin-note": {
+        "id": "margin-note",
+        "name": "旁注",
+        "description": "章节号竖排在左侧窄色带里，标题靠右，适合连载和分章长文",
+        "tokens": _base_tokens(
+            bodySize=15,
+            bodyLineHeight=1.9,
+            letterSpacing=0.4,
+            paragraphGap=1.4,
+            textColor="#2E2A32",
+            mutedColor="#8A8490",
+            primaryColor="#5C4B8A",
+            primarySoft="#F0ECF6",
+            quoteBg="#F6F4F8",
+            dividerColor="#DDD6E6",
+            strongColor="#5C4B8A",
+            align="left",
+            imageRadius=2,
+            h1Style="margin-note",
+            h2Style="plain",
+            listMarker="circle",
+        ),
+    },
+    "seal": {
+        "id": "seal",
+        "name": "印章",
+        "description": "标题居中，四角断开的双线方框，适合信笺、书评和题记",
+        "tokens": _base_tokens(
+            bodySize=15,
+            bodyLineHeight=2.0,
+            letterSpacing=0.8,
+            paragraphGap=1.6,
+            textColor="#3A2E24",
+            mutedColor="#8C7B68",
+            primaryColor="#A63D2F",
+            primarySoft="#F8EEEA",
+            quoteBg="#F8F3EC",
+            dividerColor="#E2D2C4",
+            strongColor="#A63D2F",
+            align="left",
+            indent=2,
+            imageRadius=0,
+            h1Style="seal",
+            h2Style="plain",
+            listMarker="circle",
+        ),
+    },
+    "lead-in": {
+        "id": "lead-in",
+        "name": "拉引",
+        "description": "标题几乎不装饰，紧跟的第一段放大成浅色导语，适合开篇和特稿",
+        "tokens": _base_tokens(
+            bodySize=16,
+            bodyLineHeight=1.9,
+            letterSpacing=0.3,
+            paragraphGap=1.5,
+            textColor="#262626",
+            mutedColor="#8A8680",
+            primaryColor="#1F4E46",
+            primarySoft="#E7F1EE",
+            quoteBg="#F3F5F4",
+            dividerColor="#D5DDD9",
+            strongColor="#1F4E46",
+            align="left",
+            imageRadius=0,
+            h1Style="lead-in",
+            h2Style="hairline",
+            listMarker="dot",
+        ),
+    },
+    "eyebrow": {
+        "id": "eyebrow",
+        "name": "眉题",
+        "description": "标题上方一条主色小标签，正文两端对齐，适合专栏和特稿",
+        "tokens": _base_tokens(
+            bodySize=16,
+            bodyLineHeight=1.95,
+            letterSpacing=0.4,
+            paragraphGap=1.6,
+            textColor="#2A2622",
+            mutedColor="#8A8175",
+            primaryColor="#8A5A2B",
+            primarySoft="#F6EFE4",
+            quoteBg="#F7F3EC",
+            dividerColor="#E4D8C4",
+            strongColor="#8A5A2B",
+            align="justify",
+            imageRadius=2,
+            h1Style="eyebrow",
+            h2Style="hairline",
+            listMarker="circle",
+        ),
+    },
+    "kicker": {
+        "id": "kicker",
+        "name": "题签",
+        "description": "章节号单独成行，标题居中，段距拉开，适合连载和分章",
+        "tokens": _base_tokens(
+            bodySize=16,
+            bodyLineHeight=2.0,
+            letterSpacing=0.6,
+            paragraphGap=1.8,
+            textColor="#24201C",
+            mutedColor="#8C8478",
+            primaryColor="#9A3412",
+            primarySoft="#F8EDE6",
+            quoteBg="#F6F1EA",
+            dividerColor="#E6D9CC",
+            strongColor="#9A3412",
+            align="left",
+            imageRadius=0,
+            h1Style="kicker",
+            h2Style="underline",
+            listMarker="circle",
+        ),
+    },
+    "framed": {
+        "id": "framed",
+        "name": "题框",
+        "description": "标题居中，上下两条细线夹住，适合卷首和序言",
+        "tokens": _base_tokens(
+            bodySize=15,
+            bodyLineHeight=2.0,
+            letterSpacing=0.5,
+            paragraphGap=1.5,
+            textColor="#2C2824",
+            mutedColor="#8A8278",
+            primaryColor="#7A3E2E",
+            primarySoft="#F6EEEA",
+            quoteBg="#F6F2EC",
+            dividerColor="#D9CFC4",
+            strongColor="#7A3E2E",
+            align="justify",
+            indent=2,
+            imageRadius=0,
+            h1Style="framed",
+            h2Style="plain",
+            listMarker="circle",
+        ),
+    },
+    "rail": {
+        "id": "rail",
+        "name": "侧栏",
+        "description": "整段标题贴在左侧色带上，适合观点和评论",
+        "tokens": _base_tokens(
+            bodySize=15,
+            bodyLineHeight=1.9,
+            letterSpacing=0.3,
+            paragraphGap=1.4,
+            textColor="#1E2A2E",
+            mutedColor="#6E8086",
+            primaryColor="#1F6F78",
+            primarySoft="#E6F2F3",
+            quoteBg="#F2F6F6",
+            dividerColor="#D2E0E1",
+            strongColor="#1F6F78",
+            align="left",
+            imageRadius=4,
+            h1Style="rail",
+            h2Style="bar",
             listMarker="dot",
         ),
     },
@@ -421,6 +646,14 @@ _ENUM_OPTION_LABELS: dict[str, dict[str, str]] = {
         "underline": "下划线",
         "number-divider": "大号编号+分割线",
         "capsule": "胶囊标题",
+        "banner": "通栏色条",
+        "margin-note": "旁注色带",
+        "seal": "印章方框",
+        "lead-in": "标题加导语",
+        "eyebrow": "眉题小标签",
+        "kicker": "题签编号",
+        "framed": "上下线题框",
+        "rail": "左侧色带",
     },
     "h2Style": {
         "tag": "标签底色",
@@ -800,7 +1033,10 @@ def _section(pairs: dict, inner: str) -> str:
 
 
 def _render_heading(block: Block, tokens: dict, number: int) -> str:
-    size = tokens["bodySize"] + (3 if block.level == 1 else 1)
+    # 海报（17px 正文 + 居中标题）的一级标题刻意超大：微信没有自定义字体，字号是它唯一的辨识度。
+    # 暖橙、书卷同为居中标题但正文字号更小，不能被这条带上。
+    display = block.level == 1 and tokens["h1Style"] == "center" and tokens["bodySize"] >= 17
+    size = tokens["bodySize"] + (10 if display else 3 if block.level == 1 else 1)
     color = tokens["textColor"]
     primary = tokens["primaryColor"]
     strong_color = tokens.get("strongColor", color)
@@ -841,6 +1077,64 @@ def _render_heading(block: Block, tokens: dict, number: int) -> str:
             return _section(
                 {**base},
                 f'<span style="{_style({"display": "inline-block", "padding": "6px 16px", "background": primary, "color": "#FFFFFF", "font-size": size, "font-weight": 600, "border-radius": 999})}">{escape_text(block.text)}</span>',
+            )
+        if style == "banner":
+            # 通栏色条：文字居中反白。微信会剥掉 h1，只能用 section 铺满一行。
+            return _section(
+                {**base, "margin": "2em 0 1.1em", "padding": "12px 16px", "background": primary, "text-align": "center"},
+                f'<strong style="{_style({"color": "#FFFFFF", "font-size": size, "font-weight": 600, "letter-spacing": 1})}">{escape_text(block.text)}</strong>',
+            )
+        if style == "margin-note":
+            # 章节号竖排在左侧窄色带里。writing-mode 微信不稳定，用逐字换行模拟竖排。
+            digits = "<br/>".join(escape_text(char) for char in f"{number:02d}")
+            return _section(
+                {**base},
+                f'<span style="{_style({"display": "inline-block", "width": 26, "padding": "8px 0", "background": primary, "color": "#FFFFFF", "font-size": 13, "font-weight": 700, "line-height": 1.35, "text-align": "center", "vertical-align": "top", "margin-right": 12})}">{digits}</span>'
+                f'<strong style="{_style({"display": "inline-block", "color": color, "font-size": size, "font-weight": 600, "line-height": 1.5, "vertical-align": "top"})}">{escape_text(block.text)}</strong>',
+            )
+        if style == "seal":
+            # 四角断开的方框：四条边各留出中间一段，角上才有线。
+            edge = f"1px solid {primary}"
+            return _section(
+                {**base, "text-align": "center"},
+                f'<span style="{_style({"display": "inline-block", "padding": "2px"})}">'
+                f'<span style="{_style({"display": "inline-block", "border-top": edge, "border-bottom": edge, "padding": "3px 0"})}">'
+                f'<span style="{_style({"display": "inline-block", "border-left": edge, "border-right": edge, "padding": "8px 22px"})}">'
+                f'<strong style="{_style({"color": primary, "font-size": size, "font-weight": 600, "letter-spacing": 2})}">{escape_text(block.text)}</strong>'
+                f"</span></span></span>",
+            )
+        if style == "lead-in":
+            # 标题本身只留一条细下划线，节奏交给紧跟的第一段（见 render_document）。
+            return _section(
+                {**base, "border-bottom": f"1px solid {tokens['dividerColor']}", "padding-bottom": 8},
+                f'<strong style="{_style({"color": color, "font-size": size + 4, "font-weight": 600, "letter-spacing": 0.5})}">{escape_text(block.text)}</strong>',
+            )
+        if style == "eyebrow":
+            # 主色小标签压在标题上方，标签与标题之间不留大空白。
+            return _section(
+                {**base},
+                f'<span style="{_style({"display": "block", "margin": "0 0 8px", "color": primary, "font-size": 12, "font-weight": 700, "letter-spacing": 2})}">本期</span>'
+                f'<strong style="{_style({"display": "block", "color": color, "font-size": size + 2, "font-weight": 700, "letter-spacing": 0.5, "line-height": 1.4})}">{escape_text(block.text)}</strong>',
+            )
+        if style == "kicker":
+            # 章节号单独成一行，标题居中，下面一条短线收住。
+            return _section(
+                {**base, "text-align": "center"},
+                f'<span style="{_style({"display": "block", "color": primary, "font-size": 12, "font-weight": 700, "letter-spacing": 3, "margin": "0 0 8px"})}">{number:02d}</span>'
+                f'<strong style="{_style({"color": color, "font-size": size + 2, "font-weight": 600, "letter-spacing": 1})}">{escape_text(block.text)}</strong>'
+                f'<span style="{_style({"display": "block", "width": 28, "height": 2, "background": primary, "margin": "12px auto 0"})}"></span>',
+            )
+        if style == "framed":
+            # 上下两条细线把标题夹在中间。
+            return _section(
+                {**base, "text-align": "center", "padding": "14px 0", "border-top": f"1px solid {primary}", "border-bottom": f"1px solid {primary}"},
+                f'<strong style="{_style({"color": color, "font-size": size, "font-weight": 600, "letter-spacing": 2})}">{escape_text(block.text)}</strong>',
+            )
+        if style == "rail":
+            # 左侧色带贴着标题，标题可以换行，色带跟着一起高。
+            return _section(
+                {**base, "padding": "4px 0 4px 14px", "border-left": f"4px solid {primary}"},
+                f'<strong style="{_style({"color": color, "font-size": size + 1, "font-weight": 700, "line-height": 1.45})}">{escape_text(block.text)}</strong>',
             )
         return _section(
             {**base},
@@ -886,10 +1180,13 @@ def _render_heading(block: Block, tokens: dict, number: int) -> str:
     )
 
 
-def _render_paragraph(block: Block, tokens: dict, warnings: list[dict]) -> str:
+def _render_paragraph(block: Block, tokens: dict, warnings: list[dict], *, lead: bool = False) -> str:
     inner = render_inline(block.text, tokens, warnings).replace("\n", "<br/>")
+    # 拉引：一级标题后的第一段放大、改用浅主色，充当导语。其余段落不动。
+    size = tokens["bodySize"] + 2 if lead else tokens["bodySize"]
+    color = tokens["mutedColor"] if lead else tokens["textColor"]
     return (
-        f'<p style="{_style({"margin": f"0 0 {tokens["paragraphGap"]}em", "font-size": tokens["bodySize"], "line-height": tokens["bodyLineHeight"], "letter-spacing": tokens["letterSpacing"], "color": tokens["textColor"], "text-align": tokens["align"], "text-indent": f"{tokens["indent"]}em" if tokens["indent"] else 0})}">'
+        f'<p style="{_style({"margin": f"0 0 {tokens["paragraphGap"]}em", "font-size": size, "line-height": tokens["bodyLineHeight"], "letter-spacing": tokens["letterSpacing"], "color": color, "text-align": tokens["align"], "text-indent": f"{tokens["indent"]}em" if tokens["indent"] else 0})}">'
         f"{inner}</p>"
     )
 
@@ -1121,6 +1418,198 @@ def _render_layers(block: Block, tokens: dict, warnings: list[dict]) -> str:
     return _section({"margin": f"0 0 {tokens['paragraphGap']}em"}, cards)
 
 
+# 动作名对应的色块字。认不出的名字用首字，不引入外部图标。
+_SUPPORT_GLYPHS = {"点赞": "赞", "转发": "转", "推荐": "荐", "收藏": "藏", "在看": "看", "评论": "评"}
+
+
+def _support_glyph(label: str) -> str:
+    text = label.strip()
+    if text in _SUPPORT_GLYPHS:
+        return _SUPPORT_GLYPHS[text]
+    return text[:1] or "·"
+
+
+def _render_support(block: Block, tokens: dict, warnings: list[dict]) -> str:
+    """文末互动卡。微信不能放插画，图标用主色圆里的一个字代替。"""
+    heads = [part.strip() for part in block.meta.split("/", 1)] if block.meta else []
+    title = heads[0] if heads else ""
+    subtitle = heads[1] if len(heads) > 1 else ""
+    head = ""
+    if title:
+        head += (
+            f'<strong style="{_style({"display": "block", "font-size": 18, "font-weight": 700, "line-height": 1.4, "letter-spacing": 0.5, "color": tokens["textColor"]})}">{escape_text(title)}</strong>'
+            f'<span style="{_style({"display": "block", "width": 36, "height": 3, "background": tokens["primaryColor"], "margin": "8px auto 0", "border-radius": 2})}"></span>'
+        )
+    if subtitle:
+        head += (
+            f'<span style="{_style({"display": "inline-block", "margin": "12px 0 0", "padding": "4px 12px", "background": tokens["primarySoft"], "border-radius": 999, "font-size": 13, "line-height": 1.6, "color": tokens["mutedColor"]})}">{escape_text(subtitle)}</span>'
+        )
+    cards = "".join(
+        f'<span style="{_style({"display": "inline-block", "width": "31%", "vertical-align": "top", "margin": "0 1% 0", "padding": "12px 6px 10px", "background": tokens["quoteBg"], "border-radius": 12, "text-align": "center"})}">'
+        f'<span style="{_style({"display": "block", "width": 32, "height": 32, "line-height": 32, "margin": "0 auto 8px", "border-radius": 999, "background": tokens["primarySoft"], "color": tokens["primaryColor"], "font-size": 14, "font-weight": 700, "text-align": "center"})}">{escape_text(_support_glyph(cols[0]))}</span>'
+        f'<strong style="{_style({"display": "inline-block", "padding": "2px 10px", "background": tokens["primaryColor"], "border-radius": 999, "color": "#FFFFFF", "font-size": 12, "font-weight": 600, "line-height": 1.6})}">{_cell(cols[0], tokens, warnings)}</strong>'
+        f'<span style="{_style({"display": "block", "margin": "6px 0 0", "font-size": 12, "line-height": 1.5, "color": tokens["mutedColor"]})}">{_cell(cols[1], tokens, warnings)}</span>'
+        f"</span>"
+        for cols in block.rows
+    )
+    body = (
+        f'<span style="{_style({"display": "block", "margin": "16px 0 0", "text-align": "center"})}">{cards}</span>'
+        if cards
+        else ""
+    )
+    return _section(
+        {
+            "margin": "2em 0 1em",
+            "padding": "20px 8px 16px",
+            "background": tokens["primarySoft"],
+            "border-radius": 16,
+            "text-align": "center",
+        },
+        head + body,
+    )
+
+
+# 暖心支持卡：海报式构图（主视觉徽章 + 三层文案 + 三色互动卡）。
+# 图标统一用彩色 emoji，避免彩色 emoji 与单色字形混排造成的风格割裂。
+_CHEER_GLYPHS = {"点赞": "👍", "转发": "🔁", "推荐": "❤️", "收藏": "⭐", "在看": "👀", "评论": "💬"}
+_CHEER_COLORS = (
+    ("#FDECC8", "#F7CE7A", "#8A5E1F"),  # 暖黄
+    ("#FBE0E4", "#F2B8C0", "#9C4C5C"),  # 柔粉
+    ("#FCE0D6", "#F4B49B", "#A04E36"),  # 蜜桃
+)
+
+
+def _cheer_glyph(label: str) -> str:
+    text = label.strip()
+    return _CHEER_GLYPHS.get(text, text[:1] or "·")
+
+
+def _render_cheer(
+    block: Block,
+    tokens: dict,
+    warnings: list[dict],
+    image_urls: list[str] | None = None,
+    used: set[int] | None = None,
+) -> str:
+    """暖色支持卡：爱心标题 + 胶囊副标题 + 三色互动卡，可附一张正文图作插画。"""
+    heads = [part.strip() for part in block.meta.split("/", 2)] if block.meta else []
+    title = heads[0] if heads else ""
+    subtitle = heads[1] if len(heads) > 1 else ""
+    bubble = heads[2] if len(heads) > 2 else ""
+
+    # 主视觉徽章：红花作焦点，两侧小花点缀，延续参考图的手绘暖色调。
+    hero = (
+        f'<span style="{_style({"display": "block", "margin": "0 0 12px", "text-align": "center", "font-size": 0})}">'
+        f'<span style="{_style({"display": "inline-block", "vertical-align": "middle", "margin": "0 8px", "font-size": 17, "line-height": 1.4})}">🌼</span>'
+        f'<span style="{_style({"display": "inline-block", "vertical-align": "middle", "width": 58, "height": 58, "line-height": "58px", "border-radius": 999, "background": "#FCE4DC", "border": "3px solid #FFFFFF", "font-size": 28, "text-align": "center", "box-shadow": "0 2px 8px rgba(200,120,100,0.12)"})}">❤️</span>'
+        f'<span style="{_style({"display": "inline-block", "vertical-align": "middle", "margin": "0 8px", "font-size": 17, "line-height": 1.4})}">🌼</span>'
+        f"</span>"
+    )
+
+    head = hero
+    if title:
+        head += (
+            f'<strong style="{_style({"display": "block", "font-size": 21, "font-weight": 700, "line-height": 1.4, "letter-spacing": 1.5, "color": "#6E4733"})}">{escape_text(title)}</strong>'
+            f'<span style="{_style({"display": "block", "width": "52%", "height": 3, "margin": "8px auto 0", "background": "#F0B7A6", "border-radius": 2})}"></span>'
+        )
+    if subtitle:
+        head += (
+            f'<span style="{_style({"display": "inline-block", "margin": "12px 0 0", "padding": "5px 14px", "background": "#FFF1CC", "border-radius": 999, "font-size": 12, "line-height": 1.7, "color": "#9C663C"})}">{escape_text(subtitle)}</span>'
+        )
+
+    cards: list[str] = []
+    art = ""
+    for index, cols in enumerate(block.rows):
+        if cols[0].strip() in {"插图", "插画"}:
+            placeholder = _IMAGE_PLACEHOLDER.fullmatch(cols[1].strip())
+            if not placeholder:
+                warnings.append(
+                    {
+                        "field": "body",
+                        "level": "warning",
+                        "message": ":::cheer 插图行请写成 `插图 | {{image1}}`",
+                    }
+                )
+                continue
+            image_index = int(placeholder.group(1))
+            if image_urls and 1 <= image_index <= len(image_urls):
+                if used is not None:
+                    used.add(image_index)
+                art = (
+                    f'<img src="{escape_text(image_urls[image_index - 1])}" style="{_style({"display": "block", "max-width": "100%", "margin": "16px auto 0", "border-radius": tokens["imageRadius"]})}"/>'
+                )
+            else:
+                warnings.append(
+                    {
+                        "field": "body",
+                        "level": "warning",
+                        "message": f":::cheer 插图占位 image{image_index} 超出已选正文图数量，已忽略",
+                    }
+                )
+            continue
+        circle, tag, ink = _CHEER_COLORS[index % len(_CHEER_COLORS)]
+        cards.append(
+            f'<span style="{_style({"display": "inline-block", "box-sizing": "border-box", "width": "31%", "vertical-align": "top", "margin": "0 1%", "padding": "15px 4px 13px", "background": "#FFFCF8", "border": "1px solid #F7E6D9", "border-radius": 16, "text-align": "center"})}">'
+            f'<span style="{_style({"display": "block", "width": 56, "height": 56, "line-height": "56px", "margin": "0 auto 10px", "border-radius": 999, "background": circle, "font-size": 28, "text-align": "center"})}">{escape_text(_cheer_glyph(cols[0]))}</span>'
+            f'<strong style="{_style({"display": "block", "font-size": 13, "font-weight": 700, "letter-spacing": 0.5, "line-height": 1.5, "color": ink})}">{_cell(cols[0], tokens, warnings)}</strong>'
+            f'<span style="{_style({"display": "block", "margin": "5px 2px 0", "font-size": 11, "line-height": 1.6, "color": "#8C735F"})}">{_cell(cols[1], tokens, warnings)}</span>'
+            f"</span>"
+        )
+
+    body = (
+        f'<span style="{_style({"display": "block", "margin": "18px 0 0", "font-size": 0, "text-align": "center"})}">{"".join(cards)}</span>'
+        if cards
+        else ""
+    )
+    footer = (
+        f'<span style="{_style({"display": "block", "margin": "16px 0 0", "text-align": "center"})}">'
+        f'<span style="{_style({"display": "inline-block", "padding": "4px 16px", "background": "#FDEEE9", "border-radius": 999, "font-size": 12, "letter-spacing": 1, "line-height": 1.6, "color": "#C77B69"})}">{escape_text(bubble)}</span>'
+        f"</span>"
+        if bubble
+        else ""
+    )
+    return _section(
+        {
+            "margin": "1.6em 0 1em",
+            "padding": "20px 14px 18px",
+            "background": "#FFFAF4",
+            "border": "1px solid #F5E4D4",
+            "border-radius": 22,
+            "text-align": "center",
+        },
+        head + body + art + footer,
+    )
+
+
+_MINI_SUPPORT_GLYPHS = {"点赞": "👍", "转发": "🔁", "推荐": "❤️", "收藏": "⭐", "在看": "👀", "评论": "💬"}
+
+
+def _mini_glyph(label: str) -> str:
+    text = label.strip()
+    return _MINI_SUPPORT_GLYPHS.get(text, text[:1] or "·")
+
+
+def _render_mini_support(block: Block, tokens: dict, warnings: list[dict]) -> str:
+    """极简互动：只放图标 + 动作名，浅底与文字色都跟随主题 tokens。"""
+    title = block.meta.strip()
+    head = (
+        f'<span style="{_style({"display": "block", "margin": "0 0 10px", "font-size": 12, "letter-spacing": 1, "color": tokens["mutedColor"], "text-align": "center"})}">{escape_text(title)}</span>'
+        if title
+        else ""
+    )
+    items = "".join(
+        f'<span style="{_style({"display": "inline-block", "box-sizing": "border-box", "width": "30%", "margin": "0 1%", "vertical-align": "top", "text-align": "center", "padding": "10px 2px", "background": tokens["quoteBg"], "border-radius": 14})}">'
+        f'<span style="{_style({"display": "block", "width": 46, "height": 46, "line-height": "46px", "margin": "0 auto 8px", "border-radius": 999, "background": tokens["primarySoft"], "font-size": 24, "text-align": "center"})}">{escape_text(_mini_glyph(cols[0]))}</span>'
+        f'<strong style="{_style({"display": "block", "font-size": 12, "font-weight": 600, "letter-spacing": 0.5, "line-height": 1.6, "color": tokens["textColor"]})}">{_cell(cols[0], tokens, warnings)}</strong>'
+        f"</span>"
+        for cols in block.rows
+    )
+    return _section(
+        {"margin": "1.5em 0", "padding": "10px 6px", "text-align": "center", "font-size": 0},
+        head + items,
+    )
+
+
 def _render_checklist(block: Block, tokens: dict, warnings: list[dict]) -> str:
     rows = "".join(
         _section(
@@ -1139,6 +1628,8 @@ _ROW_RENDERERS = {
     "compare": _render_compare,
     "layers": _render_layers,
     "checklist": _render_checklist,
+    "support": _render_support,
+    "mini-support": _render_mini_support,
 }
 
 
@@ -1164,15 +1655,20 @@ def render_document(
     blocks = parse_blocks(body, warnings)
     used: set[int] = set()
     heading_no = 0
+    lead_pending = False
     parts: list[str] = []
 
     for block in blocks:
         if block.kind == "heading":
             if block.level == 1:
                 heading_no += 1
+                lead_pending = theme["h1Style"] == "lead-in"
+            else:
+                lead_pending = False
             parts.append(_render_heading(block, theme, heading_no))
         elif block.kind == "paragraph":
-            parts.append(_render_paragraph(block, theme, warnings))
+            parts.append(_render_paragraph(block, theme, warnings, lead=lead_pending))
+            lead_pending = False
         elif block.kind in {"list", "ordered"}:
             parts.append(_render_list(block, theme, warnings, block.kind == "ordered"))
         elif block.kind == "quote":
@@ -1190,6 +1686,8 @@ def render_document(
             parts.append(rendered)
         elif block.kind in FREE_BLOCKS:
             parts.append(_render_blockquote_like(block.kind, block, theme, warnings))
+        elif block.kind == "cheer":
+            parts.append(_render_cheer(block, theme, warnings, urls, used))
         elif block.kind in _ROW_RENDERERS:
             parts.append(_ROW_RENDERERS[block.kind](block, theme, warnings))
         elif block.kind == "code":

@@ -1,0 +1,30 @@
+# Worker 镜像的构建上下文是仓库根目录（compose 中 context: ..），
+# 这里排除无关目录，既加快构建也避免把本地数据/密钥带进镜像。
+.git
+.gitignore
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+**/*.log
+**/*.mp4
+apps/web
+apps/api/.env
+apps/api/.env.*
+apps/api/.venv
+apps/api/hanyue.db
+apps/api/hanyue.db-journal
+apps/api/storage
+apps/api/.tmp-skill-storage
+apps/api/.pytest_cache
+apps/api/tests
+apps/api/scripts
+docs
+infra
+storage
+hanyue.db
+.screenshots
+.playwright-mcp
+.trae
+.workbuddy
+.superpowers

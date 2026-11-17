@@ -66,8 +66,8 @@ async function submit() {
 </template>
 
 <style scoped>
-.publish-wizard-overlay { position: fixed; inset: 0; z-index: 300; display: flex; justify-content: flex-end; background: rgba(15, 23, 42, .42); }
-.publish-wizard { display: flex; width: min(720px, 100vw); height: 100vh; flex-direction: column; background: var(--color-surface); box-shadow: -10px 0 30px rgba(0,0,0,.18); }
+.publish-wizard-overlay { position: fixed; inset: 0; z-index: 300; display: flex; justify-content: flex-end; background: var(--color-overlay); }
+.publish-wizard { display: flex; width: min(720px, 100vw); height: 100vh; flex-direction: column; background: var(--color-surface); box-shadow: var(--shadow-lg); }
 .publish-wizard-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px; border-bottom: 1px solid var(--color-border); }
 .publish-wizard-header strong, .publish-wizard-header span { display: block; }
 .publish-wizard-header strong { color: var(--color-text-primary); }

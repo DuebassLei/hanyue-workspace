@@ -389,7 +389,7 @@ def interrogate_image(
     if connection is None or model_code == "unconfigured":
         raise ImageProviderUnavailable(
             "text_provider_unavailable",
-            "未配置可用的文本/视觉模型；请在「设置 → 模型连接」中添加支持 text.generate 的模型",
+            "未配置可用的文本/视觉模型；请在「系统 → 模型管理」中添加支持 text.generate 的模型",
         )
 
     api_key = decrypt_secret(connection.credential_ciphertext)

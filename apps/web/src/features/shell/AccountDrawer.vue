@@ -257,7 +257,7 @@ onBeforeUnmount(() => {
   z-index: 200;
   display: flex;
   justify-content: flex-end;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--color-overlay);
 }
 
 .drawer {
@@ -266,7 +266,7 @@ onBeforeUnmount(() => {
   width: min(420px, 100vw);
   height: 100%;
   background: var(--color-surface);
-  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-lg);
 }
 
 .drawer-head {

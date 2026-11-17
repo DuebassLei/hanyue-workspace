@@ -2,6 +2,7 @@
 
 import io
 import json
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -62,6 +63,81 @@ def test_parse_script_rejects_garbage():
 
 # ---------- tts_provider ----------
 
+def test_video_render_filters_preserve_legacy_and_apply_subtitle_fade():
+    from app.services import video_render
+
+    class Capture:
+        def __init__(self):
+            self.cmd = None
+
+        def __call__(self, cmd, **kwargs):
+            self.cmd = cmd
+            return None
+
+    capture = Capture()
+    original = video_render._run
+    video_render._run = capture
+    try:
+        video_render.render_shot_clip(
+            image=Path("image.png"), audio=None, duration_ms=1000, motion="pan_left",
+            width=1080, height=1920, out=Path("out.mp4"), legacy=True,
+        )
+        legacy_filter = capture.cmd[capture.cmd.index("-vf") + 1]
+        assert legacy_filter == video_render.MOTION_FILTERS["pan_left"].format(
+            frames=30, w=1080, h=1920, fps=video_render.FPS, step=f"{video_render.ZOOM_TRAVEL / 30:.8f}"
+        )
+        video_render.render_shot_clip(
+            image=Path("image.png"), audio=None, duration_ms=1000, motion="still",
+            width=1080, height=1920, out=Path("out.mp4"), intensity=0.2,
+            focus={"x": 0.2, "y": 0.8}, legacy=False,
+        )
+        still_filter = capture.cmd[capture.cmd.index("-vf") + 1]
+        assert "z='1'" in still_filter
+        assert "x='iw/2-(iw/zoom/2)'" in still_filter
+        assert "y='ih/2-(ih/zoom/2)'" in still_filter
+        video_render.render_shot_clip(
+            image=Path("image.png"), audio=None, duration_ms=1000, motion="zoom_in",
+            width=1080, height=1920, out=Path("out.mp4"), intensity=0,
+            focus={"x": 0.2, "y": 0.8}, legacy=False,
+        )
+        assert "on*0.00000000" in capture.cmd[capture.cmd.index("-vf") + 1]
+        assert "0.200000" in capture.cmd[capture.cmd.index("-vf") + 1]
+        video_render.render_shot_clip(
+            image=Path("image.png"), audio=None, duration_ms=1000, motion="pan_left",
+            width=1080, height=1920, out=Path("out.mp4"), intensity=0.2,
+            focus={"x": 0.8, "y": 0.5}, legacy=False,
+        )
+        pan_filter = capture.cmd[capture.cmd.index("-vf") + 1]
+        assert "0.900000-on*" in pan_filter
+        assert "max(0,min(" in pan_filter and ",1))" in pan_filter
+        assert "y='max(0,min((ih-ih/zoom)*0.5+on*0.00000000" in pan_filter
+        video_render.render_shot_clip(
+            image=Path("image.png"), audio=None, duration_ms=1000, motion="pan_right",
+            width=1080, height=1920, out=Path("out.mp4"), intensity=0.2,
+            focus={"x": 0.5, "y": 0.75}, legacy=False,
+        )
+        vertical_pan_filter = capture.cmd[capture.cmd.index("-vf") + 1]
+        assert "y='max(0,min((ih-ih/zoom)*0.5+on*0.00166667" in vertical_pan_filter
+        assert "sin" not in vertical_pan_filter
+    finally:
+        video_render._run = original
+    assert "{\\fad(150,0)}" in video_render.build_ass(
+        [(0, 1000, "test")], width=1080, height=1920, subtitle_animation="fade_in"
+    )
+    assert "\\fad" not in video_render.build_ass(
+        [(0, 1000, "test")], width=1080, height=1920
+    )
+
+
+def test_video_project_legacy_shot_override_selects_motion_mode():
+    from app.services.job_runner import _video_motion_options
+
+    legacy_settings = {"aspectRatio": "9:16"}
+    assert _video_motion_options(legacy_settings, None, None)["legacy"] is True
+    assert _video_motion_options(legacy_settings, 0.2, None)["legacy"] is False
+    assert _video_motion_options(legacy_settings, None, {"x": 0.8, "y": 0.5})["legacy"] is False
+
+
 def test_tts_voice_and_rate_validation():
     from app.services import tts_provider
 
@@ -96,6 +172,24 @@ def test_video_project_crud_and_shots(client):
     project = _create_project(client, headers)
     pid = project["id"]
     assert project["settings"]["aspectRatio"] == "9:16"
+    assert project["settings"]["motionIntensity"] == 0.12
+    assert project["settings"]["motionFocus"] == {"x": 0.5, "y": 0.5}
+    assert project["settings"]["subtitleAnimation"] == "fade_in"
+    assert project["settings"]["imageModelId"] is None
+
+    res = client.patch(
+        f"/api/v1/videos/{pid}", headers=headers,
+        json={"settings": {"imageModelId": "  img-model-1  "}},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["settings"]["imageModelId"] == "img-model-1"
+    assert res.json()["settings"]["aspectRatio"] == "9:16"
+
+    res = client.patch(
+        f"/api/v1/videos/{pid}", headers=headers,
+        json={"settings": {"imageModelId": 12}},
+    )
+    assert res.status_code in (400, 422)
 
     # 非法画幅直接 422/400
     res = client.patch(
@@ -106,10 +200,34 @@ def test_video_project_crud_and_shots(client):
 
     res = client.post(
         f"/api/v1/videos/{pid}/shots", headers=headers,
-        json={"narration": "镜头一", "imagePrompt": "山间晨雾", "motion": "zoom_out"},
+        json={"narration": "镜头一", "imagePrompt": "山间晨雾", "motion": "still"},
     )
     assert res.status_code == 201, res.text
     shot_id = res.json()["id"]
+    assert res.json()["intensity"] is None
+    assert res.json()["focus"] is None
+
+    res = client.patch(
+        f"/api/v1/videos/shots/{shot_id}", headers=headers,
+        json={"motion": "still"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["motion"] == "still"
+
+    res = client.patch(
+        f"/api/v1/videos/shots/{shot_id}", headers=headers,
+        json={"intensity": 0.2, "focus": {"x": 0.2, "y": 0.8}},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["intensity"] == 0.2
+    assert res.json()["focus"] == {"x": 0.2, "y": 0.8}
+    res = client.patch(f"/api/v1/videos/shots/{shot_id}", headers=headers, json={"narration": "旁白不改变运镜"})
+    assert res.json()["intensity"] == 0.2
+    assert res.json()["focus"] == {"x": 0.2, "y": 0.8}
+    res = client.patch(f"/api/v1/videos/shots/{shot_id}", headers=headers, json={"intensity": None, "focus": None})
+    assert res.status_code == 200, res.text
+    assert res.json()["intensity"] is None
+    assert res.json()["focus"] is None
 
     res = client.patch(
         f"/api/v1/videos/shots/{shot_id}", headers=headers,
@@ -230,7 +348,10 @@ def test_video_handler_no_provider_fails_explicitly(client, monkeypatch):
         pytest.skip("本机无 ffmpeg，跳过执行链路")
     job_id = res.json()["jobId"]
 
+    seen = {}
+
     def no_image(*args, **kwargs):
+        seen["model_id"] = kwargs.get("model_id")
         raise image_provider.ImageProviderUnavailable(
             "image_provider_unavailable", "未接入图像生成供应商"
         )
@@ -247,6 +368,7 @@ def test_video_handler_no_provider_fails_explicitly(client, monkeypatch):
         assert job.status == "failed"
         assert job.error_code == "image_provider_unavailable"
         assert "第 1 个镜头" in (job.error_message or "")
+        assert seen.get("model_id") is None
         project_row = session.get(models.VideoProject, pid)
         assert project_row.render_asset_id is None
     finally:

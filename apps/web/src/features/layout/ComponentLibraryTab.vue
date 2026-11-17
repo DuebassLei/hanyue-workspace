@@ -206,7 +206,7 @@ async function copySnippet(item) {
 .component-tab {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4, 16px);
+  gap: var(--space-4);
 }
 .component-toolbar {
   display: flex;
@@ -216,7 +216,7 @@ async function copySnippet(item) {
 }
 .component-toolbar-label {
   font-size: 13px;
-  color: var(--color-text-secondary, #888);
+  color: var(--color-text-secondary);
   margin-right: 4px;
 }
 .component-discovery {
@@ -225,9 +225,9 @@ async function copySnippet(item) {
   gap: 12px;
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid var(--color-border, #e5e5e5);
-  border-radius: var(--radius-lg, 10px);
-  background: var(--color-surface-raised, #f8f9fa);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
 }
 .component-search {
   flex: 0 1 280px;
@@ -267,15 +267,15 @@ async function copySnippet(item) {
 .component-jump-label {
   flex: none;
   font-size: 12px;
-  color: var(--color-text-secondary, #888);
+  color: var(--color-text-secondary);
 }
 .component-jump-button {
   flex: none;
   border: 0;
   border-radius: 999px;
   padding: 5px 10px;
-  color: var(--color-text-secondary, #666);
-  background: var(--color-surface, #fff);
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
   font: inherit;
   font-size: 12px;
   cursor: pointer;
@@ -283,21 +283,21 @@ async function copySnippet(item) {
 }
 .component-jump-button:hover,
 .component-jump-button:focus-visible {
-  color: var(--color-primary, #18a058);
-  background: var(--color-primary-soft, #e8f6ee);
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
   outline: none;
 }
 .component-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
-  gap: var(--space-4, 16px);
+  gap: var(--space-4);
   scroll-margin-top: 16px;
 }
 .component-card {
   scroll-margin-top: 72px;
-  border: 1px solid var(--color-border, #e5e5e5);
-  border-radius: var(--radius-lg, 12px);
-  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
   padding: 14px 16px 16px;
   display: flex;
   flex-direction: column;
@@ -305,12 +305,12 @@ async function copySnippet(item) {
   transition: box-shadow 200ms ease, border-color 200ms ease, transform 200ms ease;
 }
 .component-card:hover {
-  border-color: color-mix(in srgb, var(--color-primary, #18a058) 35%, var(--color-border, #e5e5e5));
-  box-shadow: 0 10px 28px -18px rgba(23, 28, 42, 0.35);
+  border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-border));
+  box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
 @keyframes component-card-flash {
-  0%, 60% { box-shadow: 0 0 0 2px var(--color-primary, #18a058); }
+  0%, 60% { box-shadow: 0 0 0 2px var(--color-accent); }
   100% { box-shadow: 0 0 0 2px transparent; }
 }
 .component-card-flash {
@@ -327,20 +327,20 @@ async function copySnippet(item) {
   line-height: 1;
   padding: 4px 7px;
   border-radius: 999px;
-  color: var(--color-primary, #18a058);
-  background: var(--color-primary-soft, #e8f6ee);
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
 }
 .component-fence {
   font-size: 11px;
-  color: var(--color-text-secondary, #888);
-  background: var(--color-surface-raised, #f4f4f4);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-raised);
   border-radius: 4px;
   padding: 1px 6px;
 }
 .component-desc {
   margin: 0;
   font-size: 12px;
-  color: var(--color-text-secondary, #888);
+  color: var(--color-text-secondary);
 }
 /* 正文样张：白底即微信正文底色，超长卡内滚动 */
 .component-sample {
@@ -348,16 +348,16 @@ async function copySnippet(item) {
   max-height: 300px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  border-radius: var(--radius-md, 6px);
-  box-shadow: inset 0 0 0 1px var(--color-border, #ececf1);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--color-border);
   scrollbar-width: thin;
-  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+  scrollbar-color: color-mix(in srgb, var(--color-text-muted) 45%, transparent) transparent;
 }
 .component-sample::-webkit-scrollbar {
   width: 4px;
 }
 .component-sample::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.22);
+  background: color-mix(in srgb, var(--color-text-muted) 45%, transparent);
   border-radius: 4px;
 }
 .component-sample :deep(img) {
@@ -367,7 +367,7 @@ async function copySnippet(item) {
   display: grid;
   place-items: center;
   min-height: 96px;
-  color: var(--color-text-muted, #999);
+  color: var(--color-text-muted);
   font-size: 13px;
 }
 @media (max-width: 720px) {

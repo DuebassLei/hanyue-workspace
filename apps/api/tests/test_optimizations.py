@@ -39,14 +39,12 @@ def _png_bytes() -> bytes:
     "url",
     [
         "http://api.example.com/v1",
-        "https://localhost/v1",
-        "https://127.0.0.1/v1",
         "https://169.254.169.254/latest/meta-data",
         "https://10.0.0.5/v1",
         "https://192.168.1.8/v1",
-        "https://[::1]/v1",
         "https://user:pass@api.example.com/v1",
         "https://metadata.google.internal/v1",
+        "http://10.0.0.5:11434/v1",
     ],
 )
 def test_ssrf_rejects_internal_urls(url):
@@ -60,6 +58,13 @@ def test_ssrf_allows_public_https_without_dns():
     from app.core import ssrf
 
     assert ssrf.validate_base_url("https://api.example.com/v1/") == "https://api.example.com/v1"
+
+
+def test_ssrf_allows_loopback_http_without_dns():
+    from app.core import ssrf
+
+    assert ssrf.validate_base_url("http://127.0.0.1:3425/v1/") == "http://127.0.0.1:3425/v1"
+    assert ssrf.validate_base_url("http://localhost:11434/v1") == "http://localhost:11434/v1"
 
 
 # ---------------- 真实连接探测 ----------------

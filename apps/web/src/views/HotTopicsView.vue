@@ -15,6 +15,7 @@ import { api } from '../api/client'
 import { toast } from '../ui/feedback'
 import HotClusterCard from '../features/hot/HotClusterCard.vue'
 import HotOverviewDialog from '../features/hot/HotOverviewDialog.vue'
+import HotPlatformTabs from '../features/hot/HotPlatformTabs.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -92,6 +93,10 @@ const platformTabs = computed(() => {
   const known = enabled.length ? enabled : Object.keys(counts)
   return known.map((name) => ({ name, count: counts[name] || 0 }))
 })
+
+const platformTotal = computed(() =>
+  Object.values(summary.value.platforms || {}).reduce((sum, count) => sum + (count || 0), 0),
+)
 
 const visible = computed(() =>
   clusters.value.filter(
@@ -295,6 +300,13 @@ onMounted(loadAll)
     </div>
 
     <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
+
+    <HotPlatformTabs
+      v-model="filters.platform"
+      :platforms="platformTabs"
+      :total="platformTotal"
+      :loading="loading"
+    />
 
     <HotOverviewDialog
       :show="overviewOpen"

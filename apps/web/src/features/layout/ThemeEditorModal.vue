@@ -251,7 +251,7 @@ async function save() {
 }
 .editor-field-key {
   font-size: 11px;
-  color: var(--color-text-secondary, #aaa);
+  color: var(--color-text-secondary);
   font-family: 'Fira Code', monospace;
 }
 .editor-slider-row {
@@ -263,7 +263,7 @@ async function save() {
   min-width: 40px;
   text-align: right;
   font-size: 12px;
-  color: var(--color-text-secondary, #888);
+  color: var(--color-text-secondary);
 }
 .editor-error {
   margin-top: 12px;
@@ -276,7 +276,7 @@ async function save() {
 }
 .editor-preview-label {
   font-size: 12px;
-  color: var(--color-text-secondary, #888);
+  color: var(--color-text-secondary);
   align-self: flex-start;
 }
 .editor-sample {

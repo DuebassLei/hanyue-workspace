@@ -24,6 +24,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -47,6 +49,45 @@ class HotTopicsError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 刷新冷却
+# ══════════════════════════════════════════════════════════════════════
+#
+# 采集一次要打 7 个外部接口。连点会让上游以为我们在刷接口，也让用户以为
+# 「点了没反应」。这段状态原本写在路由层（modules/hot_topics.py 的模块级 dict），
+# 定时任务走 job_runner 会绕过它——同一个动作两条路径，限速却只管一条。
+# 现在下沉到服务层：谁调 refresh 都面对同一份状态。
+#
+# 注意：定时路径**不**调用 reserve_refresh。理由见 job_runner._handle_hot_topics：
+# cron 频率 + 触发互斥已经把并发限住了，若因为「15 秒冷却」被判失败，
+# 任务会连续失败三次后自己暂停，这比限速本身更糟。
+
+_COOLDOWN_LOCK = threading.Lock()
+_last_refresh: dict[str, float] = {}
+
+
+def cooldown_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("HOT_TOPICS_REFRESH_COOLDOWN", "15")))
+    except ValueError:
+        return 15.0
+
+
+def reserve_refresh(key: str = "all") -> None:
+    """占用一次刷新额度；冷却中抛 too_frequent，由调用方翻成 429。"""
+    wait = cooldown_seconds()
+    with _COOLDOWN_LOCK:
+        if wait and time.monotonic() - _last_refresh.get(key, 0.0) < wait:
+            raise HotTopicsError("too_frequent", f"刷新太频繁，请 {int(wait)} 秒后再试")
+        _last_refresh[key] = time.monotonic()
+
+
+def reset_cooldown() -> None:
+    """测试与排障用：清空冷却状态。"""
+    with _COOLDOWN_LOCK:
+        _last_refresh.clear()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -623,19 +664,13 @@ def set_status(db: Session, cluster_id: str, status: str) -> dict | None:
     return _cluster_out(cluster)
 
 
-def create_draft(
-    db: Session, cluster_id: str, user: models.User, workspace: models.Workspace
-) -> tuple[models.ContentItem, dict] | None:
-    """热点 → 稿件。重复点击返回同一篇，不重复建。"""
-    cluster = db.get(models.HotCluster, cluster_id)
-    if cluster is None:
-        return None
+def _new_draft(
+    db: Session, cluster: models.HotCluster, user: models.User, workspace: models.Workspace
+) -> models.ContentItem:
+    """建一篇空草稿（标题=热点标题），不 commit、不碰簇状态。
 
-    if cluster.content_item_id:
-        existing = db.get(models.ContentItem, cluster.content_item_id)
-        if existing is not None:
-            return existing, _cluster_out(cluster)
-
+    「热点 → 稿件」和「定时选题简报」共用这一处，避免两条路径的字段口径分叉。
+    """
     item = models.ContentItem(
         workspace_id=workspace.id,
         owner_user_id=user.id,
@@ -650,11 +685,109 @@ def create_draft(
     db.add(version)
     db.flush()
     item.current_version_id = version.id
+    return item
 
+
+def create_draft(
+    db: Session, cluster_id: str, user: models.User, workspace: models.Workspace
+) -> tuple[models.ContentItem, dict] | None:
+    """热点 → 稿件。重复点击返回同一篇，不重复建。"""
+    cluster = db.get(models.HotCluster, cluster_id)
+    if cluster is None:
+        return None
+
+    if cluster.content_item_id:
+        existing = db.get(models.ContentItem, cluster.content_item_id)
+        if existing is not None:
+            return existing, _cluster_out(cluster)
+
+    item = _new_draft(db, cluster, user, workspace)
     cluster.content_item_id = item.id
     cluster.status = "generated"
     db.commit()
     return item, _cluster_out(cluster)
+
+
+# 简报扫描上限：簇按天分，一天几百条以内，多扫一遍比写多赛道 SQL 便宜
+DIGEST_SCAN_LIMIT = 200
+
+
+def _owner_has_draft(db: Session, user: models.User, title: str) -> bool:
+    """同一个人已有同名未归档稿件 → 视为建过，不重复建。
+
+    不能用 `cluster.content_item_id` 判重：那一列是全局单一指针（热点数据不分用户），
+    按它判重会让第二个用户永远拿不到自己的草稿。
+    """
+    exists = db.scalar(
+        select(models.ContentItem.id)
+        .where(
+            models.ContentItem.owner_user_id == user.id,
+            models.ContentItem.title == title[:200],
+            models.ContentItem.archived.is_(False),
+        )
+        .limit(1)
+    )
+    return exists is not None
+
+
+def build_digest(
+    db: Session,
+    user: models.User,
+    workspace: models.Workspace,
+    *,
+    tracks: list[str] | None = None,
+    min_score: int = 60,
+    limit: int = 3,
+    create_drafts: bool = True,
+) -> dict:
+    """把当天的高分热点整理成「选题简报」，可选给每条建一篇草稿。
+
+    产出只落在**这个用户**的创作空间里，不改簇的 `status` / `content_item_id`
+    —— 那是热点页的全局状态，定时任务不该替所有人改。
+    """
+    day = latest_day(db)
+    if not day:
+        # 一条数据都没有说明采集侧坏了，不能报「简报已生成（0 条）」把问题藏起来
+        raise HotTopicsError("no_hot_data", "库里还没有任何热点数据，请先跑一次热点采集")
+
+    wanted = {str(track).strip() for track in (tracks or []) if str(track).strip()}
+    scanned = list_clusters(db, day=day, min_score=int(min_score), limit=DIGEST_SCAN_LIMIT)
+    picks = [row for row in scanned if not wanted or row["track"] in wanted]
+    picks = picks[: max(1, min(int(limit), 20))]
+
+    drafts, reused = 0, 0
+    for row in picks:
+        if not create_drafts:
+            continue
+        cluster = db.get(models.HotCluster, row["id"])
+        if cluster is None:
+            continue
+        if _owner_has_draft(db, user, cluster.title):
+            reused += 1
+            continue
+        _new_draft(db, cluster, user, workspace)
+        drafts += 1
+    db.commit()
+
+    return {
+        "day": day,
+        "total": len(picks),
+        "draftsCreated": drafts,
+        "draftsReused": reused,
+        "tracks": sorted(wanted),
+        "minScore": int(min_score),
+        "items": [
+            {
+                "clusterId": row["id"],
+                "title": row["title"],
+                "track": row["track"],
+                "score": row["score"],
+                "grade": row["grade"],
+                "platforms": row["platforms"],
+            }
+            for row in picks
+        ],
+    }
 
 
 def sources_status() -> dict:

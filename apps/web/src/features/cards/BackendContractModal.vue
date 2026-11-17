@@ -184,7 +184,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   padding: var(--space-5);
-  background: rgba(9, 9, 11, 0.55);
+  background: var(--color-overlay);
   backdrop-filter: blur(4px);
 }
 
@@ -356,7 +356,7 @@ onBeforeUnmount(() => {
 
 .dot.is-live {
   background: var(--color-success);
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 28%, transparent);
 }
 
 .foot-actions {

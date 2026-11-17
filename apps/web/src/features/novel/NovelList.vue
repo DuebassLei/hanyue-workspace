@@ -71,13 +71,13 @@ defineExpose({ reset })
 .novel-list { min-width: 0; }
 .block-title { margin: 0 0 10px; font-size: 15px; }
 .create-form { display: flex; flex-direction: column; gap: 8px; }
-.source-input { width: 100%; box-sizing: border-box; resize: vertical; padding: 8px; font: inherit; border: 1px solid #d9d6cf; background: #fff; color: inherit; }
+.source-input { width: 100%; box-sizing: border-box; resize: vertical; padding: 8px; font: inherit; border: 1px solid var(--paper-line-strong); background: var(--paper-surface); color: inherit; }
 .rights-check { display: flex; align-items: center; gap: 6px; font-size: 13px; }
-.form-error { margin: 0; color: #b44336; font-size: 12px; }
-.empty-hint { margin: 14px 0 0; color: #827a71; font-size: 13px; }
+.form-error { margin: 0; color: var(--paper-danger); font-size: 12px; }
+.empty-hint { margin: 14px 0 0; color: var(--paper-ink-muted); font-size: 13px; }
 .project-items { list-style: none; margin: 14px 0 0; padding: 0; }
-.project-items li { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid #e1ddd6; }
+.project-items li { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--paper-line); }
 .project-row { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 4px; border: 0; background: transparent; text-align: left; cursor: pointer; color: inherit; }
-.project-row.is-active { background: #f3efe7; }
-.project-row small { color: #888077; font-size: 11px; }
+.project-row.is-active { background: var(--paper-active); }
+.project-row small { color: var(--paper-ink-muted); font-size: 11px; }
 </style>

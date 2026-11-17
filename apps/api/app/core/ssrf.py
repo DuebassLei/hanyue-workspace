@@ -9,9 +9,14 @@
 
 **可信主机例外**：公司内网自建网关（如内部 LLM 代理）的域名必然解析到私网地址，
 会被第 2 步误杀。`SSRF_TRUSTED_HOSTS`（逗号分隔域名）显式登记的域名跳过内网 IP
-拦截——但 HTTPS、端口白名单、BLOCKED_HOSTNAMES/SUFFIXES 字面量检查与 IP 固定
+拦截——但协议、端口白名单、BLOCKED_HOSTNAMES/SUFFIXES 字面量检查与 IP 固定
 全部照旧，例外只针对「解析结果是内网地址」这一条。登记什么域名是运维的显式决定，
 随机用户输入永远不会出现在这份名单里。
+
+**本机明文例外**：开发机上的本地模型服务（Ollama、自建 OpenAI 兼容代理等）只监听
+`http://127.0.0.1:端口`。`validate_base_url` 对 `localhost` / `127.0.0.1` / `::1`
+放行 HTTP 与任意端口——环回地址天然不可达其他机器，也不存在 DNS 解析，
+端口探测与 rebinding 都无从谈起。云元数据地址、私网网段、公网 HTTP 仍一律拒绝。
 
 所有出站请求都必须走 `safe_request` 或 `pin_url`；禁止自己 new 一个 httpx client 直连外部域名。
 重定向不自动跟随，每一跳重新解析并重新 pin。
@@ -48,8 +53,13 @@ BLOCKED_HOSTNAMES = {
 }
 
 BLOCKED_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain", ".home.arpa")
-# 非标准端口常被用于内网端口探测，只放开 HTTPS 常规端口
+# 非标准端口常被用于内网端口探测，只放开 HTTPS 常规端口。
+# 环回地址例外：本地模型服务通常跑在任意端口的明文 HTTP 上，见 _LOOPBACK_HOSTS。
 ALLOWED_PORTS = {None, 443, 8443}
+
+# 本机环回地址：放行 HTTP 与任意端口，其余主机一律不允许。
+# 只认字面量，不认 DNS 解析结果——`localhost` 之外的域名即使解析到 127.0.0.1 也不在此列。
+_LOOPBACK_HOSTS = {"localhost", "localhost.localdomain", "127.0.0.1", "::1"}
 
 # 显式登记的可信主机（逗号分隔域名）：解析到内网地址也放行，见模块 docstring
 _TRUSTED_HOSTS_ENV = "SSRF_TRUSTED_HOSTS"
@@ -93,8 +103,17 @@ def trusted_hosts() -> set[str]:
     return hosts
 
 
+def _normalize_host(host: str) -> str:
+    return host.strip().lower().strip("[]").rstrip(".")
+
+
+def _is_loopback_host(host: str) -> bool:
+    """主机名是否为字面量环回地址（localhost / 127.0.0.1 / ::1）。"""
+    return _normalize_host(host) in _LOOPBACK_HOSTS
+
+
 def _host_is_trusted(host: str) -> bool:
-    name = host.strip().lower().strip("[]").rstrip(".")
+    name = _normalize_host(host)
     return bool(name) and name in trusted_hosts()
 
 
@@ -137,25 +156,34 @@ def _blocked_literal_host(host: str) -> str | None:
 
 
 def validate_base_url(url: str) -> str:
-    """字面量校验。返回去掉尾部斜杠的 URL；空串表示未配置，原样返回。"""
+    """字面量校验。返回去掉尾部斜杠的 URL；空串表示未配置，原样返回。
+
+    环回地址（localhost / 127.0.0.1 / ::1）允许 HTTP 与任意端口，供本机模型服务使用；
+    其他主机仍必须是 HTTPS 且端口限于 443/8443。云元数据与内网地址不在例外范围内。
+    """
     raw = (url or "").strip()
     if not raw:
         return ""
     parsed = urlparse(raw)
-    if parsed.scheme != "https":
-        raise UnsafeUrl("Base URL 必须使用 HTTPS")
+    loopback = _is_loopback_host(parsed.hostname or "")
+    if parsed.scheme not in ("https", "http"):
+        raise UnsafeUrl("Base URL 必须使用 HTTP 或 HTTPS")
+    if parsed.scheme != "https" and not loopback:
+        raise UnsafeUrl("Base URL 必须使用 HTTPS（仅本机环回地址允许 HTTP）")
     if parsed.username or parsed.password:
         raise UnsafeUrl("Base URL 不允许携带用户名或密码")
     if parsed.fragment:
         raise UnsafeUrl("Base URL 不允许携带片段")
-    problem = _blocked_literal_host(parsed.hostname or "")
-    if problem:
-        raise UnsafeUrl(problem)
+    # 环回地址本身就在字面量黑名单里（防 SSRF），这里是显式例外，跳过该条检查
+    if not loopback:
+        problem = _blocked_literal_host(parsed.hostname or "")
+        if problem:
+            raise UnsafeUrl(problem)
     try:
         port = parsed.port
     except ValueError as exc:
         raise UnsafeUrl("Base URL 端口无效") from exc
-    if port not in ALLOWED_PORTS:
+    if not loopback and port not in ALLOWED_PORTS:
         raise UnsafeUrl("仅允许 HTTPS 默认端口（443/8443），禁止自定义端口探测")
     return raw.rstrip("/")
 
@@ -172,6 +200,7 @@ def _resolve_public_ips(url: str) -> tuple[str, object, list[ipaddress._BaseAddr
     # 白名单匹配的是用户配置的域名本身。不能信任 DNS 返回值：DNS 被劫持时，
     # 可信域名也可能被解析成 169.254.169.254 之类的元数据地址，那仍然要拦。
     trusted = _host_is_trusted(host)
+    loopback = _is_loopback_host(host)
     try:
         infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError, OSError) as exc:
@@ -189,10 +218,13 @@ def _resolve_public_ips(url: str) -> tuple[str, object, list[ipaddress._BaseAddr
             raise UnsafeUrl(f"域名解析结果异常：{address}") from exc
         # 可信主机例外只豁免「内网/保留网段」这一条；云元数据与 unspecified 地址
         # 任何情况下都拦截（DNS 被劫持时可信域名也可能被指到这些地址）。
+        # 环回主机例外只豁免「解析结果仍是环回地址」：localhost 被劫持到内网或
+        # 云元数据地址时照样拦截。
         always_blocked = ip.is_unspecified or str(ip) in BLOCKED_HOSTNAMES or (
             ip.version == 6 and ip.ipv4_mapped is not None and str(ip.ipv4_mapped) in BLOCKED_HOSTNAMES
         )
-        if always_blocked or (_ip_is_blocked(ip) and not trusted):
+        loopback_ok = loopback and ip.is_loopback
+        if always_blocked or (_ip_is_blocked(ip) and not trusted and not loopback_ok):
             raise UnsafeUrl(f"域名解析到禁止访问的地址：{address}")
         ips.append(ip)
     if not ips:

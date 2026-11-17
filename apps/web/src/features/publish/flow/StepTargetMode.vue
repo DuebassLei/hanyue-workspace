@@ -21,9 +21,9 @@ const groupedAccounts = computed(() => {
 
 const themeOptions = [
   { value: 'ink-green', label: '墨绿' },
-  { value: 'deep-blue', label: '深蓝' },
   { value: 'warm-orange', label: '暖橙' },
   { value: 'mono', label: '简约' },
+  { value: 'dispatch', label: '公文' },
 ]
 
 const scheduledTs = computed({

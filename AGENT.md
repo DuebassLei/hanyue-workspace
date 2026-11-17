@@ -19,7 +19,7 @@
 | 数据库 | SQLite（开发）/ PostgreSQL（生产） | `DATABASE_URL` env |
 | 队列 | Redis + Worker / 内置线程池回退 | `apps/worker/worker.py` |
 | 图像 | Pillow（同步小图/队列大图）+ AI 生图适配器 | `apps/api/app/services/image_service.py` |
-| 容器 | Docker Compose（api + worker + redis + postgres） | `infra/docker-compose.yml` |
+| 容器 | Docker Compose（web + api + worker + redis + postgres），入口 `infra/scripts/deploy.sh` | `infra/docker-compose.yml` |
 
 ---
 
@@ -58,10 +58,15 @@ hanyue-workspace/
 │   ├── design.md         产品设计说明书（权威来源）
 │   ├── plan.md           实施计划
 │   ├── setup.md          完整启动与配置手册
+│   ├── docker-deploy.md  Docker 部署方案（发版/备份/迁移/排障）
 │   ├── wechat-layout.md  公众号排版渲染管线说明
 │   └── studio-redesign.md Studio 页重设计说明
 └── infra/
     ├── docker-compose.yml
+    ├── docker-compose.lowmem.yml   2 核 2G 覆盖层（<3GB 内存自动叠加）
+    ├── nginx/default.conf          前端静态托管 + /api 反代
+    ├── scripts/deploy.sh           部署入口（up/backup/restore/migrate）
+    ├── scripts/migrate_sqlite_to_pg.py
     ├── platform-evidence.json       Phase 0 核验证据（默认空/全 false）
     └── platform-evidence.example.json
 ```
@@ -132,7 +137,8 @@ hanyue-workspace/
 | `CharactersView.vue` | `/characters` | 角色库：跨项目复用的角色卡、多参考图与正文抽取草稿 |
 | `AssetsView.vue` | `/assets` | 素材管理、AI 生图任务列表 |
 | `PublishingView.vue` | `/publishing` | 发布中心（含公众号草稿箱入口） |
-| `SettingsView.vue` | `/settings` | 模型连接、平台接入、Agent 策略、偏好 |
+| `ModelsView.vue` | `/models` | 系统 → 模型管理：文本 / 生图分组登记连接，拉取供应商模型列表并支持关键字筛选填充代号，配置内测试与真实连通性测试 |
+| `SettingsView.vue` | `/settings` | 外观与主题、Agent 与 Skills、数据与安全、系统日志 |
 
 ---
 

@@ -8,5 +8,8 @@ python-multipart==0.0.33
 pyyaml==6.0.3
 pillow==13.0.0
 httpx==0.28.1
+# 定时任务的触发器（docs/scheduled-tasks.md）。只当定时器用，执行仍走 background_jobs。
+# 不用 4.x：作者声明该系列为预发布且无迁移路径，本文件全量锁定版本，不能钉 a 版。
+apscheduler==3.11.3
 edge-tts==7.2.3
 pytest==9.2.0

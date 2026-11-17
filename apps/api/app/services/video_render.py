@@ -146,25 +146,58 @@ def _ms_to_ass(ms: int) -> str:
     return f"{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}"
 
 
-def build_ass(events: list[tuple[int, int, str]], *, width: int, height: int) -> str:
+def build_ass(events: list[tuple[int, int, str]], *, width: int, height: int, subtitle_animation: str | None = None) -> str:
     """events: [(start_ms, end_ms, text)] → ASS 全文（竖屏大字号、底部居中）。"""
     fontsize = 64 if height > width else 48
     marginv = 380 if height > width else 90
     lines = [ASS_HEADER.format(w=width, h=height, font="Microsoft YaHei", fontsize=fontsize, marginv=marginv)]
     for start, end, text in events:
+        fade = "{\\fad(150,0)}" if subtitle_animation == "fade_in" else ""
         lines.append(
-            f"Dialogue: 0,{_ms_to_ass(start)},{_ms_to_ass(end)},Narration,,0,0,0,,{escape_ass(text)}"
+            f"Dialogue: 0,{_ms_to_ass(start)},{_ms_to_ass(end)},Narration,,0,0,0,,{fade}{escape_ass(text)}"
         )
     return "\n".join(lines) + "\n"
 
 
 def render_shot_clip(
     *, image: Path, audio: Path | None, duration_ms: int, motion: str,
-    width: int, height: int, out: Path,
+    width: int, height: int, out: Path, intensity: float | None = None,
+    focus: dict | None = None, legacy: bool = True,
 ) -> None:
     frames = max(int(duration_ms * FPS / 1000), FPS)
-    template = MOTION_FILTERS.get(motion) or MOTION_FILTERS["zoom_in"]
-    vf = template.format(frames=frames, w=width, h=height, fps=FPS, step=f"{ZOOM_TRAVEL / frames:.8f}")
+    if legacy:
+        template = MOTION_FILTERS.get(motion) or MOTION_FILTERS["zoom_in"]
+        vf = template.format(frames=frames, w=width, h=height, fps=FPS, step=f"{ZOOM_TRAVEL / frames:.8f}")
+    else:
+        amount = max(0.0, min(float(intensity or 0), 0.25))
+        center_x = min(max(float((focus or {}).get("x", 0.5)), 0.0), 1.0)
+        center_y = min(max(float((focus or {}).get("y", 0.5)), 0.0), 1.0)
+        zoom = 1 + amount
+        if motion == "still":
+            z = "1"
+        elif motion == "zoom_in":
+            z = f"min(1+on*{amount / frames:.8f},{zoom:.4f})"
+        elif motion == "zoom_out":
+            z = f"max({zoom:.4f}-on*{amount / frames:.8f},1)"
+        else:
+            z = f"{zoom:.4f}"
+        # zoompan x/y are clamped to [0, iw-iw/zoom] / [0, ih-ih/zoom]
+        if motion == "still":
+            x_pos = "iw/2-(iw/zoom/2)"
+            y_pos = "ih/2-(ih/zoom/2)"
+        else:
+            x_pos = f"max(0,min((iw-iw/zoom)*{center_x:.6f},iw-iw/zoom))"
+            y_pos = f"max(0,min((ih-ih/zoom)*{center_y:.6f},ih-ih/zoom))"
+        if motion in ("pan_left", "pan_right"):
+            # Pan around the selected focus by at most the configured motion amount.
+            # zoompan's crop origin is always clamped to the safe zoom bounds.
+            sign = "-" if motion == "pan_left" else "+"
+            start = center_x + (amount / 2 if motion == "pan_left" else -amount / 2)
+            progress = f"{start:.6f}{sign}on*{amount / frames:.8f}"
+            x_pos = f"(iw-iw/zoom)*max(0,min({progress},1))"
+            vertical_drift = (center_y - 0.5) * amount
+            y_pos = f"max(0,min((ih-ih/zoom)*0.5+on*{vertical_drift / frames:.8f},ih-ih/zoom))"
+        vf = f"zoompan=z='{z}':x='{x_pos}':y='{y_pos}':d={frames}:s={width}x{height}:fps={FPS}"
     # -t 是输出选项（放在任何 -i 之后都会被当成下一个输入的文件名，ffmpeg 9 直接报错）
     cmd = [ffmpeg_bin(), "-y", "-loop", "1", "-framerate", str(FPS), "-i", str(image)]
     if audio is not None:

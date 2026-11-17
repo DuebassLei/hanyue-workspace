@@ -88,9 +88,13 @@ def test_storyboard_generation_persists_job_and_workspace(client, monkeypatch):
         return original(db, **kwargs)
 
     monkeypatch.setattr(queue, "enqueue", enqueue_spy)
-    response = client.post(f"/api/v1/storyboards/shots/{shot['id']}/generate-sketch", json={}, headers=headers)
+    response = client.post(
+        f"/api/v1/storyboards/shots/{shot['id']}/generate-sketch",
+        json={"modelId": "img-model-1"}, headers=headers,
+    )
     assert response.status_code == 202, response.text
     assert captured["payload"]["storyboardShotId"] == shot["id"]
+    assert captured["payload"]["modelId"] == "img-model-1"
     assert captured["payload"]["workspaceId"] == project["workspaceId"]
     assert captured["payload"]["generationStage"] == "sketch"
     detail = client.get(f"/api/v1/storyboards/{project['id']}", headers=headers).json()

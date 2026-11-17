@@ -66,6 +66,8 @@ def _shot_out(row: models.VideoShot) -> schemas.VideoShotOut:
         audio_url=_url(row.audio_asset_id),
         duration_ms=row.duration_ms,
         motion=row.motion,
+        intensity=row.intensity,
+        focus=row.focus,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -93,7 +95,7 @@ def _project_out(db, row: models.VideoProject, shots=None) -> schemas.VideoProje
     )
 
 
-def _normalize_settings(raw: dict) -> dict:
+def _normalize_settings(raw: dict, *, new_project: bool = False) -> dict:
     merged = {
         "aspectRatio": "9:16",
         "voice": tts_provider.DEFAULT_VOICE,
@@ -103,6 +105,30 @@ def _normalize_settings(raw: dict) -> dict:
         "bgmVolume": 0.18,
         **(raw or {}),
     }
+    if new_project:
+        merged.setdefault("motionIntensity", 0.12)
+        merged.setdefault("motionFocus", {"x": 0.5, "y": 0.5})
+        merged.setdefault("subtitleAnimation", "fade_in")
+        merged.setdefault("imageModelId", None)
+    if "motionIntensity" in merged and (
+        not isinstance(merged["motionIntensity"], (int, float))
+        or not 0 <= float(merged["motionIntensity"]) <= 0.25
+    ):
+        raise ApiError("invalid_settings", "运镜幅度必须在 0 到 0.25 之间")
+    focus = merged.get("motionFocus")
+    if focus is not None and (
+        not isinstance(focus, dict)
+        or any(not isinstance(focus.get(axis), (int, float)) or not 0 <= float(focus[axis]) <= 1 for axis in ("x", "y"))
+    ):
+        raise ApiError("invalid_settings", "运镜焦点坐标必须在 0 到 1 之间")
+    if "subtitleAnimation" in merged and merged["subtitleAnimation"] != "fade_in":
+        raise ApiError("invalid_settings", "不支持的字幕动画")
+    image_model_id = merged.get("imageModelId")
+    if image_model_id is not None and not isinstance(image_model_id, str):
+        raise ApiError("invalid_settings", "生图模型不合法")
+    if isinstance(image_model_id, str):
+        image_model_id = image_model_id.strip()[:64]
+        merged["imageModelId"] = image_model_id or None
     if merged["aspectRatio"] not in video_render.RESOLUTIONS:
         raise ApiError("invalid_settings", "画幅只支持 9:16 / 16:9")
     try:
@@ -199,7 +225,7 @@ def create_project(body: schemas.VideoProjectCreate, user: CurrentUser, db: DbSe
         title=(body.title.strip() or source_text[:30] or "未命名视频")[:200],
         source_text=source_text,
         source_content_id=content_id,
-        settings=_normalize_settings(body.settings.dump() if body.settings else None),
+        settings=_normalize_settings(body.settings.dump() if body.settings else None, new_project=True),
         status="draft",
     )
     db.add(project)
@@ -221,7 +247,8 @@ def patch_project(project_id: str, body: schemas.VideoProjectPatch, user: Curren
         project.source_text = body.source_text
     if body.settings is not None:
         old = project.settings or {}
-        new = _normalize_settings(body.settings.dump())
+        provided = body.settings.model_dump(by_alias=True, exclude_unset=True)
+        new = _normalize_settings({**old, **provided})
         # 音色/语速变化使既有配音全部过期
         if (old.get("voice"), old.get("rate")) != (new.get("voice"), new.get("rate")):
             for shot in _shots_of(db, project.id):
@@ -288,6 +315,8 @@ def add_shot(project_id: str, body: schemas.VideoShotIn, user: CurrentUser, db: 
         narration=body.narration,
         image_prompt=body.image_prompt,
         motion=body.motion,
+        intensity=body.intensity,
+        focus=body.focus.model_dump(by_alias=True) if body.focus is not None else None,
     )
     db.add(shot)
     if project.status == "rendered":
@@ -306,6 +335,11 @@ def patch_shot(shot_id: str, body: schemas.VideoShotPatch, user: CurrentUser, db
         _touch_shots(project, shot, narration_changed=changed)
     if body.image_prompt is not None:
         shot.image_prompt = body.image_prompt
+    shot_patch = body.model_dump(exclude_unset=True)
+    if "intensity" in shot_patch:
+        shot.intensity = shot_patch["intensity"]
+    if "focus" in shot_patch:
+        shot.focus = shot_patch["focus"]
     if body.motion is not None:
         shot.motion = body.motion
     if body.image_asset_id is not None:

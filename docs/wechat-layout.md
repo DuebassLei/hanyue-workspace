@@ -61,27 +61,35 @@
     "align": "justify",        // left | justify
     "indent": 0,               // 首行缩进 em，0 为现代公众号主流
     "imageRadius": 6,          // 图片圆角 px
-    "h1Style": "bar",          // bar | block | number | center | underline | number-divider | capsule
+    "h1Style": "bar",          // bar | block | number | center | underline | number-divider | capsule | banner | margin-note | seal | lead-in | eyebrow | kicker | framed | rail
     "h2Style": "tag",          // tag | underline | plain | bar | strong | capsule | hairline
     "listMarker": "dot"        // dot | square | number | circle
   }
 }
 ```
 
-预设 10 套。前 6 套是原有风格，后 4 套对齐参考排版包的骨架（亲和 / 资讯 / 书卷 / 杂志），只搬几何和配色，不搬中文字体名（微信里无效）：
+预设 18 套。辨识度只放在标题几何、字号和配色上（中文字体名在微信里无效）。深海蓝、杂志与已有主题只差颜色，已去掉：
 
 | 预设 | 主色 | 标题样式 | 适用 |
 |---|---|---|---|
 | 墨绿简约 | `#0F6E56` | 左侧竖线 + 加粗 | 知识、职场、干货 |
-| 深海蓝 | `#185FA5` | 色块标签 | 科技、财经、分析 |
 | 暖橙生活 | `#BA7517` | 居中大字 + 短下划线 | 生活、情感、美食 |
 | 极简黑白 | `#2C2C2A` | 序号 + 细线 | 深度长文、访谈 |
 | 暖陶土 | `#D97757` | 下划线主标题 + 竖线副标题 | 工具推荐、产品测评 |
 | 商务蓝 | `#003BB3` | 大号编号 + 分割线 | 职场干货、产品教程、商业分析 |
 | 资讯 | `#1F6F5F` | 下划线主标题 + 发丝线副标题 | 快讯、评测、行业观察 |
 | 书卷 | `#9E3D30` | 居中标题 + 色条 | 人文、读书、深度长文 |
-| 杂志 | `#4A5D6E` | 居中标题、大留白 | 品牌故事、访谈、生活方式 |
 | 亲和 | `#6B5B95` | 胶囊标题、大圆角 | 教程、面向新手的解释 |
+| 手帐 | `#C4553A` | 短色块标题 + 方块列表 | 教程笔记、清单 |
+| 公文 | `#8C2F2F` | 通栏色条 + 首行缩进 | 通知、报告、政务说明 |
+| 海报 | `#1A1A1A` | 超大居中标题、大段距 | 封面导语、品牌短文 |
+| 旁注 | `#5C4B8A` | 章节号竖排在左侧窄色带 | 连载、分章长文 |
+| 印章 | `#A63D2F` | 四角断开的双线方框 | 信笺、书评、题记 |
+| 拉引 | `#1F4E46` | 细线下划线，标题后第一段放大为导语 | 开篇、特稿 |
+| 眉题 | `#8A5A2B` | 标题上方一条主色小标签 | 专栏、特稿 |
+| 题签 | `#9A3412` | 章节号单独成行，标题居中 | 连载、分章 |
+| 题框 | `#7A3E2E` | 上下两条细线夹住居中标题 | 卷首、序言 |
+| 侧栏 | `#1F6F78` | 标题贴在左侧色带上 | 观点、评论 |
 
 ### 3.2 Block：区块库
 
@@ -96,6 +104,9 @@
 | 分割线 | `---` | 居中短横线，不撑满 |
 | 强调卡 | `:::card 标题` … `:::` | `primarySoft` 底 + 圆角 + 无边框 |
 | 引导关注 | `:::follow` … `:::` | 灰底卡片，放在文末 |
+| 支持一下 | `:::support 标题 / 副标题` 每行 `动作 \| 说明` | 文末三列互动卡（点赞 / 转发 / 推荐）；微信不能放插画，图标是主色圆里的一个字 |
+| 暖心支持卡 | `:::cheer 标题 / 副标题 / 气泡` 每行 `动作 \| 说明` | 海报式复刻：爱心徽章主视觉 + 主标/副标/落款三层文案 + 三色互动卡，图标统一彩色 emoji；可选 `插图 \| {{image1}}` 放猫咪等插画正文图 |
+| 轻互动 | `:::mini-support 小标题` 每行一个 `动作` | 极简版：只留点赞 / 转发 / 推荐图标与动作名，浅底与文字色跟随主题 tokens |
 | 文末署名 | `:::sign 作者\|公众号名` … `:::` | 细分割线 + 灰字居中 |
 | 导语 | `:::lead` … `:::` | 主色短条 + 17.5px / 500 字重的开篇 |
 | 数据 | `:::stat` 每行 `数字 \| 说明` | 大号等宽数字 + 灰色说明，基线对齐 |
@@ -206,7 +217,7 @@ class WeChatTheme(Base, TimestampMixin):
 - **小组件库**：清单来自 `GET /wechat-mp/components`（后端 `LAYOUT_COMPONENTS` 注册表，新增围栏类型前端自动可见），每个组件在选中主题下渲染 `sampleBody` 真实预览 + 一键复制语法。
 - **样文预览**：编辑样文 → 选主题 → 375px 手机壳实时渲染 + 字数统计 + warnings/issues 分级展示。本页不做真实推送（推送仍在创作空间抽屉完成）。
 
-消费方联动：`useWechatPublish.allThemes` 过滤隐藏预设、收藏置顶、默认主题跟随偏好；抽屉的区块按钮同样改读注册表（7 → 10 个）；设置页写作风格的「默认排版主题」下拉改为服务端拉取（只列预设，manifest 校验不认自定义）。
+消费方联动：`useWechatPublish.allThemes` 过滤隐藏预设、收藏置顶、默认主题跟随偏好；抽屉的区块按钮同样改读注册表（7 → 13 个）；设置页写作风格的「默认排版主题」下拉改为服务端拉取（只列预设，manifest 校验不认自定义）。
 
 ## 8. 兼容性检查（Lint）
 
@@ -241,8 +252,8 @@ class WeChatTheme(Base, TimestampMixin):
 
 实现对照（P0 + P1，代码在 `apps/api/app/services/wechat_layout.py`）：
 
-- 主题：`PRESET_THEMES` 十套 + `wechat_themes` 表自定义；`normalize_tokens` 校验区间/颜色/枚举，**未知参数直接报错并列出可用项**（不静默丢弃）。
-- 区块：`parse_blocks` 支持标题三级 / 引用 / 有序无序列表 / 分割线 / 代码块 / `:::card`、`:::follow`、`:::sign`；未闭合区块按原样输出并给告警，不吞内容。
+- 主题：`PRESET_THEMES` 十八套 + `wechat_themes` 表自定义；`normalize_tokens` 校验区间/颜色/枚举，**未知参数直接报错并列出可用项**（不静默丢弃）。
+- 区块：`parse_blocks` 支持标题三级 / 引用 / 有序无序列表 / 分割线 / 代码块 / `:::card`、`:::follow`、`:::sign`、`:::cheer`；未闭合区块按原样输出并给告警，不吞内容。
 - 渲染：`render_document` 返回 `html` / `tokens` / `stats` / `warnings`；`lint_html` 单独做兼容性检查；预览与推送共用同一函数。
 - API：`GET/POST/PATCH/DELETE /wechat-mp/themes`、`POST /wechat-mp/drafts/render`；`POST /wechat-mp/drafts` 接受 `themeId` 并把 tokens 写入 `PublishJob.layout_snapshot`。
 - 前端：推送弹窗主题下拉框 + 375px `iframe[srcdoc]` 手机预览，改主题即时重渲染。

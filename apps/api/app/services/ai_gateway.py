@@ -116,7 +116,7 @@ async def stream_text(
             "event": "generation.error",
             "data": {
                 "code": "provider_unavailable",
-                "message": "尚未配置可用的模型连接与 API Key；请在「设置 → 模型连接」登记并测试通过后重试",
+                "message": "尚未配置可用的模型连接与 API Key；请在「系统 → 模型管理」登记并测试通过后重试",
                 "retryable": False,
                 "provider": "none",
                 "isPlaceholder": False,

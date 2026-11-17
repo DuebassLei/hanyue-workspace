@@ -529,7 +529,7 @@ function handleClose() {
 .publish-drawer-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--color-overlay);
   z-index: 200;
   display: flex;
   align-items: stretch;
@@ -542,7 +542,7 @@ function handleClose() {
   background: var(--color-surface);
   display: flex;
   flex-direction: column;
-  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-lg);
 }
 
 .publish-drawer-header {
@@ -554,7 +554,7 @@ function handleClose() {
 }
 
 .publish-drawer-title {
-  font-size: var(--font-base);
+  font-size: var(--font-body);
   font-weight: 700;
   color: var(--color-text-primary);
 }
@@ -716,8 +716,8 @@ function handleClose() {
 }
 
 .pub-status-chip.is-warning {
-  background: #fff4e5;
-  color: #9a6700;
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--color-warning);
 }
 
 .pub-cover-selected {
@@ -794,8 +794,8 @@ function handleClose() {
 }
 
 .pub-mini-btn-danger:hover:not(:disabled) {
-  border-color: #c0392b;
-  color: #c0392b;
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
 .pub-picker-backdrop {
@@ -806,7 +806,7 @@ function handleClose() {
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(15, 23, 42, .38);
+  background: var(--color-overlay);
 }
 
 .pub-picker {
@@ -818,7 +818,7 @@ function handleClose() {
   border: 1px solid var(--color-border);
   border-radius: 10px;
   background: var(--color-surface);
-  box-shadow: 0 16px 44px rgba(0, 0, 0, .18);
+  box-shadow: var(--shadow-lg);
 }
 
 .pub-picker-head {
@@ -930,7 +930,7 @@ function handleClose() {
   padding: 2px 5px;
   border-radius: 9px;
   background: var(--color-accent);
-  color: #fff;
+  color: var(--color-on-accent);
   font-size: 10px;
 }
 
@@ -1014,7 +1014,7 @@ function handleClose() {
   padding: 0 4px;
   border-radius: 8px;
   background: var(--color-accent);
-  color: #fff;
+  color: var(--color-on-accent);
   font-size: 10px;
   line-height: 16px;
   text-align: center;

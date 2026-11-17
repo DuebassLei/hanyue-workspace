@@ -653,7 +653,7 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  color: #d9534f;
+  color: var(--color-danger);
   padding: 0 4px;
 }
 
@@ -719,7 +719,7 @@ onBeforeUnmount(() => {
 .tbar-mode-btn.is-active {
   background: var(--color-surface);
   color: var(--color-text-primary);
-  box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  box-shadow: var(--shadow-sm);
 }
 
 /* AI 浮动菜单 */
@@ -728,9 +728,9 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 4px;
   padding: 4px 6px;
-  background: var(--color-text-primary);
+  background: var(--color-inverse-bg);
   border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,.18);
+  box-shadow: var(--shadow-lg);
 }
 
 .ai-bubble-btn {
@@ -741,29 +741,29 @@ onBeforeUnmount(() => {
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: var(--color-surface);
+  color: var(--color-inverse-fg);
   cursor: pointer;
   white-space: nowrap;
 }
 
 .ai-bubble-btn:hover {
-  background: rgba(255,255,255,.15);
+  background: var(--color-inverse-hover);
 }
 
 .ai-bubble-stop {
-  color: #fca5a5;
+  color: var(--color-inverse-danger);
 }
 
 .ai-bubble-running {
   font-size: 12px;
-  color: var(--color-surface);
+  color: var(--color-inverse-fg);
   padding: 0 4px;
   opacity: .8;
 }
 
 .ai-bubble-error {
   font-size: 11px;
-  color: #fca5a5;
+  color: var(--color-inverse-danger);
   margin-left: 4px;
 }
 
@@ -805,7 +805,7 @@ onBeforeUnmount(() => {
 :deep(.ProseMirror em) { font-style: italic; }
 :deep(.ProseMirror s) { text-decoration: line-through; opacity: .7; }
 :deep(.ProseMirror mark) {
-  background: var(--color-accent-soft, #fff3b0);
+  background: var(--color-accent-soft);
   color: inherit;
   padding: 0 2px;
   border-radius: 2px;

@@ -1,8 +1,9 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NAlert, NButton, NSpin, NStep, NSteps } from 'naive-ui'
+import { NAlert, NButton, NSelect, NSpin, NStep, NSteps } from 'naive-ui'
 import { api } from '../../api/client'
+import { providerOptions, resolveSelectedModelId } from '../../composables/imageProviders.js'
 import { toast } from '../../ui/feedback'
 import StickerIdeateStep from './StickerIdeateStep.vue'
 import StickerOutlineStep from './StickerOutlineStep.vue'
@@ -27,6 +28,10 @@ const outlineRows = ref(null)
 const busy = ref(false)
 const error = ref('')
 const loading = ref(false)
+const imageProviders = ref([])
+const imageModelId = ref('')
+const imageModelsLoading = ref(false)
+const imageModelOptions = computed(() => providerOptions(imageProviders.value))
 
 let pollTimer = null
 let pollRounds = 0
@@ -125,17 +130,32 @@ function gotoStep(target) {
 
 let booted = false
 
-/** 容器挂载时加载风格库；编辑态由父级带入 sticker（拉全量详情），新建态可带 preset */
+async function onImageModelChange(value) {
+  imageModelId.value = value
+  if (!detail.value?.id) return
+  try {
+    const updated = await api.patch(`/stickers/${detail.value.id}/image-model`, {
+      modelId: value || null,
+    })
+    detail.value = { ...detail.value, imageModelId: updated.imageModelId || null }
+  } catch (err) {
+    error.value = `生图模型保存失败：${err.message}`
+  }
+}
+
 async function boot() {
   if (booted) return
   booted = true
   loading.value = true
   error.value = ''
+  // 容器挂载时加载风格库；编辑态由父级带入 sticker（拉全量详情），新建态可带 preset
   try {
-    const [styles, full] = await Promise.all([
+    const [styles, full, providers] = await Promise.all([
       api.get('/sticker-styles'),
       props.sticker ? api.get(`/stickers/${props.sticker.id}`) : Promise.resolve(null),
+      api.get('/ai/image-provider/status').catch(() => null),
     ])
+    if (providers) imageProviders.value = providers.providers || []
     stylesData.value = styles
     if (full) {
       detail.value = full
@@ -143,6 +163,7 @@ async function boot() {
       step.value = (full.images || []).length ? 3 : 1
       if (isGenerating(full)) startPolling()
     }
+    imageModelId.value = resolveSelectedModelId(imageProviders.value, full?.imageModelId || '')
   } catch (err) {
     error.value = err.message
   } finally {
@@ -311,6 +332,21 @@ onBeforeUnmount(stopPolling)
       <span v-if="detail" class="field-hint">{{ detail.succeeded }}/{{ detail.total }} 张</span>
     </div>
 
+    <label v-if="detail" class="field wizard-model">
+      <span>生图模型</span>
+      <n-select
+        :value="imageModelId"
+        :options="imageModelOptions"
+        :loading="imageModelsLoading"
+        :disabled="busy || !imageModelOptions.length || isGenerating(detail)"
+        :consistent-menu-width="false"
+        placeholder="没有可用的生图模型"
+        aria-label="选择本集生图模型"
+        @update:value="onImageModelChange"
+      />
+      <small>{{ imageModelOptions.length ? '锚点、补图和重试都用这个模型。' : '还没有可用的生图模型。到设置里启用带生图能力的连接后再来。' }}</small>
+    </label>
+
     <n-steps :current="step" :status="stepStatus" size="small">
       <n-step title="主题与画风" @click="gotoStep(1)" />
       <n-step title="分镜方案" @click="gotoStep(2)" />
@@ -376,5 +412,16 @@ onBeforeUnmount(stopPolling)
 .wizard-back {
   border-top: 1px dashed var(--color-border);
   padding-top: var(--space-2);
+}
+.wizard-model {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 360px;
+}
+.wizard-model span,
+.wizard-model small {
+  color: var(--paper-ink-muted, var(--color-text-secondary));
+  font-size: 12px;
 }
 </style>

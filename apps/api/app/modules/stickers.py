@@ -142,6 +142,7 @@ def _set_out(
         failed=failed,
         cover_url=_signed_url(cover) if cover else None,
         anchor_desc=str((row.meta_json or {}).get("anchor_desc") or ""),
+        image_model_id=_stored_image_model_id(row),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -463,6 +464,22 @@ def put_outline(
     return _set_out(db, row, _images(db, row.id), with_images=True)
 
 
+def _stored_image_model_id(row: models.StickerSet) -> str | None:
+    """集合选定的生图模型。空值表示走环境变量 / 首个可用连接。"""
+    stored = (row.meta_json or {}).get("imageModelId")
+    return stored.strip() if isinstance(stored, str) and stored.strip() else None
+
+
+def _remember_image_model(row: models.StickerSet, model_id: str | None) -> None:
+    """记住本次选择，重试、补图和改描述重画都沿用同一模型。"""
+    meta = dict(row.meta_json or {})
+    if model_id:
+        meta["imageModelId"] = model_id
+    else:
+        meta.pop("imageModelId", None)
+    row.meta_json = meta or None
+
+
 def _job_payload(
     row: models.StickerSet, img: models.StickerImage, reference_asset_ids: list[str], chain: bool
 ) -> dict:
@@ -474,6 +491,9 @@ def _job_payload(
         "stickerSetId": row.id,
         "stickerImageId": img.id,
     }
+    model_id = _stored_image_model_id(row)
+    if model_id:
+        payload["modelId"] = model_id
     if reference_asset_ids:
         payload["referenceAssetIds"] = reference_asset_ids
     if chain:
@@ -495,6 +515,19 @@ def _enqueue_image_job(
     # 记下这一刻的文案：之后改描述但未重画时，retry 不能拿旧 payload 再跑一遍
     img.generated_prompt = img.frame_prompt
     return job_id
+
+
+@router.patch("/stickers/{set_id}/image-model", response_model=schemas.StickerSetOut)
+def set_image_model(
+    set_id: str, payload: schemas.StickerImageModelIn, user: CurrentUser, db: DbSession
+) -> schemas.StickerSetOut:
+    """选定本集生图模型。空值表示环境变量供应商，后续生成与重试都沿用。"""
+    row = _load_set(db, user, set_id)
+    if row.status == "deleted":
+        raise ApiError("invalid_transition", "已删除的贴图集不能改生图模型", status_code=409)
+    _remember_image_model(row, payload.model_id)
+    db.commit()
+    return _set_out(db, row, _images(db, row.id), with_images=True)
 
 
 @router.post("/stickers/{set_id}/generate-anchor", response_model=schemas.StickerSetOut)

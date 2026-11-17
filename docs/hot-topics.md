@@ -34,20 +34,26 @@ hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster   co
 | 知乎 | 60s 聚合 | 无 |
 | AI·热点 | AIHOT JSON（多来源报道数当热度） | 有 |
 | AI·资讯 | AIHOT JSON（24h 资讯流） | 有 |
+| AIHOT 热点与早报 | AIHOT agent Markdown（编辑过的 Top 榜，信源数当热度） | 有 |
+| AIHOT 日报 | AIHOT agent Markdown（分类早报） | 有 |
+| 微信 10w+ 爆文池 | 公开爆文快照 JSON | 有 |
+| 微信文章搜索 | 搜狗微信搜索结果页（需配置关键词） | 有（搜索结果页） |
 
 约束：
 
 - 所有出站请求走 `core/ssrf.safe_request`（仅 HTTPS、端口白名单、不跟随重定向、IP 固定）。3xx 按失败处理，避免把重定向页当 JSON 解析成空榜单。
-- **单源失败只进 `notes`**，其余源照常返回；7 路全失败才抛 `all_sources_failed`（502，`retryable=true`），不返回「0 个事件」的假成功。
-- 搜索页 URL（`/s?word=`、`/search/` 等）按「拿不到原文」处理，留空。
+- 单源失败只进 `notes`，其余源照常返回；全部源都失败才抛 `all_sources_failed`（502，`retryable=true`），不返回「0 个事件」的假成功。
+- 搜索页 URL（`/s?word=`、`/search/` 等）按「拿不到原文」处理，留空。例外是「微信文章搜索」：搜狗没有原文直链，结果页链接是唯一入口，原样保留。
 
 环境变量：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HOT_TOPICS_PLATFORMS` | 空（全部 7 路） | 逗号分隔，只跑指定平台，如 `微博,知乎` |
+| `HOT_TOPICS_PLATFORMS` | 空（全部） | 逗号分隔，只跑指定平台，如 `微博,知乎` |
 | `HOT_TOPICS_TIMEOUT` | `12` | 单次请求超时（秒，最小 3） |
 | `HOT_TOPICS_REFRESH_COOLDOWN` | `15` | 刷新冷却（秒），0 表示关闭 |
+| `HOT_TOPICS_WECHAT_10W_URL` | 内置公开快照地址 | 微信 10w+ 爆文池的 JSON 地址，快照失效时替换 |
+| `HOT_TOPICS_WECHAT_KEYWORD` | 空（跳过该源） | 微信文章搜索的关键词；不配就不搜，不会替用户决定搜什么 |
 
 ### 2.2 合并同一事件（`hot_ranking.cluster_items`）
 

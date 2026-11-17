@@ -23,3 +23,10 @@ infra/platform-evidence.json
 
 # 视频渲染 / 截图测试产物，不入库
 *.mp4
+
+# Docker 部署产物
+infra/backups/
+.idea
+
+# 本地临时输出
+apps/api/runout.txt

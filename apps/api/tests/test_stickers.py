@@ -194,6 +194,34 @@ def test_generate_anchor_enqueue_payload(client, captured_jobs):
     detail = client.get(f"/api/v1/stickers/{sid}", headers=headers).json()
     assert detail["images"][0]["status"] == "queued"
     assert detail["images"][0]["jobId"]
+    assert "modelId" not in payload
+
+
+def test_image_model_is_remembered_and_enqueued(client, captured_jobs):
+    headers = login(client)
+    sid = make_set(client, headers, styleId="minimal_tech")["id"]
+    res = client.patch(
+        f"/api/v1/stickers/{sid}/image-model",
+        json={"modelId": "img-model-1"},
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["imageModelId"] == "img-model-1"
+    client.put(f"/api/v1/stickers/{sid}/outline", json=outline(2), headers=headers)
+    captured_jobs.clear()
+    res = client.post(f"/api/v1/stickers/{sid}/generate-anchor", headers=headers)
+    assert res.status_code == 200, res.text
+    assert captured_jobs[0]["payload"]["modelId"] == "img-model-1"
+    detail = client.get(f"/api/v1/stickers/{sid}", headers=headers).json()
+    assert detail["imageModelId"] == "img-model-1"
+
+    res = client.patch(
+        f"/api/v1/stickers/{sid}/image-model",
+        json={"modelId": ""},
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["imageModelId"] is None
 
 
 def test_generate_rest_uses_anchor_reference(client, captured_jobs):

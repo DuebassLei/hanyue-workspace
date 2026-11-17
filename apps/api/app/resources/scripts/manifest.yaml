@@ -1,0 +1,97 @@
+# 定时任务类型清单（服务端唯一的任务类型数据源）。
+#
+# 维护规则：
+# 1. 想让定时任务能执行一件新事情：写一个脚本模块 + 在这里加一条声明，重启即生效。
+#    前端「新建定时任务」的类型下拉、参数表单全部由这里的 fields 自动生成，无需改前端。
+# 2. key 一旦落库就不要再改——数据库 scheduled_tasks.task_type 存的就是它。要改名等于造一条新类型。
+# 3. runner 格式「模块路径:函数名」，函数签名 run(params: dict, ctx: ScriptContext) -> dict。
+#    函数所在模块必须能被 import（相对于 app 包），加载时会校验，写错启动即报错。
+# 4. scope: system=全局数据类，全库同类只一条、默认只读由 seed 维护；user=按登录用户隔离。
+# 5. fields 是声明式参数 schema：name/type/required/default/options/min/max/description/title。
+#    type 支持 string / integer / number / boolean / array（array 需配 items: string）。
+#    与前端 SchedulesView 的控件一一对应，加字段界面就多一个控件，不用写代码。
+version: 1
+scripts:
+  - key: hot_topics.refresh
+    title: 拉取热点榜单
+    scope: system
+    queue: hot-topics
+    kind: hot_topics.refresh
+    description: 采集各平台热榜 → 合并同一事件 → 评分落库，供「热点选题」页直接使用。
+    default_cron: "0 8,12,18 * * *"
+    runner: app.scheduled_scripts.hot_topics:refresh
+    fields:
+      - name: platforms
+        title: 限定平台
+        type: array
+        items: string
+        required: false
+        nullable: true
+        default: null
+        description: 留空跑全部采集源；填了就只跑这些平台（如 微博、知乎、抖音）
+
+  - key: hot_topics.digest
+    title: 热点选题简报
+    scope: user
+    queue: topic-digest
+    kind: hot_topics.digest
+    description: 按你的赛道挑出当天高分热点整理成简报，可选直接建成草稿。只读取已有榜单，不触发采集。
+    default_cron: "30 8 * * *"
+    runner: app.scheduled_scripts.hot_topics:digest
+    fields:
+      - name: tracks
+        title: 限定赛道
+        type: array
+        items: string
+        required: false
+        nullable: true
+        default: null
+        options_from: hot_topics_tracks
+        item_label: 赛道
+        description: 留空=全部赛道；选中后只挑这些赛道的热点
+      - name: min_score
+        title: 最低分
+        type: integer
+        required: false
+        default: 60
+        min: 0
+        max: 100
+        description: 只挑评分不低于该值的热点（满分 100）
+      - name: limit
+        title: 最多几条
+        type: integer
+        required: false
+        default: 3
+        min: 1
+        max: 20
+        description: 每次最多整理几条热点
+      - name: create_drafts
+        title: 生成稿件草稿
+        type: boolean
+        required: false
+        default: true
+        description: 为每条热点在「创作」里建一篇空草稿；同名草稿已存在则跳过
+
+  # ---------------- 通用脚本示例 ----------------
+  # 这份就是「加一种定时任务」的最小范例：一个脚本函数 + 上面的声明。
+  - key: script.health_check
+    title: 健康检查（示例脚本）
+    scope: user
+    queue: script
+    kind: script.health_check
+    description: 通用脚本任务示例——按传入的参数产出一份结果摘要，验证脚本定时执行链路。
+    default_cron: "0 9 * * 1"
+    runner: app.scheduled_scripts.health_check:run
+    fields:
+      - name: label
+        title: 标记
+        type: string
+        required: false
+        default: "定时健康检查"
+        description: 写进结果摘要的自定义标记
+      - name: verbose
+        title: 详细模式
+        type: boolean
+        required: false
+        default: false
+        description: 开启后在摘要里附带更多上下文

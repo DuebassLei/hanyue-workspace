@@ -36,6 +36,6 @@ const impactLines = computed(() =>
 <style scoped>
 .novel-continue { min-width: 0; }
 .block-title { margin: 0 0 10px; font-size: 15px; }
-.warn-list, .impact ul { margin: 10px 0 0; padding-left: 18px; color: #9a6230; font-size: 13px; }
+.warn-list, .impact ul { margin: 10px 0 0; padding-left: 18px; color: var(--paper-warning); font-size: 13px; }
 .impact h3 { margin: 12px 0 0; font-size: 13px; }
 </style>

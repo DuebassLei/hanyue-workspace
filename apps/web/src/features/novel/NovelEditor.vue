@@ -66,10 +66,10 @@ const hasDraft = computed(() => Boolean(String(props.chapter?.draftText || '').t
 .editor-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .editor-head h2 { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
 .editor-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.pending-hint { margin: 8px 0 0; color: #9a6230; font-size: 13px; }
+.pending-hint { margin: 8px 0 0; color: var(--paper-warning); font-size: 13px; }
 .text-block { margin-top: 14px; min-width: 0; }
-.text-block h3 { margin: 0 0 6px; font-size: 13px; color: #5c564e; }
-.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 inherit; background: #f7f4ee; padding: 10px; max-height: 280px; overflow: auto; }
-.muted, .note { margin: 0; color: #827a71; font-size: 12px; }
+.text-block h3 { margin: 0 0 6px; font-size: 13px; color: var(--paper-ink-soft); }
+.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 inherit; background: var(--paper-sunken); padding: 10px; max-height: 280px; overflow: auto; }
+.muted, .note { margin: 0; color: var(--paper-ink-muted); font-size: 12px; }
 .note { margin-top: 6px; }
 </style>

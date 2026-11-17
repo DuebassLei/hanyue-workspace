@@ -842,7 +842,7 @@ onBeforeUnmount(() => {
               </n-button>
             </div>
           </template>
-          <p v-else-if="interrogateError" class="field-hint" style="margin: var(--space-2) 0 0; color: var(--color-danger, #d03050)">
+          <p v-else-if="interrogateError" class="field-hint" style="margin: var(--space-2) 0 0; color: var(--color-danger)">
             {{ interrogateError }}
           </p>
         </div>
@@ -1052,7 +1052,7 @@ onBeforeUnmount(() => {
               >
                 {{ interrogating ? '反推中…' : '反推提示词' }}
               </n-button>
-              <p v-if="interrogateError" class="field-hint" style="margin: 6px 0 0; color: var(--color-danger, #d03050)">
+              <p v-if="interrogateError" class="field-hint" style="margin: 6px 0 0; color: var(--color-danger)">
                 {{ interrogateError }}
               </p>
             </template>
@@ -1336,8 +1336,8 @@ onBeforeUnmount(() => {
   height: 20px;
   border: 0;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
+  background: var(--color-inverse-scrim);
+  color: var(--color-inverse-on-scrim);
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
@@ -1412,7 +1412,7 @@ onBeforeUnmount(() => {
 }
 .result-dl:hover:not(:disabled) {
   background: var(--color-accent);
-  color: #fff;
+  color: var(--color-on-accent);
 }
 .result-dl:disabled {
   cursor: default;

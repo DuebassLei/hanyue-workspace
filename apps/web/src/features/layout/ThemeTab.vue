@@ -63,6 +63,14 @@ const HEADING_LABELS = {
   underline: '下划线标题',
   'number-divider': '大号编号',
   capsule: '胶囊标题',
+  banner: '通栏色条',
+  'margin-note': '旁注色带',
+  seal: '印章方框',
+  'lead-in': '标题加导语',
+  eyebrow: '眉题小标签',
+  kicker: '题签编号',
+  framed: '上下线题框',
+  rail: '左侧色带',
   plain: '朴素质感',
   tag: '标签小标题',
   strong: '加粗小标题',
@@ -317,21 +325,21 @@ function confirmDelete(theme) {
 }
 
 .theme-card {
-  border: 1px solid var(--color-border, #e5e5e5);
-  border-radius: var(--radius-lg, 10px);
-  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   transition: border-color 0.16s, box-shadow 0.16s;
 }
 .theme-card:hover {
-  border-color: var(--color-border-strong, #cfcfcf);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.07);
+  border-color: var(--color-border-strong);
+  box-shadow: var(--shadow-md);
 }
 .theme-card.is-default {
-  border-color: var(--color-primary, #0f6e56);
-  box-shadow: 0 0 0 1px var(--color-primary, #0f6e56) inset;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent) inset;
 }
 .theme-card.is-hidden {
   opacity: 0.5;
@@ -349,7 +357,7 @@ function confirmDelete(theme) {
   line-height: 0;
 }
 .theme-thumb-btn:focus-visible {
-  outline: 2px solid var(--color-primary, #0f6e56);
+  outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
 .theme-default-badge,
@@ -364,13 +372,13 @@ function confirmDelete(theme) {
   letter-spacing: 0;
 }
 .theme-default-badge {
-  background: var(--color-primary, #0f6e56);
-  color: #fff;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
   font-weight: 600;
 }
 .theme-hover-tip {
-  background: rgba(0, 0, 0, 0.62);
-  color: #fff;
+  background: var(--color-inverse-scrim-strong);
+  color: var(--color-inverse-on-scrim);
   opacity: 0;
   transition: opacity 0.16s;
 }
@@ -398,7 +406,7 @@ function confirmDelete(theme) {
 }
 .theme-origin-tag {
   font-size: 10px;
-  color: var(--color-text-secondary, #888);
+  color: var(--color-text-secondary);
 }
 .theme-icon-btn {
   border: none;
@@ -406,32 +414,32 @@ function confirmDelete(theme) {
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
-  color: var(--color-text-secondary, #999);
+  color: var(--color-text-secondary);
   padding: 2px 4px;
   border-radius: 5px;
 }
 .theme-icon-btn:hover {
-  background: var(--color-surface-raised, #f3f3f3);
+  background: var(--color-surface-raised);
 }
 .theme-icon-btn:focus-visible {
-  outline: 2px solid var(--color-primary, #0f6e56);
+  outline: 2px solid var(--color-accent);
   outline-offset: 1px;
 }
 .theme-icon-btn.is-on {
-  color: var(--color-warning, #ba7517);
+  color: var(--color-warning);
 }
 .theme-desc {
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--color-text-secondary, #888);
+  color: var(--color-text-secondary);
 }
 .theme-meta {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 11px;
-  color: var(--color-text-tertiary, #aaa);
+  color: var(--color-text-tertiary);
 }
 .theme-meta-item {
   flex: 1;
@@ -444,7 +452,7 @@ function confirmDelete(theme) {
   width: 10px;
   height: 10px;
   border-radius: 999px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--color-border);
   flex: none;
 }
 .theme-dot.is-soft {
@@ -459,9 +467,9 @@ function confirmDelete(theme) {
 }
 .theme-empty-hint {
   font-size: 13px;
-  color: var(--color-text-secondary, #888);
-  border: 1px dashed var(--color-border, #ddd);
-  border-radius: var(--radius-md, 8px);
+  color: var(--color-text-secondary);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
   padding: 18px;
 }
 

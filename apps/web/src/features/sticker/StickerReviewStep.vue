@@ -22,7 +22,7 @@ const emit = defineEmits([
 
 // 生图错误码 → 人话。映射不到的原样显示，方便按 errorCode 去查供应商日志。
 const ERROR_TEXT = {
-  provider_unavailable: '生图供应商未配置或已失效，请到「设置」检查模型连接',
+  provider_unavailable: '生图供应商未配置或已失效，请到「模型管理」检查模型连接',
   provider_timeout: '生图超时，上游太忙，稍后重试这张',
   provider_error: '生图服务返回错误，可先重试这张',
   content_policy_violation: '画面描述被安全策略拒绝，改描得更中性些再重试',

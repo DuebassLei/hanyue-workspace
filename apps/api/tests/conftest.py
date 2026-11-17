@@ -20,6 +20,10 @@ TEST_DB_PATH = _TMP_ROOT / "test.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH.as_posix()}"
 os.environ["STORAGE_DIR"] = (_TMP_ROOT / "storage").as_posix()
 os.environ["SECRET_KEY"] = "test-secret"
+# 定时调度器在测试里不启动：TestClient 的 lifespan 跑在 anyio 的门程里，
+# AsyncIOScheduler 绑定的事件循环并不是真正在跑的那个，装进去只会制造噪音。
+# 调度语义（CAS / 并发 / 对账）在 test_scheduled_tasks.py 里直接调服务层函数测。
+os.environ["SCHEDULER_ENABLED"] = "false"
 atexit.register(lambda: shutil.rmtree(_TMP_ROOT, ignore_errors=True))
 
 # 这些用例验证的是 Agent 工具链，不是 AI 网关本身。

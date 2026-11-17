@@ -596,7 +596,7 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 .handdraw-groups .tag-accent {
-  background: var(--color-accent-soft, rgba(124, 93, 250, 0.14));
+  background: var(--color-accent-soft);
 }
 .style-grid.is-busy {
   opacity: 0.6;
@@ -621,8 +621,8 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 .style-card.is-active {
-  border-color: var(--color-accent, #7c5dfa);
-  box-shadow: 0 0 0 1px var(--color-accent, #7c5dfa);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
 }
 .style-thumb {
   display: flex;
@@ -733,8 +733,8 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 .color-dot.is-active {
-  border-color: var(--color-accent, #7c5dfa);
-  box-shadow: 0 0 0 2px var(--color-accent, #7c5dfa);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent);
 }
 .color-dot img,
 .color-dot-fallback {
@@ -768,7 +768,7 @@ onBeforeUnmount(() => {
   overflow: auto;
   padding: var(--space-2);
   border-radius: var(--radius-sm);
-  background: var(--color-surface-muted, rgba(0, 0, 0, 0.04));
+  background: var(--color-surface-muted);
   font-size: var(--font-sm);
   line-height: 1.6;
   white-space: pre-wrap;
@@ -780,7 +780,7 @@ onBeforeUnmount(() => {
   color: var(--color-text-secondary);
 }
 .attribution a {
-  color: var(--color-accent, #7c5dfa);
+  color: var(--color-accent);
 }
 @media (max-width: 1023px) {
   .handdraw-layout {

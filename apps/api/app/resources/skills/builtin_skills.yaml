@@ -85,7 +85,7 @@ skills:
 
   # ---------------- 写作风格 ----------------
   - key: style-tech-article
-    version: "1.0.0"
+    version: "1.1.0"
     name: 科技数码·实测派
     description: 好选题加事实讲透，作者在场却不表演
     category: style
@@ -103,10 +103,10 @@ skills:
         - 少用段末钩子，不写「接下来我们看」
         - 产品名首次出现后保持英文
         - 禁「重大突破」等无证据断言
-      defaultTheme: deep-blue
+      defaultTheme: blue-business
 
   - key: style-news-and-gov
-    version: "1.0.0"
+    version: "1.1.0"
     name: 资讯政务·核实派
     description: 准优先于快，作者隐身，事实即威信
     category: style
@@ -125,7 +125,7 @@ skills:
         - 未核实信息注明出处并标明未定
         - 感叹号仅限引用官方通报原文
         - 敏感人脸与遗体画面必须处理
-      defaultTheme: deep-blue
+      defaultTheme: dispatch
 
   - key: style-culture-emotion
     version: "1.0.0"
@@ -149,7 +149,7 @@ skills:
       defaultTheme: warm-orange
 
   - key: style-finance-analysis
-    version: "1.0.0"
+    version: "1.1.0"
     name: 财经财富·判断派
     description: 一手数据，敢下判断，明说前提
     category: style
@@ -167,7 +167,7 @@ skills:
         - 禁荐股荐基与稳赚不赔承诺
         - 禁改数据轴或掐头去尾造错觉
         - 不写「未来可期」「值得关注」空话
-      defaultTheme: deep-blue
+      defaultTheme: blue-business
 
   - key: style-knowledge-popsci
     version: "1.0.0"

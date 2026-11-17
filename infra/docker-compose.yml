@@ -1,35 +1,92 @@
+# 生产部署编排：web(nginx) → api(FastAPI) → db(PostgreSQL 16) + redis(队列) + worker(消费者)
+#
+# 首次部署：cp .env.example .env 并填写 SECRET_KEY / POSTGRES_PASSWORD，
+#          然后 ./scripts/deploy.sh up（等价于 docker compose up -d --build）
+# 完整说明见 docs/docker-deploy.md
+#
+# 对外只暴露 web（WEB_PORT，默认 8080）；api 仅绑定 127.0.0.1（API_PORT）供宿主机调试。
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# 国内网络可用 PIP_INDEX_URL / APT_MIRROR 走镜像源，留空则为官方源
+# （api 与 worker 共用：两者都要装 ffmpeg/字体，apt 阶段最容易卡住）
+x-pip-build-args: &pip-build-args
+  PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+  APT_MIRROR: ${APT_MIRROR:-}
+
+# api 与 worker 必须共享同一份配置：模型、队列、存储、凭据任一不一致都会导致
+# 「接口能创建任务但 worker 执行失败」这类难查的问题，因此用锚点统一注入。
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hanyue}:${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hanyue}
+  SECRET_KEY: ${SECRET_KEY:?请在 infra/.env 设置至少 32 字符的随机 SECRET_KEY}
+  ENVIRONMENT: production
+  # 生产必须关闭任意 subject 换 token 的开发登录入口
+  ALLOW_DEV_LOGIN: "false"
+  STORAGE_DIR: /data/storage
+  REDIS_URL: redis://redis:6379/0
+  TZ: ${TZ:-Asia/Shanghai}
+  # 浏览器经 nginx 同源访问，一般用不到 CORS；仅在直连 API 域名时才需要改
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+  # Phase 0 核验证据；内容为空时全部平台保持 confirmed=False
+  PLATFORM_EVIDENCE_FILE: /data/config/platform-evidence.json
+  # AI 生图供应商；在 infra/.env 中填齐三个值即可启用（留空为未配置）
+  IMAGE_PROVIDER_BASE_URL: ${IMAGE_PROVIDER_BASE_URL:-}
+  IMAGE_PROVIDER_API_KEY: ${IMAGE_PROVIDER_API_KEY:-}
+  IMAGE_PROVIDER_MODEL: ${IMAGE_PROVIDER_MODEL:-}
+  # 公众号草稿箱（AppID/AppSecret，非 OAuth）；留空则该能力按未配置处理
+  WECHAT_MP_APPID: ${WECHAT_MP_APPID:-}
+  WECHAT_MP_APPSECRET: ${WECHAT_MP_APPSECRET:-}
+  WECHAT_MP_AUTHOR: ${WECHAT_MP_AUTHOR:-}
+  WECHAT_MP_API_BASE: ${WECHAT_MP_API_BASE:-}
+  WECHAT_MP_NEED_OPEN_COMMENT: ${WECHAT_MP_NEED_OPEN_COMMENT:-}
+  WECHAT_MP_ONLY_FANS_CAN_COMMENT: ${WECHAT_MP_ONLY_FANS_CAN_COMMENT:-}
+
+x-app-volumes: &app-volumes
+  - storage:/data/storage
+  - ./platform-evidence.json:/data/config/platform-evidence.json:ro
+
 services:
+  # ── 对外入口：静态前端 + /api 反代 ─────────────────────────────
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+        APK_MIRROR: ${APK_MIRROR:-}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    volumes:
+      # 反代配置外挂：改 upstream 超时/上传上限只需 nginx -s reload，不必重建镜像
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── API ────────────────────────────────────────────────────────
   api:
     build:
       context: ../apps/api
       dockerfile: Dockerfile
-    environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hanyue}:${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hanyue}
-      SECRET_KEY: ${SECRET_KEY:?请在 infra/.env 设置至少 32 字符的随机 SECRET_KEY}
-      ENVIRONMENT: production
-      # 生产必须关闭任意 subject 换 token 的开发登录入口
-      ALLOW_DEV_LOGIN: "false"
-      STORAGE_DIR: /data/storage
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
-      REDIS_URL: redis://redis:6379/0
-      # Phase 0 核验证据；内容为空时全部平台保持 confirmed=False
-      PLATFORM_EVIDENCE_FILE: /data/config/platform-evidence.json
-      # AI 生图供应商；在 infra/.env 或 shell 中导出这三个值即可启用（留空为未配置）
-      IMAGE_PROVIDER_BASE_URL: ${IMAGE_PROVIDER_BASE_URL:-}
-      IMAGE_PROVIDER_API_KEY: ${IMAGE_PROVIDER_API_KEY:-}
-      IMAGE_PROVIDER_MODEL: ${IMAGE_PROVIDER_MODEL:-}
-      # 公众号草稿箱（AppID/AppSecret，非 OAuth）；留空则该能力按未配置处理
-      WECHAT_MP_APPID: ${WECHAT_MP_APPID:-}
-      WECHAT_MP_APPSECRET: ${WECHAT_MP_APPSECRET:-}
-      WECHAT_MP_AUTHOR: ${WECHAT_MP_AUTHOR:-}
-      WECHAT_MP_API_BASE: ${WECHAT_MP_API_BASE:-}
-      WECHAT_MP_NEED_OPEN_COMMENT: ${WECHAT_MP_NEED_OPEN_COMMENT:-}
-      WECHAT_MP_ONLY_FANS_CAN_COMMENT: ${WECHAT_MP_ONLY_FANS_CAN_COMMENT:-}
+      args: *pip-build-args
+    environment: *app-env
     ports:
-      - "8000:8000"
-    volumes:
-      - storage:/data/storage
-      - ./platform-evidence.json:/data/config/platform-evidence.json:ro
+      # 只绑回环：公网流量必须经 web 进来，避免绕过 nginx 的限流/超时策略
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes: *app-volumes
     depends_on:
       db:
         condition: service_healthy
@@ -38,36 +95,25 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
       interval: 10s
+      timeout: 5s
       retries: 10
+      # 首次启动要 create_all + 补列迁移 + 内置 Skill 同步，给足冷启动时间
+      start_period: 40s
+    init: true
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
+    logging: *default-logging
 
+  # ── 队列消费者 ─────────────────────────────────────────────────
   worker:
     build:
       context: ..
       dockerfile: apps/worker/Dockerfile
+      args: *pip-build-args
     command: ["python", "worker.py"]
-    environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hanyue}:${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hanyue}
-      SECRET_KEY: ${SECRET_KEY:?请在 infra/.env 设置至少 32 字符的随机 SECRET_KEY}
-      ENVIRONMENT: production
-      ALLOW_DEV_LOGIN: "false"
-      STORAGE_DIR: /data/storage
-      REDIS_URL: redis://redis:6379/0
-      # 生图任务由 worker 执行，必须与 api 拿到同一份供应商配置与能力证据
-      IMAGE_PROVIDER_BASE_URL: ${IMAGE_PROVIDER_BASE_URL:-}
-      IMAGE_PROVIDER_API_KEY: ${IMAGE_PROVIDER_API_KEY:-}
-      IMAGE_PROVIDER_MODEL: ${IMAGE_PROVIDER_MODEL:-}
-      PLATFORM_EVIDENCE_FILE: /data/config/platform-evidence.json
-      # 草稿推送任务由 worker 执行，必须与 api 拿到同一份公众号凭据
-      WECHAT_MP_APPID: ${WECHAT_MP_APPID:-}
-      WECHAT_MP_APPSECRET: ${WECHAT_MP_APPSECRET:-}
-      WECHAT_MP_AUTHOR: ${WECHAT_MP_AUTHOR:-}
-      WECHAT_MP_API_BASE: ${WECHAT_MP_API_BASE:-}
-      WECHAT_MP_NEED_OPEN_COMMENT: ${WECHAT_MP_NEED_OPEN_COMMENT:-}
-      WECHAT_MP_ONLY_FANS_CAN_COMMENT: ${WECHAT_MP_ONLY_FANS_CAN_COMMENT:-}
-    volumes:
-      - storage:/data/storage
-      - ./platform-evidence.json:/data/config/platform-evidence.json:ro
+    environment: *app-env
+    volumes: *app-volumes
     depends_on:
       db:
         condition: service_healthy
@@ -76,33 +122,51 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import os,redis,sys; c=redis.Redis.from_url(os.environ['REDIS_URL']); sys.exit(0 if c.get('hanyue:worker:heartbeat') else 1)"]
       interval: 10s
+      timeout: 5s
       retries: 10
+      start_period: 30s
+    init: true
+    # 长任务（视频渲染、批量生图）需要时间收尾，避免一 stop 就丢任务现场
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
+    logging: *default-logging
 
+  # ── 队列 ───────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--save", "900", "1"]
     volumes:
       - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
+      timeout: 3s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
+  # ── 数据库 ─────────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hanyue}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-hanyue}
+      # 官方镜像默认即为 UTF8；不要额外指定 --locale，alpine 版可能缺对应 locale 导致 initdb 失败
+      TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hanyue}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hanyue} -d ${POSTGRES_DB:-hanyue}"]
       interval: 5s
+      timeout: 3s
       retries: 10
+      # 首次 initdb 需要几秒，避免被提前判定失败
+      start_period: 20s
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   pgdata:

@@ -9,7 +9,7 @@
 | 层 | 选型 |
 |---|---|
 | 前端 | Vue 3 + Vite + Pinia + Vue Router |
-| 后端 | FastAPI + SQLAlchemy 2 + Pydantic v2（16 个路由模块 / 14 个领域服务） |
+| 后端 | FastAPI + SQLAlchemy 2 + Pydantic v2（27 个路由模块 / 33 个领域服务） |
 | 数据库 | 默认 SQLite（开发）；`DATABASE_URL` 可切 PostgreSQL |
 | 队列 | Redis + `apps/worker/worker.py`；未配置 Redis 时回退 API 内置线程池，两种后端共用 `job_runner`，任务状态都落 `background_jobs` 表 |
 | 图像 | Pillow 基础处理（同步小图 / 队列大图）+ 配置驱动的 AI 生图适配器 |
@@ -20,11 +20,11 @@
 ```text
 hanyue-workspace/
 ├── apps/
-│   ├── web/        Vue 3 前端（7 个页面：总览/日历/创作/图文卡片/素材/发布/设置）
+│   ├── web/        Vue 3 前端（20 个页面：总览/热点选题/定时任务/日历/创作/图文卡片/素材/发布/设置…）
 │   ├── api/        FastAPI 后端（modules / services / connectors / core + 测试）
 │   └── worker/     Redis 队列消费者（复用 API 的领域服务）
 ├── docs/           design.md（设计说明书）、plan.md（实施计划）、setup.md（启动与配置手册）
-└── infra/          docker-compose.yml、platform-evidence.json、示例证据文件
+└── infra/          docker-compose.yml、nginx/、scripts/（部署·备份·迁移）、platform-evidence.json
 ```
 
 ## 启动方式
@@ -75,27 +75,45 @@ cd apps/api
 
 Worker 启动时会重投「已入队但未开始」的任务实现断线恢复；未配 `REDIS_URL` 时它会明确提示无需启动，不会假装消费。
 
-### C. Docker Compose（api + worker + redis + postgres）
+### C. Docker Compose（web + api + worker + redis + postgres）
 
 ```bash
 cd infra
-cp .env.example .env            # 然后填入 SECRET_KEY 与 POSTGRES_PASSWORD
-docker compose config          # 校验配置与变量替换
-docker compose up -d --build
-docker compose ps               # 四个服务应为 healthy
-docker compose logs -f worker   # 观察消费者
-docker compose down             # 停止（数据卷保留）
+./scripts/deploy.sh doctor      # 环境自检：daemon / compose v2 / 内存磁盘 / 端口 / 配置
+./scripts/deploy.sh init-env    # 生成 .env（随机 SECRET_KEY / POSTGRES_PASSWORD）+ 证据文件
+./scripts/deploy.sh up          # 构建并启动，等 api 健康后打印地址
+./scripts/deploy.sh ps          # 五个服务应全部 healthy
+./scripts/deploy.sh logs worker # 观察消费者
+./scripts/deploy.sh down        # 停止（数据卷保留）
 ```
 
-`SECRET_KEY`（≥32 字符随机值）与 `POSTGRES_PASSWORD` 用 `${VAR:?}` 强制注入，未填写时 compose 直接报错而非用弱默认值启动；compose 同时设 `ENVIRONMENT=production` / `ALLOW_DEV_LOGIN=false`，后端启动门禁会再次校验。镜像以非 root 用户运行，api 检查 `/health`、worker 检查 Redis 心跳，四个服务均为 `restart: unless-stopped`。
+Docker 装在 WSL Ubuntu 里（无 Docker Desktop）时，daemon 需手动启动、compose v2 需单独安装，
+见 `docs/docker-deploy.md` 附录「在 WSL2（原生 Docker Engine）里跑」。
+
+**2 核 2G 的机器能正常跑**：空载约 500–650 MB，`deploy.sh` 检测到物理内存 < 3 GB 会自动叠加
+`infra/docker-compose.lowmem.yml`（PG/Redis 参数收紧 + 容器内存上限）。镜像在打包机构建后
+`./scripts/deploy.sh save-images` → 目标机 `docker load` + `up -d --no-build` 即可，目标机不承担构建。
+细节见 `docs/docker-deploy.md` §2.3。
+
+对外只暴露 `web`（`WEB_PORT`，默认 8080）：nginx 托管 Vue 构建产物并把 `/api` 反代到 `api:8000`；`api` 仅绑定 `127.0.0.1:API_PORT` 供宿主机调试。不用脚本时等价于 `cp .env.example .env && docker compose up -d --build`。
+
+`SECRET_KEY`（≥32 字符随机值）与 `POSTGRES_PASSWORD` 用 `${VAR:?}` 强制注入，未填写时 compose 直接报错而非用弱默认值启动；compose 同时设 `ENVIRONMENT=production` / `ALLOW_DEV_LOGIN=false`，后端启动门禁会再次校验。镜像以非 root 用户运行，api 检查 `/health`、worker 检查 Redis 心跳、web 检查 `/healthz`，五个服务均为 `restart: unless-stopped`。
 
 镜像同时安装 `requirements.txt` 与 `requirements-prod.txt`（含 `psycopg[binary]` 与 `redis`），`postgresql+psycopg://` 连接串可直接工作；`worker` 服务运行真正的 `worker.py`。compose 变量替换读取 `infra/.env`，AI 生图凭据请写在这里（见下节）。
+
+发版、备份恢复、SQLite → PostgreSQL 数据迁移与排障见 **`docs/docker-deploy.md`**：
+
+```bash
+./scripts/deploy.sh backup                   # pg_dump + storage 卷快照
+./scripts/deploy.sh restore backups/db-xxx.dump
+./scripts/deploy.sh migrate --dry-run        # 本地 hanyue.db → 容器内 PG
+```
 
 ### 验证与测试
 
 ```bash
 cd apps/api
-./.venv/Scripts/python.exe -m pytest -q                  # 当前 174 passed
+./.venv/Scripts/python.exe -m pytest -q                  # 当前 484 passed
 ./.venv/Scripts/python.exe -m compileall -q app
 cd ../web && npm run build                               # 前端构建
 ```
@@ -111,7 +129,7 @@ cd ../web && npm run build                               # 前端构建
 | 方式 | 操作 | 特点 |
 |---|---|---|
 | **1. 环境变量**（推荐给部署） | 三个变量必须同时填写 | 全局生效、重启进程后载入；适合容器与 CI |
-| **2. 设置页登记模型能力** | 设置 → 模型连接 → 新增/编辑，把「能力」写成含 `image.generate` | 按用户隔离、密钥服务端加密、界面即时生效；无需重启 |
+| **2. 模型管理登记模型能力** | 系统 → 模型管理 → 「生图模型」栏 → 添加生图模型，填好连接与模型代号 | 按用户隔离、密钥服务端加密、界面即时生效；能力随「生图模型」类型自动登记 `image.generate`，无需重启 |
 
 **方式 1 — 本地**：写入 `apps/api/.env` 后**重启后端**（配置在进程启动时载入，改文件不会热更新）。
 
@@ -148,7 +166,7 @@ cd infra && docker compose up -d --build
 | 请求体 | `model` / `prompt` / `n`(1~4) / `size` / `response_format=b64_json` |
 | 响应 | `{"data":[{"b64_json":"..."}]}` 或 `{"data":[{"url":"https://..."}]}`（OpenAI 兼容格式） |
 | 图片限制 | Pillow 校验为有效图片，≤ 20 MB、≤ 1600 万像素 |
-| 网络安全 | 必须公网 HTTPS；SSRF 防护拒绝 `http://`、`localhost`、内网 IP、云元数据地址，并对 3xx 每一跳重新校验 |
+| 网络安全 | 公网必须 HTTPS；SSRF 防护拒绝公网 `http://`、内网 IP、云元数据地址，并对 3xx 每一跳重新校验。本机环回地址（`localhost` / `127.0.0.1` / `::1`）允许 HTTP 与任意端口 |
 
 ### 验证是否生效
 
@@ -280,7 +298,7 @@ WECHAT_MP_AUTHOR=                # 可选，草稿默认署名
 
 | 能力 | 说明 |
 |---|---|
-| 预设主题 | `ink-green`（墨绿简约）、`deep-blue`（深海蓝）、`warm-orange`（暖橙生活）、`mono`（极简黑白），`GET /wechat-mp/themes` 一次返回 |
+| 预设主题 | `ink-green`（墨绿简约）、`warm-orange`（暖橙生活）、`mono`（极简黑白）、`blue-business`（商务蓝）、`notebook`（手帐）、`dispatch`（公文）、`poster`（海报）、`margin-note`（旁注）、`seal`（印章）、`lead-in`（拉引）、`eyebrow`（眉题）、`kicker`（题签）、`framed`（题框）、`rail`（侧栏）等 18 套，`GET /wechat-mp/themes` 一次返回 |
 | 自定义主题 | `POST/PATCH/DELETE /wechat-mp/themes`；可调字号、行高、字距、段距、对齐、首行缩进、圆角、标题样式、列表符号与配色 |
 | 参数校验 | 数值有上下界、颜色只收 `#rrggbb`/`rgba()`、枚举值固定；**拼错或不存在的参数直接 422 并列出可用参数**，不会静默忽略让你以为生效了 |
 | 正文语法 | `#` / `##` / `###` 标题、`> ` 引用、`- ` 与 `1. ` 列表、`---` 分割线、代码块、`:::card` 强调卡、`:::follow` 关注引导、`:::sign` 署名、`{{image1\|图注}}` 插图 |
@@ -395,6 +413,10 @@ OAuth 平台的令牌验证端点按官方文档**显式配置**（`PLATFORM_<�
 | `HOT_TOPICS_TIMEOUT` | `12` | 热点单源请求超时（秒，最小 3） |
 | `HOT_TOPICS_REFRESH_COOLDOWN` | `15` | 热点刷新冷却（秒），0 表示关闭 |
 | `HOT_TOPICS_API_URL` | 空 | 旧版单源热点接口；仅当库中没有任何评分事件时回落使用 |
+| `SCHEDULER_ENABLED` | `true` | 定时调度器总开关；`false` 时不装载（接口与表照常可用，用于排障） |
+| `SCHEDULER_MISFIRE_GRACE` | `300` | 错过触发点的宽限秒数（默认值，单个任务可覆盖），超过即记 `missed` 不补跑 |
+| `SCHEDULER_MAX_CONSECUTIVE_FAILURES` | `3` | 连续失败多少次自动暂停任务，`0` 表示不自动暂停 |
+| `SCHEDULER_SYSTEM_WRITE` | `dev` | system 级任务写权限：`dev`（仅开发态可改）/ `any` / `never`（只读，由 seed 维护） |
 | `PLATFORM_REDIRECT_BASE` | `http://localhost:5173` | 官方 OAuth 回调基址 |
 | `PLATFORM_<CODE>_CLIENT_ID/SECRET/AUTH_URL/TOKEN_URL/API_BASE/SCOPES` | 空 | 逐平台 OAuth 应用配置 |
 | `WECHAT_MP_APPID` | 空 | 公众号 AppID；与 Secret 同时存在才启用草稿箱 |

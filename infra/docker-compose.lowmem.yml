@@ -1,0 +1,89 @@
+# 小内存档（2 核 2G 级机器）
+#
+# 用法：deploy.sh 会在检测到物理内存 < 3GB 时自动叠加本文件；
+#       也可手动：docker compose -f docker-compose.yml -f docker-compose.lowmem.yml up -d
+#       强制启用：LOWMEM=1 ./scripts/deploy.sh up      关闭：LOWMEM=0 ./scripts/deploy.sh up
+#
+# 做的事：把 PG / Redis 的默认内存放大收掉，给每个容器加上限，
+# 避免 2G 机器上「某一个服务把整机内存吃光 → OOM killer 随机杀进程」。
+# 代价：并发能力下降（PG 连接数、Redis 上限、并行查询全部向单机小流量对齐）。
+
+services:
+  # ── PostgreSQL：默认 shared_buffers=128MB 但 work_mem/max_connections 按服务器档给，
+  #    10 个连接各做一次排序就可能顶到上限。这里全部按 2G 预算重算。
+  db:
+    command:
+      - postgres
+      - -c
+      - shared_buffers=160MB
+      - -c
+      # 每个排序/哈希节点可用内存；设大了并发几条就爆，设小了落盘但能活
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - effective_cache_size=448MB
+      - -c
+      # 默认 100 个连接 × 每连接数 MB 的私有内存，2G 机器用不到这么多
+      - -c
+      - max_connections=40
+      - -c
+      - wal_buffers=8MB
+      - -c
+      - max_wal_size=512MB
+      - -c
+      - min_wal_size=128MB
+      # 2 核上 JIT 编译的收益抵不上它的内存和启动开销
+      - -c
+      - jit=off
+      - -c
+      # 并行 worker 在 2 核上只会和 api/worker 抢 CPU
+      - -c
+      - max_parallel_workers_per_gather=1
+      - -c
+      - max_parallel_workers=2
+      - -c
+      - max_worker_processes=4
+    shm_size: 256mb
+    mem_limit: 512m
+
+  # ── Redis：这是任务队列，不能淘汰任务。
+  #    noeviction 下写满会直接报错（任务入队失败，界面能看到），
+  #    而 allkeys-lru 会静默丢队列里的 job —— 后者更糟。
+  redis:
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --save
+      - "900"
+      - "1"
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - noeviction
+      # AOF 重写时子进程会复制一份数据，2G 机器上压低触发频率
+      - --auto-aof-rewrite-percentage
+      - "200"
+      - --auto-aof-rewrite-min-size
+      - 128mb
+    mem_limit: 160m
+
+  # ── API：实测空载约 110–180MB，512m 足够；主要防导出/批量任务时失控
+  api:
+    environment:
+      # glibc 每线程一个 arena，多线程服务会虚增 RSS；2 个够用
+      MALLOC_ARENA_MAX: "2"
+    mem_limit: 512m
+
+  # ── Worker：唯一会跑 ffmpeg 的服务。
+  #    实测 1080×1920 单条成片 ffmpeg 峰值 440MB（2 线程）+ Python 侧约 150MB，
+  #    896m 是「单条渲染不 OOM、又不会把整机吃光」的折中。
+  worker:
+    environment:
+      MALLOC_ARENA_MAX: "2"
+    mem_limit: 896m
+
+  # ── 静态站点：nginx 空载 10–30MB
+  web:
+    mem_limit: 96m

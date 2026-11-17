@@ -88,7 +88,7 @@ const swatch = {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-text-primary) 12%, transparent);
 }
 
 .accent-check {

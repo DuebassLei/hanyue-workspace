@@ -4,6 +4,7 @@ import hashlib
 import mimetypes
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, File, Form, Query, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -30,6 +31,26 @@ _FORMAT_MIME = {
     "gif": "image/gif",
     "bmp": "image/bmp",
 }
+
+_MEDIA_PREFIX = {
+    "image": "image/",
+    "video": "video/",
+    "audio": "audio/",
+}
+
+
+def _apply_mime_filter(stmt, fmt: str | None):
+    """format 既接受 png/jpeg 这类精确格式，也接受 image/video/audio 媒体大类。"""
+    token = (fmt or "").strip().lower()
+    if not token:
+        return stmt
+    prefix = _MEDIA_PREFIX.get(token)
+    if prefix:
+        return stmt.where(models.Asset.mime_type.startswith(prefix))
+    mime = _FORMAT_MIME.get(token)
+    if mime:
+        return stmt.where(models.Asset.mime_type == mime)
+    return stmt
 
 
 def _asset_out(asset: models.Asset) -> schemas.AssetOut:
@@ -66,6 +87,7 @@ def list_assets(
     q: str | None = Query(default=None, max_length=100),
     source_type: str | None = Query(default=None, alias="sourceType"),
     fmt: str | None = Query(default=None, alias="format"),
+    media_type: Literal["image", "video", "audio"] | None = Query(default=None, alias="mediaType"),
     days: int | None = Query(default=None, ge=1, le=3650),
 ) -> list[schemas.AssetOut]:
     stmt = select(models.Asset).where(models.Asset.owner_user_id == user.id)
@@ -82,9 +104,9 @@ def list_assets(
         )
     if source_type:
         stmt = stmt.where(models.Asset.source_type == source_type)
-    mime = _FORMAT_MIME.get((fmt or "").lower())
-    if mime:
-        stmt = stmt.where(models.Asset.mime_type == mime)
+    stmt = _apply_mime_filter(stmt, fmt)
+    if media_type:
+        stmt = stmt.where(models.Asset.mime_type.startswith(_MEDIA_PREFIX[media_type]))
     if days:
         since = datetime.now(timezone.utc) - timedelta(days=days)
         stmt = stmt.where(models.Asset.created_at >= since)

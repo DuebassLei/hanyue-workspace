@@ -257,7 +257,7 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
           <p class="page-sub">已配置 {{ fmt(data.aiStatus.modelConnections) }} 个模型连接。{{ data.aiStatus.note }}</p>
         </div>
         <div class="ai-status"><span class="status-dot" /> {{ fmt(data.aiStatus.modelConnections) }} 个模型连接</div>
-        <RouterLink v-slot="{ navigate }" custom :to="{ name: 'settings' }">
+        <RouterLink v-slot="{ navigate }" custom :to="{ name: 'models' }">
           <n-button secondary size="small" @click="navigate">配置模型 →</n-button>
         </RouterLink>
       </section>

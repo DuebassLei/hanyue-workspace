@@ -175,7 +175,7 @@ def test_builtin_writing_styles_seeded(client):
     assert all(s["source"] == "builtin" for s in styles)
     assert {
         s["manifest"]["defaultTheme"] for s in styles
-    } <= {"ink-green", "deep-blue", "warm-orange", "mono"}
+    } <= {"ink-green", "warm-orange", "mono", "blue-business", "dispatch"}
     for style in styles:
         manifest = style["manifest"]
         assert manifest["tone"]
@@ -521,7 +521,7 @@ def test_customize_builtin_style_creates_personal_fork(client):
         f"/api/v1/skills/{builtin['id']}/customize",
         json={
             "displayName": "科技数码·实测派（我的版本）",
-            "manifest": {"tone": "更口语化", "defaultTheme": "deep-blue"},
+            "manifest": {"tone": "更口语化", "defaultTheme": "blue-business"},
         },
         headers=headers,
     )
@@ -542,7 +542,7 @@ def test_customize_builtin_style_creates_personal_fork(client):
     # 副本可通过 PUT 继续修改
     updated = client.put(
         f"/api/v1/skills/{fork['id']}",
-        json={"manifest": {"tone": "再口语一点", "defaultTheme": "deep-blue"}},
+        json={"manifest": {"tone": "再口语一点", "defaultTheme": "blue-business"}},
         headers=headers,
     )
     assert updated.status_code == 200
@@ -746,6 +746,65 @@ def test_asset_filter_by_source_format_and_days(client):
 
     # 非法天数应被参数校验拦截
     assert client.get("/api/v1/assets?days=0", headers=headers).status_code == 422
+
+
+def test_asset_filter_by_media_type(client):
+    from PIL import Image
+
+    from app import models
+    from app.core.db import SessionLocal
+
+    logged_in = client.post(
+        "/api/v1/auth/login",
+        json={"subject": "user-asset-media", "displayName": "media"},
+    )
+    assert logged_in.status_code == 200, logged_in.text
+    body = logged_in.json()
+    headers = {"Authorization": f"Bearer {body['token']}"}
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (30, 20), (70, 110, 90)).save(buffer, format="PNG")
+    buffer.seek(0)
+    uploaded = client.post(
+        "/api/v1/assets",
+        files={"file": ("cover.png", buffer, "image/png")},
+        headers=headers,
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    with SessionLocal() as db:
+        image = db.get(models.Asset, uploaded.json()["id"])
+        db.add_all(
+            [
+                models.Asset(
+                    owner_user_id=image.owner_user_id,
+                    workspace_id=image.workspace_id,
+                    storage_key="media/clip.mp4",
+                    original_name="clip.mp4",
+                    mime_type="video/mp4",
+                    source_type="video_render",
+                ),
+                models.Asset(
+                    owner_user_id=image.owner_user_id,
+                    workspace_id=image.workspace_id,
+                    storage_key="media/voice.mp3",
+                    original_name="voice.mp3",
+                    mime_type="audio/mpeg",
+                    source_type="generated",
+                ),
+            ]
+        )
+        db.commit()
+
+    images = client.get("/api/v1/assets?mediaType=image", headers=headers).json()
+    videos = client.get("/api/v1/assets?mediaType=video", headers=headers).json()
+    audios = client.get("/api/v1/assets?mediaType=audio", headers=headers).json()
+    assert [item["originalName"] for item in images] == ["cover.png"]
+    assert [item["originalName"] for item in videos] == ["clip.mp4"]
+    assert [item["originalName"] for item in audios] == ["voice.mp3"]
+    # 素材选择弹窗用 format=image / format=audio 表示媒体大类
+    assert [item["originalName"] for item in client.get("/api/v1/assets?format=audio", headers=headers).json()] == ["voice.mp3"]
+    assert client.get("/api/v1/assets?mediaType=pdf", headers=headers).status_code == 422
 
 
 def test_dashboard_shape(client):
