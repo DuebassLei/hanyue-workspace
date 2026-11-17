@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 
 from .. import models, schemas
@@ -22,6 +22,16 @@ from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not
 from ..core.security import decrypt_secret, encrypt_secret
 from ..services import egress_ip, publish_state, wechat_article, wechat_layout
 from .publishing import _job_out
+
+from ..core.rbac import require_permission
+
+# 排版与发布通道拆开。模块级 any-of 会让「只会排版」的编辑直接绑公众号、推草稿。
+# 主题、组件、本地渲染只影响自己的稿面；凭据、绑定、推草稿会落到公众号上，撤不回。
+# 发布流程自己也要拉主题和渲染，所以这两类读接口对 publishing.use 放行。
+_LAYOUT = [require_permission("wechat_layout.use", "publishing.use", mode="any")]
+_LAYOUT_WRITE = [require_permission("wechat_layout.use")]
+_CHANNEL_READ = [require_permission("publishing.view", "publishing.use", mode="any")]
+_CHANNEL_WRITE = [require_permission("publishing.use")]
 
 router = APIRouter(tags=["wechat-mp"])
 
@@ -206,18 +216,18 @@ def _theme_list_payload(db, user) -> dict:
     }
 
 
-@router.get("/wechat-mp/themes")
+@router.get("/wechat-mp/themes", dependencies=_LAYOUT)
 def list_themes(user: CurrentUser, db: DbSession) -> dict:
     return _theme_list_payload(db, user)
 
 
-@router.get("/wechat-mp/themes/schema")
+@router.get("/wechat-mp/themes/schema", dependencies=_LAYOUT)
 def theme_schema() -> dict:
     """主题编辑器字段描述（校验范围以服务端 normalize 为准，前端不重复维护）。"""
     return {"fields": wechat_layout.token_schema()}
 
 
-@router.get("/wechat-mp/components")
+@router.get("/wechat-mp/components", dependencies=_LAYOUT)
 def layout_components() -> dict:
     """小组件注册表：组件库页与发布抽屉的区块按钮共用这一份。"""
     return {"components": [dict(item) for item in wechat_layout.LAYOUT_COMPONENTS]}
@@ -225,7 +235,7 @@ def layout_components() -> dict:
 
 # 注意：必须用 PUT。PATCH /wechat-mp/themes/{theme_id} 已存在，
 # 若这里声明成 PATCH /themes/preferences 会被 {theme_id} 路由抢先匹配。
-@router.put("/wechat-mp/themes/preferences")
+@router.put("/wechat-mp/themes/preferences", dependencies=_LAYOUT_WRITE)
 def update_theme_preferences(
     payload: schemas.WeChatThemePrefsIn, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -271,7 +281,7 @@ def update_theme_preferences(
     return _theme_list_payload(db, user)
 
 
-@router.post("/wechat-mp/themes", status_code=201)
+@router.post("/wechat-mp/themes", status_code=201, dependencies=_LAYOUT_WRITE)
 def create_theme(
     payload: schemas.WeChatThemeIn, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -293,7 +303,7 @@ def create_theme(
     return _custom_theme_out(row).model_dump(by_alias=True)
 
 
-@router.patch("/wechat-mp/themes/{theme_id}")
+@router.patch("/wechat-mp/themes/{theme_id}", dependencies=_LAYOUT_WRITE)
 def update_theme(
     theme_id: str, payload: schemas.WeChatThemeIn, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -311,7 +321,7 @@ def update_theme(
     return _custom_theme_out(row).model_dump(by_alias=True)
 
 
-@router.delete("/wechat-mp/themes/{theme_id}", status_code=204)
+@router.delete("/wechat-mp/themes/{theme_id}", status_code=204, dependencies=_LAYOUT_WRITE)
 def delete_theme(theme_id: str, user: CurrentUser, db: DbSession) -> None:
     row = db.get(models.WeChatTheme, theme_id)
     if not row or row.owner_user_id != user.id:
@@ -320,7 +330,7 @@ def delete_theme(theme_id: str, user: CurrentUser, db: DbSession) -> None:
     db.commit()
 
 
-@router.post("/wechat-mp/drafts/render")
+@router.post("/wechat-mp/drafts/render", dependencies=_LAYOUT)
 def render_draft(
     payload: schemas.WeChatRenderIn, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -362,7 +372,7 @@ def render_draft(
 
 
 
-@router.get("/wechat-mp/egress-ip")
+@router.get("/wechat-mp/egress-ip", dependencies=_CHANNEL_WRITE)
 def get_egress_ip(user: CurrentUser, force: bool = Query(default=False)) -> dict:
     """探测本服务器的公网出口 IP，供用户直接填进公众号 IP 白名单。
 
@@ -378,7 +388,7 @@ def get_egress_ip(user: CurrentUser, force: bool = Query(default=False)) -> dict
     return result
 
 
-@router.get("/wechat-mp/credentials")
+@router.get("/wechat-mp/credentials", dependencies=_CHANNEL_READ)
 def get_credentials(user: CurrentUser, db: DbSession) -> dict:
     """查看当前凭据状态：AppID 打码展示，Secret 永不回传。"""
     setting = db.get(models.AppSetting, wechat.CREDENTIAL_SETTING_KEY)
@@ -394,7 +404,7 @@ def get_credentials(user: CurrentUser, db: DbSession) -> dict:
     }
 
 
-@router.put("/wechat-mp/credentials")
+@router.put("/wechat-mp/credentials", dependencies=_CHANNEL_WRITE)
 def save_credentials(payload: schemas.WeChatCredentialsIn, user: CurrentUser, db: DbSession) -> dict:
     """保存凭据到数据库（Secret 加密存储），保存后立即做真实验证探针。
 
@@ -445,7 +455,7 @@ def save_credentials(payload: schemas.WeChatCredentialsIn, user: CurrentUser, db
     }
 
 
-@router.delete("/wechat-mp/credentials", status_code=204)
+@router.delete("/wechat-mp/credentials", status_code=204, dependencies=_CHANNEL_WRITE)
 def clear_credentials(user: CurrentUser, db: DbSession) -> None:
     setting = db.get(models.AppSetting, wechat.CREDENTIAL_SETTING_KEY)
     if setting:
@@ -454,7 +464,7 @@ def clear_credentials(user: CurrentUser, db: DbSession) -> None:
     registry.reset_connector(PLATFORM)
 
 
-@router.get("/wechat-mp/status")
+@router.get("/wechat-mp/status", dependencies=_CHANNEL_READ)
 def draft_status(user: CurrentUser, db: DbSession) -> dict:
     connector = registry.get_connector(PLATFORM, db)
     account = _bound_account(db, user)
@@ -517,7 +527,7 @@ def draft_status(user: CurrentUser, db: DbSession) -> dict:
     return base
 
 
-@router.post("/wechat-mp/bind")
+@router.post("/wechat-mp/bind", dependencies=_CHANNEL_WRITE)
 def bind_account(payload: schemas.WeChatBindIn, user: CurrentUser, db: DbSession) -> dict:
     """绑定并**真实验证**：调用公众号只读接口确认凭据、IP 白名单与草稿权限都可用。
 
@@ -605,7 +615,7 @@ def bind_account(payload: schemas.WeChatBindIn, user: CurrentUser, db: DbSession
     }
 
 
-@router.put("/wechat-mp/accounts/{account_id}/credentials")
+@router.put("/wechat-mp/accounts/{account_id}/credentials", dependencies=_CHANNEL_WRITE)
 def update_account_credentials(
     account_id: str, payload: schemas.WeChatCredentialsIn, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -660,7 +670,7 @@ def update_account_credentials(
     }
 
 
-@router.post("/wechat-mp/drafts/preview")
+@router.post("/wechat-mp/drafts/preview", dependencies=_CHANNEL_WRITE)
 def preview_draft(
     payload: schemas.WeChatDraftPreviewIn, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -732,7 +742,12 @@ def preview_draft(
     }
 
 
-@router.post("/wechat-mp/drafts", response_model=schemas.PublishJobOut, status_code=201)
+@router.post(
+    "/wechat-mp/drafts",
+    response_model=schemas.PublishJobOut,
+    status_code=201,
+    dependencies=_CHANNEL_WRITE,
+)
 def push_draft(
     payload: schemas.WeChatDraftIn, user: CurrentUser, db: DbSession
 ) -> schemas.PublishJobOut:
@@ -840,7 +855,7 @@ def push_draft(
     return _job_out(job)
 
 
-@router.get("/wechat-mp/drafts")
+@router.get("/wechat-mp/drafts", dependencies=_CHANNEL_READ)
 def list_remote_drafts(
     user: CurrentUser,
     db: DbSession,
@@ -860,7 +875,7 @@ def list_remote_drafts(
         raise _as_api_error(exc) from exc
 
 
-@router.get("/wechat-mp/drafts/{media_id}")
+@router.get("/wechat-mp/drafts/{media_id}", dependencies=_CHANNEL_READ)
 def get_remote_draft(
     media_id: str, user: CurrentUser, db: DbSession, account_id: str = Query(default="")
 ) -> dict:

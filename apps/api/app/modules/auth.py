@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from .. import models, schemas
 from ..core.config import get_settings
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace
+from ..services import rbac_service
 from ..core.logging import get_logger
 from ..core.security import (
     create_token,
@@ -170,6 +171,8 @@ def register(payload: schemas.RegisterRequest, db: DbSession) -> schemas.LoginRe
     )
     db.add(user)
     db.flush()
+    # 新账号立刻拿到默认角色，否则登录后权限为空、侧栏空白
+    rbac_service.assign_default_role(db, user.id)
     logger.info("新账号注册：%s", email)
     return _session_response(user, db)
 
@@ -202,6 +205,7 @@ def login(payload: schemas.LoginRequest, db: DbSession) -> schemas.LoginResponse
         )
         db.add(user)
         db.flush()
+        rbac_service.assign_default_role(db, user.id)
     elif not user.is_active:
         raise ApiError("account_disabled", "该账号已停用", status_code=403)
     return _session_response(user, db)

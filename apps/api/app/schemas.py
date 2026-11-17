@@ -1474,3 +1474,139 @@ class SchedulePreviewIn(CamelModel):
     interval_seconds: int | None = Field(default=None, ge=1, le=31 * 24 * 3600)
     timezone: str | None = Field(default=None, max_length=64)
     count: int = Field(default=3, ge=1, le=10)
+
+
+# ---------- RBAC ----------
+
+
+class PermissionOut(CamelModel):
+    code: str
+    name: str
+    module: str
+    sort: int
+
+
+class MenuNodeOut(CamelModel):
+    """菜单节点。前端侧栏与后台菜单管理共用一种形状，差别只在字段是否填充。"""
+
+    id: str
+    parent_id: str | None = None
+    key: str
+    label: str
+    short: str = ""
+    icon: str = ""
+    path: str = ""
+    kind: str = "page"
+    permission: str | None = None
+    sort: int = 0
+    visible: bool = True
+    children: list["MenuNodeOut"] = Field(default_factory=list)
+
+
+class NavItemOut(CamelModel):
+    """侧栏项。`name` 就是前端路由名，`permission` 供按钮/页面二次校验。"""
+
+    name: str
+    label: str
+    short: str = ""
+    icon: str = ""
+    path: str = ""
+    permission: str | None = None
+
+
+class NavGroupOut(CamelModel):
+    key: str
+    label: str
+    icon: str = ""
+    path: str = ""
+    items: list[NavItemOut] = Field(default_factory=list)
+
+
+class RbacMeOut(CamelModel):
+    is_superadmin: bool = False
+    role_keys: list[str] = Field(default_factory=list)
+    permissions: list[str] = Field(default_factory=list)
+    menus: list[NavGroupOut] = Field(default_factory=list)
+
+
+class RoleOut(CamelModel):
+    id: str
+    role_key: str
+    name: str
+    description: str = ""
+    is_superadmin: bool = False
+    is_system: bool = False
+    sort: int = 0
+    permission_codes: list[str] = Field(default_factory=list)
+    menu_ids: list[str] = Field(default_factory=list)
+    user_count: int = 0
+
+
+class RoleIn(CamelModel):
+    role_key: str = Field(min_length=2, max_length=48, pattern="^[a-z][a-z0-9_]*$")
+    name: str = Field(min_length=1, max_length=48)
+    description: str = Field(default="", max_length=200)
+    sort: int = Field(default=100, ge=0, le=9999)
+    # 新建时直接给的权限；不传则按「只读」起步（不给任何权限）
+    permission_codes: list[str] | None = None
+
+
+class RolePatch(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=48)
+    description: str | None = Field(default=None, max_length=200)
+    sort: int | None = Field(default=None, ge=0, le=9999)
+
+
+class RolePermissionIn(CamelModel):
+    codes: list[str] = Field(default_factory=list)
+
+
+class RoleMenuIn(CamelModel):
+    menu_ids: list[str] = Field(default_factory=list)
+
+
+class MenuIn(CamelModel):
+    parent_id: str | None = None
+    key: str = Field(min_length=1, max_length=64, pattern="^[A-Za-z0-9_-]+$")
+    label: str = Field(min_length=1, max_length=48)
+    short: str = Field(default="", max_length=24)
+    icon: str = Field(default="", max_length=32)
+    kind: str = Field(default="page", pattern="^(group|page|link)$")
+    permission: str | None = Field(default=None, max_length=64)
+    sort: int = Field(default=100, ge=0, le=9999)
+    visible: bool = True
+
+
+class MenuPatch(CamelModel):
+    parent_id: str | None = None
+    label: str | None = Field(default=None, min_length=1, max_length=48)
+    short: str | None = Field(default=None, max_length=24)
+    icon: str | None = Field(default=None, max_length=32)
+    kind: str | None = Field(default=None, pattern="^(group|page|link)$")
+    permission: str | None = Field(default=None, max_length=64)
+    sort: int | None = Field(default=None, ge=0, le=9999)
+    visible: bool | None = None
+
+
+class UserRolesOut(CamelModel):
+    id: str
+    display_name: str
+    email: str | None = None
+    is_active: bool = True
+    role_ids: list[str] = Field(default_factory=list)
+    role_keys: list[str] = Field(default_factory=list)
+
+
+class UserRolesIn(CamelModel):
+    role_ids: list[str] = Field(default_factory=list)
+
+
+class RbacAuditOut(CamelModel):
+    id: str
+    actor_user_id: str | None = None
+    actor_name: str | None = None
+    action: str
+    target_type: str = ""
+    target_id: str = ""
+    detail: dict = Field(default_factory=dict)
+    created_at: datetime

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from .. import models, schemas
 from ..core import queue
@@ -13,7 +13,13 @@ from ..core.deps import ApiError, CurrentUser, DbSession, not_found
 from ..core.security import create_upload_session as sign_upload_session
 from ..services import image_provider
 
+from ..core.rbac import require_permission
+
 router = APIRouter(tags=["ai-images"])
+
+# 生图接口被「图片生成」页和「创作空间」共用（Studio 内嵌配图），
+# 所以按 any 放行；状态探针与上传会话是跨页面基础设施，不挂权限。
+_IMAGE_USE = require_permission("images.use", "studio.use", mode="any")
 
 
 @router.get("/ai/image-provider/status")
@@ -21,7 +27,7 @@ def image_provider_status(user: CurrentUser, db: DbSession) -> dict:
     return image_provider.status(db, user.id)
 
 
-@router.post("/ai/image-generations", status_code=202)
+@router.post("/ai/image-generations", status_code=202, dependencies=[_IMAGE_USE])
 def create_image_generation(
     payload: schemas.ImageGenerationIn, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -58,7 +64,7 @@ def create_image_generation(
     }
 
 
-@router.post("/ai/generations/{generation_id}/cancel")
+@router.post("/ai/generations/{generation_id}/cancel", dependencies=[_IMAGE_USE])
 def cancel_generation(
     generation_id: str, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -72,7 +78,7 @@ def cancel_generation(
     return {"id": generation.id, "status": generation.status}
 
 
-@router.post("/ai/image-interrogate")
+@router.post("/ai/image-interrogate", dependencies=[_IMAGE_USE])
 def interrogate_image(payload: schemas.ImageInterrogateIn, user: CurrentUser, db: DbSession) -> dict:
     """反推提示词：给定素材图片，调用视觉语言模型生成描述该图的提示词。
 

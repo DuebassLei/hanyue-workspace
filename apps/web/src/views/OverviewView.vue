@@ -3,6 +3,11 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { NAlert, NButton, NHeatmap, NSpace } from 'naive-ui'
 import { api } from '../api/client'
 import StatusTag from '../components/StatusTag.vue'
+import { usePermission } from '../composables/usePermission'
+
+// 总览只要 overview.view，但页面里混着发布、模型、创作空间的入口。
+// 没权限的区块直接不渲染：这里是报表页，留一个点进去就 403 的卡片没有意义。
+const { can, disabledReason } = usePermission()
 
 const data = ref(null)
 const loading = ref(true)
@@ -108,7 +113,15 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
       <n-space class="overview-actions" :size="8">
         <n-button secondary size="small" :loading="loading" @click="load">刷新数据</n-button>
         <RouterLink v-slot="{ navigate }" custom :to="{ name: 'studio' }">
-          <n-button type="primary" size="small" @click="navigate">＋ 新建稿件</n-button>
+          <n-button
+            type="primary"
+            size="small"
+            :disabled="Boolean(disabledReason('studio.use', '创作空间'))"
+            :title="disabledReason('studio.use', '创作空间') || ''"
+            @click="navigate"
+          >
+            ＋ 新建稿件
+          </n-button>
         </RouterLink>
       </n-space>
     </div>
@@ -138,12 +151,16 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
           <span class="metric-value">{{ data.pendingReview }}</span>
           <span class="metric-hint">发布前需要人工确认 <span class="metric-arrow">→</span></span>
         </RouterLink>
-        <RouterLink class="metric metric-link metric-alert" :to="{ name: 'publishing' }">
+        <RouterLink
+          v-if="can('publishing.view')"
+          class="metric metric-link metric-alert"
+          :to="{ name: 'publishing' }"
+        >
           <span class="metric-label">发布失败 / 需核实</span>
           <span class="metric-value">{{ data.failedJobs }}</span>
           <span class="metric-hint">不会自动重发，需先核实 <span class="metric-arrow">→</span></span>
         </RouterLink>
-        <RouterLink class="metric metric-link" :to="{ name: 'publishing' }">
+        <RouterLink v-if="can('publishing.view')" class="metric metric-link" :to="{ name: 'publishing' }">
           <span class="metric-label">待同步账号</span>
           <span class="metric-value">{{ data.unsyncedAccounts }}</span>
           <span class="metric-hint">绑定但尚未成功同步 <span class="metric-arrow">→</span></span>
@@ -185,7 +202,7 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
       </section>
 
       <div class="overview-grid">
-        <section class="card overview-card platform-card">
+        <section v-if="can('publishing.view')" class="card overview-card platform-card">
           <div class="section-heading">
             <div>
               <span class="eyebrow">DISTRIBUTION</span>
@@ -197,7 +214,7 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
             <span class="empty-icon">＋</span>
             <span class="empty-title">还没有绑定平台账号</span>
             <span>绑定后可以查看授权状态与自动发布开关。</span>
-            <RouterLink v-slot="{ navigate }" custom :to="{ name: 'publishing' }">
+            <RouterLink v-if="can('publishing.use')" v-slot="{ navigate }" custom :to="{ name: 'publishing' }">
               <n-button type="primary" size="small" @click="navigate">去绑定账号</n-button>
             </RouterLink>
           </div>
@@ -258,7 +275,15 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
         </div>
         <div class="ai-status"><span class="status-dot" /> {{ fmt(data.aiStatus.modelConnections) }} 个模型连接</div>
         <RouterLink v-slot="{ navigate }" custom :to="{ name: 'models' }">
-          <n-button secondary size="small" @click="navigate">配置模型 →</n-button>
+          <n-button
+            secondary
+            size="small"
+            :disabled="Boolean(disabledReason('models.view', '模型查看'))"
+            :title="disabledReason('models.view', '模型查看') || ''"
+            @click="navigate"
+          >
+            配置模型 →
+          </n-button>
         </RouterLink>
       </section>
     </template>

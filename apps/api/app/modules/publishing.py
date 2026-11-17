@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.types import String as SaString
@@ -14,6 +14,13 @@ from ..core import pagination, queue
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.logging import get_logger
 from ..services import publish_state
+
+from ..core.rbac import require_permission
+
+# 读 / 写分开：能翻发布记录、看失败原因，与「能把稿子推到公众号」是两件事。
+# 读接口用 any-of 兜住历史上只授过 publishing.use 的存量角色（升级后不会突然进不去）。
+_PUBLISH_READ = [require_permission("publishing.view", "publishing.use", mode="any")]
+_PUBLISH_WRITE = [require_permission("publishing.use")]
 
 router = APIRouter(tags=["publishing"])
 logger = get_logger(__name__)
@@ -105,7 +112,7 @@ def _promote_due_jobs(db, user_id: str) -> int:
     return changed
 
 
-@router.get("/platforms/capabilities")
+@router.get("/platforms/capabilities", dependencies=_PUBLISH_READ)
 def platform_capabilities() -> dict:
     report = connectors.evidence_report()
     return {
@@ -117,7 +124,9 @@ def platform_capabilities() -> dict:
     }
 
 
-@router.get("/platform-accounts", response_model=list[schemas.AccountOut])
+@router.get(
+    "/platform-accounts", response_model=list[schemas.AccountOut], dependencies=_PUBLISH_READ
+)
 def list_accounts(
     user: CurrentUser,
     db: DbSession,
@@ -137,7 +146,12 @@ def list_accounts(
     return [_account_out(row) for row in rows]
 
 
-@router.post("/platform-accounts", response_model=schemas.AccountOut, status_code=201)
+@router.post(
+    "/platform-accounts",
+    response_model=schemas.AccountOut,
+    status_code=201,
+    dependencies=_PUBLISH_WRITE,
+)
 def connect_account(
     payload: schemas.AccountConnectIn, user: CurrentUser, db: DbSession
 ) -> schemas.AccountOut:
@@ -162,7 +176,7 @@ def connect_account(
     return _account_out(account)
 
 
-@router.delete("/platform-accounts/{account_id}", status_code=204)
+@router.delete("/platform-accounts/{account_id}", status_code=204, dependencies=_PUBLISH_WRITE)
 def unbind_account(account_id: str, user: CurrentUser, db: DbSession) -> None:
     account = db.get(models.ConnectedAccount, account_id)
     if not account or account.owner_user_id != user.id:
@@ -173,7 +187,11 @@ def unbind_account(account_id: str, user: CurrentUser, db: DbSession) -> None:
     db.commit()
 
 
-@router.post("/platform-accounts/{account_id}/toggle-auto-publish", response_model=schemas.AccountOut)
+@router.post(
+    "/platform-accounts/{account_id}/toggle-auto-publish",
+    response_model=schemas.AccountOut,
+    dependencies=_PUBLISH_WRITE,
+)
 def toggle_auto_publish(
     account_id: str, enabled: bool, user: CurrentUser, db: DbSession
 ) -> schemas.AccountOut:
@@ -192,7 +210,7 @@ def toggle_auto_publish(
     return _account_out(account)
 
 
-@router.post("/publishing/preview", response_model=schemas.PreviewOut)
+@router.post("/publishing/preview", response_model=schemas.PreviewOut, dependencies=_PUBLISH_WRITE)
 def preview(payload: schemas.PublishPreviewIn, user: CurrentUser, db: DbSession) -> schemas.PreviewOut:
     account = db.get(models.ConnectedAccount, payload.account_id)
     if not account or account.owner_user_id != user.id:
@@ -223,7 +241,12 @@ def preview(payload: schemas.PublishPreviewIn, user: CurrentUser, db: DbSession)
     )
 
 
-@router.post("/publishing/jobs", response_model=schemas.PublishJobOut, status_code=201)
+@router.post(
+    "/publishing/jobs",
+    response_model=schemas.PublishJobOut,
+    status_code=201,
+    dependencies=_PUBLISH_WRITE,
+)
 def create_job(
     payload: schemas.PublishJobIn, user: CurrentUser, db: DbSession
 ) -> schemas.PublishJobOut:
@@ -358,7 +381,11 @@ def create_job(
     return _job_out(saved)
 
 
-@router.post("/publishing/jobs/{job_id}/record-manual-result", response_model=schemas.PublishJobOut)
+@router.post(
+    "/publishing/jobs/{job_id}/record-manual-result",
+    response_model=schemas.PublishJobOut,
+    dependencies=_PUBLISH_WRITE,
+)
 def record_manual_result(
     job_id: str, payload: schemas.ManualResultIn, user: CurrentUser, db: DbSession
 ) -> schemas.PublishJobOut:
@@ -442,7 +469,9 @@ def _job_filters(
     return stmt
 
 
-@router.get("/publishing/jobs", response_model=list[schemas.PublishJobOut])
+@router.get(
+    "/publishing/jobs", response_model=list[schemas.PublishJobOut], dependencies=_PUBLISH_READ
+)
 def list_jobs(
     user: CurrentUser,
     db: DbSession,
@@ -474,7 +503,11 @@ def list_jobs(
     return [_job_out(row) for row in rows]
 
 
-@router.get("/publishing/jobs/summary", response_model=schemas.PublishJobSummaryOut)
+@router.get(
+    "/publishing/jobs/summary",
+    response_model=schemas.PublishJobSummaryOut,
+    dependencies=_PUBLISH_READ,
+)
 def jobs_summary(user: CurrentUser, db: DbSession) -> schemas.PublishJobSummaryOut:
     """按状态聚合的发布任务计数；供筛选 chips 展示，避免前端拉全量自算。"""
     _promote_due_jobs(db, user.id)
@@ -487,7 +520,11 @@ def jobs_summary(user: CurrentUser, db: DbSession) -> schemas.PublishJobSummaryO
     return schemas.PublishJobSummaryOut(total=sum(by_status.values()), by_status=by_status)
 
 
-@router.get("/publishing/jobs/{job_id}", response_model=schemas.PublishJobDetailOut)
+@router.get(
+    "/publishing/jobs/{job_id}",
+    response_model=schemas.PublishJobDetailOut,
+    dependencies=_PUBLISH_READ,
+)
 def job_detail(job_id: str, user: CurrentUser, db: DbSession) -> schemas.PublishJobDetailOut:
     job = db.get(models.PublishJob, job_id)
     if not job or job.owner_user_id != user.id:
@@ -500,7 +537,11 @@ def job_detail(job_id: str, user: CurrentUser, db: DbSession) -> schemas.Publish
     return _job_detail_out(job, records)
 
 
-@router.patch("/publishing/jobs/{job_id}", response_model=schemas.PublishJobOut)
+@router.patch(
+    "/publishing/jobs/{job_id}",
+    response_model=schemas.PublishJobOut,
+    dependencies=_PUBLISH_WRITE,
+)
 def patch_job(
     job_id: str, payload: schemas.PublishJobPatchIn, user: CurrentUser, db: DbSession
 ) -> schemas.PublishJobOut:
@@ -553,7 +594,11 @@ def patch_job(
     return _job_out(job)
 
 
-@router.post("/publishing/jobs/{job_id}/approve", response_model=schemas.PublishJobOut)
+@router.post(
+    "/publishing/jobs/{job_id}/approve",
+    response_model=schemas.PublishJobOut,
+    dependencies=_PUBLISH_WRITE,
+)
 def approve_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.PublishJobOut:
     """人工审核通过：pending_review → approved。
 
@@ -573,7 +618,11 @@ def approve_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.Publis
     return _job_out(job)
 
 
-@router.post("/publishing/jobs/{job_id}/cancel", response_model=schemas.PublishJobOut)
+@router.post(
+    "/publishing/jobs/{job_id}/cancel",
+    response_model=schemas.PublishJobOut,
+    dependencies=_PUBLISH_WRITE,
+)
 def cancel_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.PublishJobOut:
     job = db.get(models.PublishJob, job_id)
     if not job or job.owner_user_id != user.id:
@@ -586,7 +635,7 @@ def cancel_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.Publish
     return _job_out(job)
 
 
-@router.delete("/publishing/jobs/{job_id}", status_code=204)
+@router.delete("/publishing/jobs/{job_id}", status_code=204, dependencies=_PUBLISH_WRITE)
 def delete_job(job_id: str, user: CurrentUser, db: DbSession) -> None:
     job = db.get(models.PublishJob, job_id)
     if not job or job.owner_user_id != user.id:
@@ -598,7 +647,11 @@ def delete_job(job_id: str, user: CurrentUser, db: DbSession) -> None:
     db.commit()
 
 
-@router.post("/publishing/jobs/{job_id}/retry", response_model=schemas.PublishJobOut)
+@router.post(
+    "/publishing/jobs/{job_id}/retry",
+    response_model=schemas.PublishJobOut,
+    dependencies=_PUBLISH_WRITE,
+)
 def retry_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.PublishJobOut:
     job = db.get(models.PublishJob, job_id)
     if not job or job.owner_user_id != user.id:

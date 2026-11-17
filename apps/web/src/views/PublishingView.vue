@@ -19,7 +19,14 @@ import {
 import { api } from '../api/client'
 import StatusTag from '../components/StatusTag.vue'
 import PlatformCard from '../features/publish/accounts/PlatformCard.vue'
+import { usePermission } from '../composables/usePermission'
 import { confirm, toast } from '../ui/feedback'
+
+// 页面只要 publishing.view（能看记录）；真正会推到公众号的动作判 publishing.use。
+// 只读用户看到的是完整队列 + 一行说明，而不是一个点进去就 403 的入口。
+const { can, disabledReason } = usePermission()
+const canPublish = computed(() => can('publishing.use'))
+const publishDenied = computed(() => disabledReason('publishing.use', '发布管理'))
 
 const capabilities = ref([])
 const accounts = ref([])
@@ -211,7 +218,9 @@ async function copyEgressIp() {
 
 onMounted(() => {
   load()
-  loadEgressIp()
+  // 出口 IP 探测只服务「填公众号白名单」这个动作，归 publishing.use；
+  // 只读角色发起它只会拿到 403，白跑一次请求还留个「探测失败」在卡里。
+  if (canPublish.value) loadEgressIp()
 })
 
 async function verifyAuth(account) {
@@ -483,12 +492,20 @@ async function bindWechat() {
       <n-space :size="8">
         <template v-if="activeTab === 'queue'">
           <n-button secondary :loading="queueRefreshing" @click="refreshQueue">刷新队列</n-button>
-          <n-button type="primary" @click="openPublish">新建排期任务</n-button>
+          <n-button
+            type="primary"
+            :disabled="!canPublish"
+            :title="publishDenied || '创建一条新的发布排期任务'"
+            @click="openPublish"
+          >
+            新建排期任务
+          </n-button>
         </template>
         <n-button
           v-else
           type="primary"
-          :disabled="!selectedPlatform?.available"
+          :disabled="!selectedPlatform?.available || !canPublish"
+          :title="publishDenied || `绑定${selectedPlatform?.label || '平台'}账号`"
           @click="selectedPlatform && openBind(selectedPlatform.platform)"
         >
           绑定{{ selectedPlatform?.label || '平台' }}账号
@@ -497,6 +514,11 @@ async function bindWechat() {
     </div>
 
     <n-alert v-if="error" type="error" :bordered="false" style="margin-bottom: 12px">{{ error }}</n-alert>
+
+    <!-- 只读角色：看得到完整记录，但不给注定 403 的按钮 -->
+    <n-alert v-if="!canPublish" type="info" :bordered="false" class="publish-readonly-note">
+      当前角色只有「发布查看」权限：可以核对任务状态、失败原因与账号情况，创建/审核/重试/绑定账号需要「发布管理」权限。
+    </n-alert>
 
     <n-tabs v-model:value="activeTab" type="line" animated>
       <n-tab name="queue">发布任务</n-tab>
@@ -605,11 +627,13 @@ async function bindWechat() {
               </div>
             </div>
             <StatusTag :status="job.status" />
-            <n-button v-if="canRecord(job)" size="small" secondary @click="openRecord(job)">回填手发结果</n-button>
-            <n-button v-if="canRetry(job)" size="small" secondary @click="retryJob(job)">重试</n-button>
-            <n-button v-if="canCancel(job)" size="small" secondary @click="cancelJob(job)">取消</n-button>
+            <n-button v-if="canPublish && canRecord(job)" size="small" secondary @click="openRecord(job)">
+              回填手发结果
+            </n-button>
+            <n-button v-if="canPublish && canRetry(job)" size="small" secondary @click="retryJob(job)">重试</n-button>
+            <n-button v-if="canPublish && canCancel(job)" size="small" secondary @click="cancelJob(job)">取消</n-button>
             <n-button
-              v-if="canDelete(job)"
+              v-if="canPublish && canDelete(job)"
               size="small"
               type="error"
               secondary
@@ -672,6 +696,8 @@ async function bindWechat() {
             <n-button
               v-if="selectedPlatform.available"
               type="primary"
+              :disabled="!canPublish"
+              :title="publishDenied || `为${selectedPlatform.label}再绑定一个账号`"
               @click="openBind(selectedPlatform.platform)"
             >
               绑定新账号
@@ -703,6 +729,8 @@ async function bindWechat() {
               :egress="egress"
               :egress-loading="egressLoading"
               :egress-copied="egressCopied"
+              :readonly="!canPublish"
+              :readonly-reason="publishDenied"
               @bind="openBind"
               @verify="verifyAuth"
               @unbind="unbind"
@@ -918,6 +946,11 @@ async function bindWechat() {
 </template>
 
 <style scoped>
+/* 只读说明条：与错误提示同一条视觉节奏，但不抢注意力 */
+.publish-readonly-note {
+  margin-bottom: 12px;
+}
+
 .modal-desc {
   margin: 0 0 12px;
   color: var(--color-text-secondary);

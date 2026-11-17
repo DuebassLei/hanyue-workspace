@@ -15,13 +15,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from .. import schemas
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..services import hot_topics
 
-router = APIRouter(tags=["hot-topics"])
+from ..core.rbac import require_permission
+
+router = APIRouter(tags=["hot-topics"], dependencies=[require_permission("hot_topics.view")])
 
 
 @router.get("/hot-topics/sources", response_model=schemas.HotSourcesOut)

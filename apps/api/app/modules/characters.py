@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
 
 from .. import models, schemas
@@ -20,7 +20,9 @@ from ..core.security import sign_asset_url
 from ..core.config import get_settings
 from ..services import character_extract, character_images
 
-router = APIRouter(prefix="/characters", tags=["characters"])
+from ..core.rbac import require_permission
+
+router = APIRouter(prefix="/characters", tags=["characters"], dependencies=[require_permission("characters.use", "storyboards.use", "novels.use", mode="any")])
 
 
 def _url(asset_id: str | None) -> str | None:

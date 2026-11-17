@@ -16,9 +16,14 @@ import { toast } from '../ui/feedback'
 import HotClusterCard from '../features/hot/HotClusterCard.vue'
 import HotOverviewDialog from '../features/hot/HotOverviewDialog.vue'
 import HotPlatformTabs from '../features/hot/HotPlatformTabs.vue'
+import { usePermission } from '../composables/usePermission'
 
 const router = useRouter()
 const route = useRoute()
+
+// 热点页只要 hot_topics.view，但「写这篇」要进创作空间、「做贴图」要进贴图页。
+// 这两条是真实会 403 的路径，所以按按钮逐个判定，而不是让用户跳到 403 页再回来。
+const { disabledReason } = usePermission()
 
 const clusters = ref([])
 const summary = ref({})
@@ -391,6 +396,8 @@ onMounted(loadAll)
         @write="writeFromCluster"
         @ignore="toggleIgnore"
         @toggle="toggleDetail"
+        :write-denied="disabledReason('studio.use', '创作空间')"
+        :sticker-denied="disabledReason('stickers.use', '贴图创作')"
         @sticker="(c) => router.push(`/stickers?new=1&clusterId=${c.id}`)"
       />
     </div>

@@ -97,6 +97,7 @@ hanyue-workspace/
 | `models_module.py` | `/api/v1/models` | 模型连接管理、真实连通性测试 |
 | `dashboard.py` | `/api/v1/dashboard` | 总览、日历、周复盘 |
 | `preferences.py` | `/api/v1/preferences` | 用户偏好（主题）服务端持久化 |
+| `rbac.py` | `/api/v1/rbac` | 角色/权限/菜单：我的权限、角色 CRUD、菜单 CRUD、用户授权、审计（见 `docs/rbac.md`）|
 
 ---
 
@@ -108,6 +109,7 @@ hanyue-workspace/
 | `ai_article.py` | 文章生成编排（大纲→正文→润色） |
 | `agent_runtime.py` | Agent 执行引擎、工具调用、暂停/恢复/取消 |
 | `agent_policy.py` | 工具风险分级、权限快照、禁止级拒绝 |
+| `rbac_service.py` | RBAC 幂等播种（权限点/内置角色/菜单）、菜单树组装、路径重算、审计写入 |
 | `agent_status.py` | Agent 状态查询与 Provider 脱敏列表 |
 | `image_service.py` | Pillow 同步处理、派生图、条漫分格 |
 | `image_provider.py` | AI 生图适配器（OpenAI 兼容协议） |
@@ -146,13 +148,28 @@ hanyue-workspace/
 
 ### 0. 本地数据库（PostgreSQL + Redis）
 
+不用容器（本机已装 PostgreSQL）：
+
+```bash
+cd infra
+./scripts/dev-pg.sh up        # 自建私有集群 127.0.0.1:5433，数据在 infra/.pgdev/data
+./scripts/dev-pg.sh bootstrap # 可选：起库 + 建表 + 创建首个账号
+# 复用系统已装的 PG 服务（默认 5432，需 postgres 超级用户密码）：
+# PG_MODE=service ./scripts/dev-pg.sh up
+```
+
+Windows PowerShell 用 `.ps1` 版（`.sh` 会被 WSL 的 bash.exe 接管，不起作用）：
+`.\scripts\dev-pg.ps1 up` / `status` / `bootstrap` / `down`。该文件必须保持 UTF-8 with BOM。
+
+用容器只起库：
+
 ```bash
 cd infra
 ./scripts/dev-db.sh up        # 独立卷/端口 5433、6380，不会碰生产数据
 ./scripts/dev-db.sh bootstrap # 可选：起库 + 建表 + 创建首个账号
 ```
 
-`apps/api/.env` 的 `DATABASE_URL` 已指向 `127.0.0.1:5433`。
+两者抢同一个 5433 端口，同时只用一个。`apps/api/.env` 的 `DATABASE_URL` 已指向 `127.0.0.1:5433`。
 
 ### 1. 后端
 
@@ -253,6 +270,10 @@ cd ../web && npm run build                             # 前端构建
 4. **发布超时结果未知 → `needs_attention`**，绝不自动重发；远端已有内容则直接视为成功。
 5. **自动发布五条件**：平台能力已核验 + 接口支持发布 + 官方 OAuth 授权 + 账号开启自动发布 + 已人工审核，缺一不可。
 6. **生产安全门禁**：`ENVIRONMENT=production` 时拒绝弱 `SECRET_KEY` / `ALLOW_DEV_LOGIN=true` / SQLite；正式登录为邮箱密码（scrypt 哈希、失败锁定、改密踢旧会话）。
+7. **接口权限点**：业务模块用 `dependencies=[require_permission("xxx")]` 强制校验，前端菜单只是投影。
+   挂之前先判断「这是不是单一页面的专属能力」——`/models/catalog`、`/ai/text-generations`、
+   `/jobs`、`/assets`、`/content` 是多页面共用地基，**不能挂页面权限点**，否则普通用户创作页直接 403。
+   映射与判定标准见 `docs/rbac.md §7`，回归网在 `tests/test_permission_gate.py`（挡得住 + 不误伤，成对断言）。
 
 ---
 

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy import select
 
 from .. import models, schemas
 from ..core.deps import ApiError, CurrentUser, DbSession, not_found
 
-router = APIRouter(prefix="/prompts", tags=["prompts"])
+from ..core.rbac import require_permission
+
+router = APIRouter(prefix="/prompts", tags=["prompts"], dependencies=[require_permission("prompts.use")])
 
 DEFAULT_CATEGORY = "通用"
 

@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { NModal } from 'naive-ui'
 import { NAV_ITEMS } from '../../ui/nav'
+import { useRbacStore } from '../../stores/rbac'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -10,6 +11,9 @@ const props = defineProps({
 
 const emit = defineEmits(['update:show', 'go'])
 
+const rbac = useRbacStore()
+// 服务端菜单为准：没权限的页面不该出现在搜索里，否则搜到了点进去是 403
+const navSource = computed(() => (rbac.menus.length ? rbac.navItems : NAV_ITEMS))
 const query = ref('')
 const composing = ref(false)
 const active = ref(0)
@@ -18,7 +22,7 @@ const inputEl = ref(null)
 const keyword = computed(() => query.value.trim().toLowerCase())
 
 const navHits = computed(() =>
-  NAV_ITEMS.filter((item) => {
+  navSource.value.filter((item) => {
     if (!keyword.value) return true
     return `${item.label} ${item.short}`.toLowerCase().includes(keyword.value)
   }).map((item) => ({

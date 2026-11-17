@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 
 from .. import models, schemas
@@ -11,7 +11,9 @@ from ..connectors import base as connectors
 from ..core.deps import CurrentUser, DbSession, default_workspace
 from ..services import publish_state
 
-router = APIRouter(tags=["dashboard"])
+from ..core.rbac import require_permission
+
+router = APIRouter(tags=["dashboard"], dependencies=[require_permission("overview.view")])
 
 
 @router.get("/dashboard", response_model=schemas.DashboardOut)

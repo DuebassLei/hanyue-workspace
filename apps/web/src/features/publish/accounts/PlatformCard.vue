@@ -10,6 +10,9 @@ defineProps({
   egress: { type: Object, default: null },
   egressLoading: { type: Boolean, default: false },
   egressCopied: { type: Boolean, default: false },
+  // 只有 publishing.view 时整卡转只读：绑定/改凭据/验证/解绑都会落到 publishing.use
+  readonly: { type: Boolean, default: false },
+  readonlyReason: { type: String, default: '' },
 })
 defineEmits(['bind', 'verify', 'unbind', 'edit-credential', 'egress-refresh', 'egress-copy'])
 </script>
@@ -19,7 +22,15 @@ defineEmits(['bind', 'verify', 'unbind', 'edit-credential', 'egress-refresh', 'e
     <template v-if="platform.available">
       <n-empty v-if="!platform.accounts.length" description="绑定并验证后即可使用该平台的发布能力。">
         <template #extra>
-          <n-button type="primary" size="small" @click="$emit('bind', platform.platform)">绑定账号</n-button>
+          <n-button
+            type="primary"
+            size="small"
+            :disabled="readonly"
+            :title="readonlyReason || '绑定账号'"
+            @click="$emit('bind', platform.platform)"
+          >
+            绑定账号
+          </n-button>
         </template>
       </n-empty>
       <div v-else class="list">
@@ -33,7 +44,7 @@ defineEmits(['bind', 'verify', 'unbind', 'edit-credential', 'egress-refresh', 'e
             · 来源：{{ account.authSource === 'app_secret' ? '官方凭据' : account.authSource === 'demo' ? '历史演示账号（无凭据）' : '待验证' }}
           </div>
           <EgressIpWidget
-            v-if="account.platform === 'wechat_official'"
+            v-if="account.platform === 'wechat_official' && !readonly"
             :ip="egress?.ip || ''"
             :loading="egressLoading"
             :copied="egressCopied"
@@ -45,6 +56,8 @@ defineEmits(['bind', 'verify', 'unbind', 'edit-credential', 'egress-refresh', 'e
               v-if="account.platform === 'wechat_official' && account.authSource !== 'demo'"
               size="small"
               quaternary
+              :disabled="readonly"
+              :title="readonlyReason || '修改该账号的 AppID/AppSecret'"
               @click="$emit('edit-credential', account)"
             >
               修改凭据
@@ -53,6 +66,8 @@ defineEmits(['bind', 'verify', 'unbind', 'edit-credential', 'egress-refresh', 'e
               v-if="account.authSource !== 'demo'"
               size="small"
               quaternary
+              :disabled="readonly"
+              :title="readonlyReason || '真实调用平台接口验证凭据'"
               @click="$emit('verify', account)"
             >
               验证授权
@@ -62,6 +77,8 @@ defineEmits(['bind', 'verify', 'unbind', 'edit-credential', 'egress-refresh', 'e
               size="small"
               type="error"
               quaternary
+              :disabled="readonly"
+              :title="readonlyReason || '解绑后该账号不再参与发布'"
               @click="$emit('unbind', account)"
             >
               解绑

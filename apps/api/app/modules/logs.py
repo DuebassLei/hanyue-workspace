@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from ..core import log_reader
 from ..core.deps import ApiError, CurrentUser
 
-router = APIRouter(tags=["logs"])
+from ..core.rbac import require_permission
+
+router = APIRouter(tags=["logs"], dependencies=[require_permission("logs.view")])
 
 _VALID_SERVICES = ("api", "worker")
 

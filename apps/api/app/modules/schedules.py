@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import select
 
 from .. import models, schemas
@@ -19,7 +19,9 @@ from ..services import scheduled_tasks
 from ..services import scheduler as scheduler_module
 from ..services.scheduled_tasks import ScheduleError
 
-router = APIRouter(prefix="/schedules", tags=["schedules"])
+from ..core.rbac import require_permission
+
+router = APIRouter(prefix="/schedules", tags=["schedules"], dependencies=[require_permission("schedules.use")])
 
 settings = get_settings()
 

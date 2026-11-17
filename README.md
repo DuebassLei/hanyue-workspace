@@ -10,7 +10,7 @@
 |---|---|
 | 前端 | Vue 3 + Vite + Pinia + Vue Router |
 | 后端 | FastAPI + SQLAlchemy 2 + Pydantic v2（27 个路由模块 / 33 个领域服务） |
-| 数据库 | 本地与生产统一用 PostgreSQL 16；`DATABASE_URL` 可指向任意实例，SQLite 仅作无 Docker 时的兜底（生产门禁会拒绝） |
+| 数据库 | 本地与生产统一用 PostgreSQL 16/17；`DATABASE_URL` 可指向任意实例，SQLite 仅作无 PG 时的兜底（生产门禁会拒绝） |
 | 队列 | Redis + `apps/worker/worker.py`；未配置 Redis 时回退 API 内置线程池，两种后端共用 `job_runner`，任务状态都落 `background_jobs` 表 |
 | 图像 | Pillow 基础处理（同步小图 / 队列大图）+ 配置驱动的 AI 生图适配器 |
 | 平台 | OAuth2 + PKCE 连接器注册表 + Phase 0 能力核验证据文件 |
@@ -33,19 +33,30 @@ hanyue-workspace/
 
 ### A. 本地开发（最简，无需 Redis）
 
-**1. 起本地数据库**（PostgreSQL 16 + Redis，独立卷与端口 5433/6380，不影响生产数据）：
+**1. 起本地数据库**（PostgreSQL 16/17，端口 5433，不影响生产数据）。两种来源，连接串完全相同：
 
 ```bash
+# 1a) 本机已装 PostgreSQL，不用容器（推荐；数据在 infra/.pgdev/data，删目录即清空）
 cd infra
-./scripts/dev-db.sh up        # 首次会 initdb 并执行 postgres/init/01-init.sql
+./scripts/dev-pg.sh up        # 首次会 initdb、建库并执行 postgres/init/01-init.sql
 # 输出：
 #   DATABASE_URL=postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue
+
+# 1b) 只起 Docker 版库（顺带一个 Redis，端口 6380）
+./scripts/dev-db.sh up
 #   REDIS_URL=redis://127.0.0.1:6380/0
 ```
 
+两种方式抢同一个 5433，**同时只用一个**。`dev-pg.sh` 还支持复用系统已装的 PG 服务：
+`PG_MODE=service ./scripts/dev-pg.sh up`（连 5432，需 `postgres` 超级用户密码）。
+
+> **Windows PowerShell 用同名 `.ps1`**：`.\scripts\dev-pg.ps1 up`、`status`、`bootstrap`、`down`。
+> `.sh` 在 PowerShell 里会被系统 `bash.exe`（WSL）接管，等于没跑；Git Bash 里则照常用 `.sh`。
+
 `apps/api/.env` 的 `DATABASE_URL` 已按上面的地址配好。常用命令：`status` / `psql` /
-`reset`（删卷重建）/ `bootstrap`（建表并创建首个账号）/ `import-sqlite`（搬旧 SQLite 数据）。
-没有 Docker 时可把 `.env` 里被注释的 `sqlite:///./hanyue.db` 打开，但生产必须用 PG。
+`reset`（删数据重建）/ `bootstrap`（建表并创建首个账号）/ `import-sqlite`（搬旧 SQLite 数据）/
+`write-env`（把连接串写回 `apps/api/.env`）。两个脚本子命令一致，换来源不用改代码。
+没有 PG 时可把 `.env` 里被注释的 `sqlite:///./hanyue.db` 打开，但生产必须用 PG。
 
 **2. 后端**必须在 `apps/api` 目录下启动：`.env` 固定读取 `apps/api/.env`，相对路径也以该目录为基准。
 
@@ -71,7 +82,7 @@ npm run dev
 ```
 
 首次打开会停在登录页：点「立即注册」创建账号（库里还没有密码账号时自动放行），
-或用 `./scripts/dev-db.sh bootstrap` 一步建表 + 建账号。开发态免密入口
+或用 `./scripts/dev-pg.sh bootstrap` / `./scripts/dev-db.sh bootstrap` 一步建表 + 建账号。开发态免密入口
 （`local-creator`）仍保留，但只在 `ALLOW_DEV_LOGIN=true` 时显示。
 
 | 入口 | 地址 | 说明 |
@@ -409,7 +420,7 @@ OAuth 平台的令牌验证端点按官方文档**显式配置**（`PLATFORM_<�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue` | 本地由 `infra/scripts/dev-db.sh up` 提供；生产指向 compose 的 `db`。用 SQLite 会被生产门禁拒绝 |
+| `DATABASE_URL` | `postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue` | 本地由 `infra/scripts/dev-pg.sh up`（本机 PG）或 `dev-db.sh up`（Docker）提供；生产指向 compose 的 `db`。用 SQLite 会被生产门禁拒绝 |
 | `ENVIRONMENT` | `development` | 设为 `production` 时启用启动安全门禁 |
 | `ALLOW_DEV_LOGIN` | `true`（本地） | 任意 subject 换 token 的开发入口；生产必须为 `false`，正式登录用邮箱密码 |
 | `SECRET_KEY` | `dev-only-change-me` | 令牌签名、凭据加密、上传会话签名；生产必须 ≥32 字符随机值 |

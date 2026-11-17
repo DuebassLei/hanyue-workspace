@@ -33,6 +33,7 @@ from .modules import (
     preferences,
     prompts,
     publishing,
+    rbac,
     skills,
     novels,
     schedules,
@@ -44,7 +45,7 @@ from .modules import (
     workspaces,
 )
 from .services import handdraw as handdraw_import
-from .services import scheduled_tasks, scheduler, skill_registry
+from .services import rbac_service, scheduled_tasks, scheduler, skill_registry
 
 settings = get_settings()
 configure_logging(settings)
@@ -55,6 +56,8 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     init_db()
     with SessionLocal() as session:
+        # RBAC 播种：补权限点/内置角色/菜单，并保证存量用户至少有一个角色
+        rbac_service.seed(session)
         handdraw_import.import_library(session)
         # 内置 Skill 在启动时同步；读接口不再承担写库/迁移职责
         skill_registry.sync_builtin_skills(session)
@@ -154,6 +157,7 @@ for module in (
     storyboards,
     videos,
     schedules,
+    rbac,
 ):
     app.include_router(module.router, prefix=settings.api_prefix)
 

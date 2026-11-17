@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import func, select
 
 from .. import models, schemas
@@ -15,7 +15,9 @@ from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not
 from ..core.security import sign_asset_url
 from ..services.image_service import storage_path
 
-router = APIRouter(tags=["storyboards"])
+from ..core.rbac import require_permission
+
+router = APIRouter(tags=["storyboards"], dependencies=[require_permission("storyboards.use")])
 
 
 def _url(asset_id: str | None) -> str | None:

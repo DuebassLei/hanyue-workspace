@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy import select
 
 from .. import models, schemas
 from ..core.deps import CurrentUser, DbSession, not_found
 from ..services import card_paginator
 
-router = APIRouter(tags=["cards"])
+from ..core.rbac import require_permission
+
+router = APIRouter(tags=["cards"], dependencies=[require_permission("cards.use")])
 
 
 def _now_iso() -> str:

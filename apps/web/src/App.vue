@@ -19,6 +19,7 @@ import {
   zhCN,
 } from 'naive-ui'
 import { useSessionStore } from './stores/session'
+import { useRbacStore } from './stores/rbac'
 import { accentKey, bindShellAppearance, fontKey, setAccent, setFontSize, useNaiveTheme } from './ui/theme'
 import { syncFeedbackTheme } from './ui/feedback'
 import { NAV_GROUPS, breadcrumbsFor, findNav } from './ui/nav'
@@ -35,6 +36,7 @@ import LoginView from './views/LoginView.vue'
 const route = useRoute()
 const router = useRouter()
 const session = useSessionStore()
+const rbac = useRbacStore()
 const COLLAPSE_KEY = 'hanyue-sider-collapsed'
 const OPEN_KEY = 'hanyue-menu-open'
 
@@ -117,6 +119,10 @@ const groupIcons = {
     h('path', { d: 'M4 14.5 8.2 6h1.1l4.2 8.5' }),
     h('path', { d: 'M5.6 11.2h6.3' }),
     h('path', { d: 'M14 9.5v5M11.8 12h4.4' }),
+  ]),
+  rbac: strokeIcon([
+    h('path', { d: 'M10 2.8 16 5.5v4.4c0 3.3-2.4 6.2-6 7.3-3.6-1.1-6-4-6-7.3V5.5L10 2.8Z' }),
+    h('path', { d: 'm7.6 10 1.7 1.7 3.3-3.4' }),
   ]),
   system: strokeIcon([
     h('circle', { cx: '10', cy: '10', r: '2.2' }),
@@ -222,24 +228,49 @@ const itemIcons = {
     h('circle', { cx: '10', cy: '10', r: '6.5' }),
     h('path', { d: 'M10 6.5V10l2.6 1.6' }),
   ]),
+  users: strokeIcon([
+    h('circle', { cx: '7.5', cy: '7.5', r: '2.6' }),
+    h('path', { d: 'M3 16.5a4.5 4.5 0 0 1 9 0' }),
+    h('path', { d: 'M13 5.2a2.4 2.4 0 0 1 0 4.6M14.5 16.5a4 4 0 0 0-2-3.4' }),
+  ]),
+  roles: strokeIcon([
+    h('path', { d: 'M10 2.8 16 5.5v4.4c0 3.3-2.4 6.2-6 7.3-3.6-1.1-6-4-6-7.3V5.5L10 2.8Z' }),
+    h('path', { d: 'm7.6 10 1.7 1.7 3.3-3.4' }),
+  ]),
+  menus: strokeIcon([
+    h('path', { d: 'M3.5 5.5h13M3.5 10h13M3.5 14.5h13' }),
+    h('circle', { cx: '6' , cy: '5.5', r: '1.1' }),
+    h('circle', { cx: '6', cy: '10', r: '1.1' }),
+    h('circle', { cx: '6', cy: '14.5', r: '1.1' }),
+  ]),
 }
 
-const menuOptions = NAV_GROUPS.map((group) => ({
-  label: group.label,
-  key: group.key,
-  icon: groupIcons[group.key],
-  children: group.items.map((item) => ({
-    label: item.label,
-    key: item.name,
-    icon: itemIcons[item.name],
+// 菜单以服务端为准（管理员可在「菜单管理」调整）；拉取失败时回退静态表，
+// 保证后端不可达也能看到骨架，而不是空白侧栏。
+const navGroups = computed(() => (rbac.menus.length ? rbac.menus : NAV_GROUPS))
+
+const menuOptions = computed(() =>
+  navGroups.value.map((group) => ({
+    label: group.label,
+    key: group.key,
+    icon: groupIcons[group.key],
+    children: group.items.map((item) => ({
+      label: item.label,
+      key: item.name,
+      icon: itemIcons[item.name] || itemIcons.overview,
+    })),
   })),
-}))
+)
 
-const mobileNav = NAV_GROUPS.flatMap((group) => group.items)
+const mobileNav = computed(() => navGroups.value.flatMap((group) => group.items))
 
-const activeKey = computed(() => findNav(route.name)?.name || null)
+const activeKey = computed(() => {
+  const items = navGroups.value.flatMap((group) => group.items)
+  const hit = items.find((item) => item.name === route.name || item.aliases?.includes(route.name))
+  return hit?.name || null
+})
 
-const crumbs = computed(() => breadcrumbsFor(route.name, route.meta.title))
+const crumbs = computed(() => breadcrumbsFor(route.name, route.meta.title, navGroups.value))
 
 const themeLabel = computed(() =>
   session.theme === 'system' ? '跟随系统' : session.theme === 'dark' ? '暗色' : '浅色',
@@ -284,6 +315,32 @@ async function toggleFullscreen() {
     /* 浏览器拒绝全屏时保持原状，按钮仍可再试 */
   }
 }
+
+// 登录态变化时同步权限：登出即清空，登入即拉取。
+// 拉取失败保留旧值（network 抖动不该让侧栏突然空掉）。
+watch(
+  () => session.user?.id || null,
+  async (userId) => {
+    if (!userId) {
+      rbac.reset()
+      return
+    }
+    await rbac.load()
+    const saved = localStorage.getItem(OPEN_KEY)
+    if (!saved) expandedKeys.value = navGroups.value.map((group) => group.key)
+  },
+)
+
+// 首屏直达一个没权限的页面时（旧书签/群里的链接），落到明确的 403 页。
+// 守卫在登录前无法判断，只能等权限加载完在这里补一次。
+watch(
+  () => [rbac.loaded, route.name],
+  () => {
+    const need = route.meta?.permission
+    if (!rbac.loaded || !need || rbac.can(need)) return
+    router.replace({ name: 'forbidden', query: { from: route.fullPath, need } })
+  },
+)
 
 onMounted(() => {
   session.boot()

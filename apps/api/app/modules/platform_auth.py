@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import select
 
 from .. import models
@@ -17,10 +17,17 @@ from ..connectors import registry
 from ..connectors import wechat_mp
 from ..core.deps import ApiError, CurrentUser, DbSession, not_found
 
+from ..core.rbac import require_permission
+
+# 读（凭据状态、能力表、同步进度）只要看得见发布页；
+# 只有「跑真实探针」会改账号状态并调平台接口，归发布管理。
+_PUBLISH_READ = [require_permission("publishing.view", "publishing.use", mode="any")]
+_PUBLISH_WRITE = [require_permission("publishing.use")]
+
 router = APIRouter(tags=["platform-auth"])
 
 
-@router.get("/platforms/connectors/status")
+@router.get("/platforms/connectors/status", dependencies=_PUBLISH_READ)
 def connectors_status(user: CurrentUser, db: DbSession) -> dict:
     report = connectors.evidence_report()
     platforms = [registry.connector_status(code, db) for code in connectors.PLATFORMS]
@@ -60,7 +67,7 @@ def connectors_status(user: CurrentUser, db: DbSession) -> dict:
     }
 
 
-@router.get("/platforms/{platform}/maintenance")
+@router.get("/platforms/{platform}/maintenance", dependencies=_PUBLISH_READ)
 def platform_maintenance(platform: str, user: CurrentUser, db: DbSession) -> dict:
     """单平台维护视图：凭据状态、能力、验证能力、绑定账号一次返回。"""
     if platform not in connectors.PLATFORMS:
@@ -104,7 +111,7 @@ def platform_maintenance(platform: str, user: CurrentUser, db: DbSession) -> dic
     }
 
 
-@router.post("/platform-accounts/{account_id}/test")
+@router.post("/platform-accounts/{account_id}/test", dependencies=_PUBLISH_WRITE)
 def test_platform_account(account_id: str, user: CurrentUser, db: DbSession) -> dict:
     """统一真实验证入口：公众号凭据走连接器探针（draft/batchget）。
 
@@ -148,7 +155,7 @@ def test_platform_account(account_id: str, user: CurrentUser, db: DbSession) -> 
     }
 
 
-@router.get("/platform-accounts/{account_id}/sync-status")
+@router.get("/platform-accounts/{account_id}/sync-status", dependencies=_PUBLISH_READ)
 def sync_status(account_id: str, user: CurrentUser, db: DbSession) -> dict:
     account = db.get(models.ConnectedAccount, account_id)
     if not account or account.owner_user_id != user.id:

@@ -9,7 +9,8 @@
 |---|---|---|
 | Python | 3.12（≥3.10 可用） | 后端与 Worker 共用同一个虚拟环境 |
 | Node.js | ≥ 18 | 前端 Vite |
-| Docker / Compose | 可选 | 仅在方式 C、以及本地起 Redis 时需要 |
+| PostgreSQL | 16 / 17 | 本地开发两种来源任选：本机已装的服务，或脚本自建私有集群（见方式 A-1） |
+| Docker / Compose | 可选 | 仅方式 A-2、方式 C 和 Docker 版 Redis 需要 |
 | Redis | 可选 | 不装就用 API 内置线程池 |
 
 仓库结构要点：`apps/api`（FastAPI）、`apps/web`（Vue 3）、`apps/worker`（队列消费者，复用 `apps/api/app` 的领域服务）、`infra`（compose 与平台证据文件）。
@@ -18,7 +19,100 @@
 
 ### 方式 A：本地开发（最简）
 
-**先起本地数据库**（PostgreSQL 16 + Redis，独立卷与端口 5433/6380）：
+数据库二选一，连接串格式完全相同，换来源不用改代码：
+
+| | A-1 本机 PostgreSQL（**不用容器**） | A-2 Docker 只起库 |
+|---|---|---|
+| 命令 | `cd infra && ./scripts/dev-pg.sh up` | `cd infra && ./scripts/dev-db.sh up` |
+| 端口 | 5433（自建集群）／5432（复用系统服务） | 5433（PG）+ 6380（Redis） |
+| 数据位置 | `infra/.pgdev/data`（可整目录删掉） | Docker 卷 `hanyue-dev_pgdata-dev` |
+| 前提 | 本机装了 PostgreSQL（有 `psql` / `initdb`） | Docker Desktop 或 engine 在跑 |
+| 顺带起 Redis | 不会，需要时单独跑 | 会 |
+
+#### A-1 本机 PostgreSQL，不经过容器
+
+`infra/scripts/dev-pg.sh` 支持两种来源，用 `PG_MODE` 选：
+
+- **`cluster`（默认）**：用本机 `initdb` 在 `infra/.pgdev/data` 建一个**只监听 `127.0.0.1:5433`** 的私有集群。
+  不注册 Windows 服务、不碰系统里已有的库，`reset` 就是删目录重来。超级用户就是 `hanyue`，密码 `hanyue_dev_pwd`，因此**不需要任何密码输入**。
+- **`service`**：复用本机已安装并注册成服务的 PostgreSQL（默认 `127.0.0.1:5432`），
+  只在里面建角色 `hanyue` 与库 `hanyue`，然后跑初始化 SQL。需要 `postgres` 超级用户密码
+  （交互输入，或给 `PGSUPERUSER_PASSWORD`）。
+
+```bash
+cd infra
+
+# —— 自建集群（推荐：隔离、无需密码、随项目删）——
+./scripts/dev-pg.sh up            # 首次 initdb + 启动 + 建库 + 跑 01-init.sql
+./scripts/dev-pg.sh status        # 进程、端口、库里的表数量
+./scripts/dev-pg.sh psql          # 直接用应用账号进 psql
+./scripts/dev-pg.sh down          # 停集群，数据留在 infra/.pgdev/data
+
+# 一次到位：起库 + 建表 + 建首个账号（密码可 HANYUE_NEW_PASSWORD 传入）
+BOOTSTRAP_EMAIL=me@example.com ./scripts/dev-pg.sh bootstrap
+
+# —— 复用系统已装的 PG 服务 ——
+PG_MODE=service ./scripts/dev-pg.sh up
+```
+
+**Windows PowerShell 用 `.ps1` 版**（`.sh` 在 PowerShell 里会被 `C:\Windows\system32\bash.exe`
+当成 WSL 脚本执行，等于没跑）：
+
+```powershell
+cd infra
+.\scripts\dev-pg.ps1 up
+.\scripts\dev-pg.ps1 status
+.\scripts\dev-pg.ps1 bootstrap          # 会问邮箱与密码
+.\scripts\dev-pg.ps1 psql               # \q 退出
+.\scripts\dev-pg.ps1 down
+
+# 复用系统已装的 PG 服务（会问 postgres 超级用户密码）
+$env:PG_MODE='service'; .\scripts\dev-pg.ps1 up
+
+# 给 psql 传参数：要么用 --%，要么把 -c 用引号包住
+.\scripts\dev-pg.ps1 psql --% -c "select count(*) from users"
+.\scripts\dev-pg.ps1 psql "-c" "select current_database()"
+# 内联 SQL 里带中文时写成 .sql 文件再 -f（命令行按 GBK 传参，psql 按 UTF8 解码）
+.\scripts\dev-pg.ps1 psql --% -f D:\tmp\check.sql
+```
+
+> 两个版本子命令、环境变量、数据目录完全一致。`.ps1` 必须保持 **UTF-8 with BOM**，
+> 否则 PowerShell 5.1 按 GBK 读会把中文提示读成语法错误。提示「禁止运行脚本」时用
+> `powershell -ExecutionPolicy Bypass -File .\scripts\dev-pg.ps1 up`。
+
+| 子命令 | 作用 |
+|---|---|
+| `up [--write-env]` | 初始化 + 启动 + 建库；`--write-env` 顺手把 `DATABASE_URL` 写进 `apps/api/.env` |
+| `down` | 停集群（`service` 模式只提示，不动系统服务） |
+| `status` / `ps` | 模式、端口、进程、就绪状态、`public` 表数量 |
+| `psql` | 用应用账号进入 psql |
+| `reset` | 删掉 `infra/.pgdev/data` 重建（二次确认；`service` 模式拒绝执行） |
+| `url` | 只打印 `DATABASE_URL` |
+| `init-sql` | 只重跑 `postgres/init/01-init.sql`（时区、`statement_timeout`、`pg_trgm`） |
+| `bootstrap` | `up` + 建表（`init_db`）+ 创建首个账号 |
+| `import-sqlite [file]` | 把旧 SQLite 数据导入（默认 `apps/api/hanyue.db`） |
+| `write-env` | 把当前连接串写进 `apps/api/.env` 的 `DATABASE_URL` 行 |
+
+可覆盖的变量（也可写进 `infra/.env`）：`PG_MODE`、`PG_BIN`、`DEV_PG_PORT`、
+`DEV_POSTGRES_USER` / `DEV_POSTGRES_PASSWORD` / `DEV_POSTGRES_DB`、
+`PGSUPERUSER` / `PGSUPERUSER_PASSWORD`、`PG_DATA_DIR`、`BOOTSTRAP_EMAIL`。
+
+几个容易踩的点：
+
+- 脚本自己探测 `psql`：先看 `PATH`，再扫 `C:\Program Files\PostgreSQL\*\bin`（取版本号最大的），
+  然后 macOS Homebrew / Linux `apt` 的常见路径。探测错了就 `PG_BIN="/path/to/bin"` 指定。
+- **端口**：自建集群刻意用 `5433`，避开系统服务占用的 `5432`；若 5433 也被占，用
+  `DEV_PG_PORT=5434 ./scripts/dev-pg.sh up`（compose 版同理）。
+- **`postgres.exe` 无法监听端口**（日志里 `could not create any TCP/IP sockets` / `Permission denied`）：
+  多半是企业安全软件或防火墙拦了它，或端口落在 Windows 保留区间
+  （`netsh int ipv4 show excludedportrange protocol=tcp` 查）。两条出路：换端口，或直接
+  `PG_MODE=service ./scripts/dev-pg.sh up` 用系统那个已经在跑的服务。
+- 库级设置、扩展都来自 `infra/postgres/init/01-init.sql`，与 Docker 版**同一份文件**，
+  两边行为一致；改了这个文件要 `init-sql` 重跑一次才生效。
+- 连接串默认 `postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue`，
+  与 `apps/api/.env` 里的默认值一致，所以走自建集群时 `.env` 不用改。
+
+#### A-2 Docker 只起库
 
 ```bash
 cd infra
@@ -29,8 +123,11 @@ cd infra
 它会打印 `DATABASE_URL` 与 `REDIS_URL`，与 `apps/api/.env` 里的默认值一致。
 `./scripts/dev-db.sh bootstrap` 可一次完成「起库 + 建表 + 创建首个账号」。
 
+> A-1 与 A-2 抢同一个 5433 端口，**同时只能用一个**。切回 Docker 版前先
+> `./scripts/dev-pg.sh down`。
+
 后端**必须在 `apps/api` 目录启动**：`.env` 固定为 `apps/api/.env`，
-`DATABASE_URL` 里的相对 SQLite 路径（仅无 Docker 时的兜底）也以该目录为基准。
+`DATABASE_URL` 里的相对 SQLite 路径（仅无 PG 时的兜底）也以该目录为基准。
 
 **Windows PowerShell**
 
@@ -168,7 +265,7 @@ shell / compose 注入的环境变量  >  apps/api/.env  >  代码默认值
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue` | 本地由 `infra/scripts/dev-db.sh up` 提供；生产用 compose 的 `db`。SQLite 仅作无 Docker 兜底 |
+| `DATABASE_URL` | `postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue` | 本地由 `infra/scripts/dev-pg.sh up`（本机 PG）或 `dev-db.sh up`（Docker）提供；生产用 compose 的 `db`。SQLite 仅作无 PG 时的兜底 |
 | `SECRET_KEY` | `dev-only-change-me` | 令牌签名、凭据加密、上传会话签名；生产必须替换 |
 | `STORAGE_DIR` | `apps/api/storage` | 素材存储目录 |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 逗号分隔 |

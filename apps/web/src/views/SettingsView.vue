@@ -175,7 +175,8 @@ const RISK_LABELS = {
   forbidden: '禁止',
 }
 // 写作风格的默认排版主题：从 /wechat-mp/themes 拉取系统预设
-// （manifest 校验只认预设，自定义主题不能出现在这里）；拉取失败退回内置快照。
+// （manifest 校验只认预设，自定义主题不能出现在这里）。
+// 这个接口要 wechat_layout.use 或 publishing.use；普通用户会 403，退回内置快照。
 const THEME_FALLBACK = [
   { value: 'ink-green', label: '墨绿简约 · 知识/职场/干货' },
   { value: 'warm-orange', label: '暖橙生活 · 生活/情感/美食' },

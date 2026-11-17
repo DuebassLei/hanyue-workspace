@@ -2,7 +2,7 @@
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -12,7 +12,9 @@ from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not
 from ..services import job_runner, novel_continue, novel_rewrite
 from ..services.novel_split import split_chapters
 
-router = APIRouter(tags=["novels"])
+from ..core.rbac import require_permission
+
+router = APIRouter(tags=["novels"], dependencies=[require_permission("novels.use")])
 
 _RULE_KEYS = ("person", "style", "banned")
 _EMPTY_FACTS = {"characterChanges": [], "itemHoldings": [], "events": [], "openHooks": []}

@@ -25,7 +25,14 @@ import {
 } from 'naive-ui'
 import { api } from '../api/client'
 import { toast } from '../ui/feedback'
+import { usePermission } from '../composables/usePermission'
 import StatusTag from '../components/StatusTag.vue'
+
+// 页面本身只要求 models.view：能确认「现在挂的是哪个模型、通不通」。
+// 换 Key、删连接、登记模型代号是 models.manage，两者分开——
+// 删错一个连接全站创作停摆，看和改不该是同一个权限。
+const { can } = usePermission()
+const canManage = computed(() => can('models.manage'))
 
 const connections = ref([])
 const statusRows = ref([])
@@ -646,6 +653,11 @@ onMounted(() => {
 
     <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
 
+    <n-alert v-if="!canManage" type="info" :bordered="false">
+      你当前只有「模型查看」权限：能看到正在使用的模型、连接状态与密钥掩码；
+      新增连接、修改密钥、删除连接需要「模型管理」权限，请联系超级管理员。
+    </n-alert>
+
     <section class="card">
       <div class="row">
         <h2 class="card-title" style="margin: 0">当前生效</h2>
@@ -687,7 +699,14 @@ onMounted(() => {
         <h2 class="card-title" style="margin: 0">{{ section.label }}</h2>
         <span class="group-count">{{ section.rows.length }} 个连接</span>
         <div class="spacer" />
-        <n-button v-if="section.addLabel" size="small" secondary @click="openCreate(section.value)">
+        <n-button
+          v-if="section.addLabel"
+          size="small"
+          secondary
+          :disabled="!canManage"
+          :title="canManage ? '' : '需要「模型管理」权限'"
+          @click="openCreate(section.value)"
+        >
           {{ section.addLabel }}
         </n-button>
       </div>
@@ -695,7 +714,14 @@ onMounted(() => {
 
       <n-empty v-if="!section.rows.length" :description="section.empty || '暂无连接'" size="small">
         <template v-if="section.addLabel" #extra>
-          <n-button size="small" @click="openCreate(section.value)">{{ section.addLabel }}</n-button>
+          <n-button
+            size="small"
+            :disabled="!canManage"
+            :title="canManage ? '' : '需要「模型管理」权限'"
+            @click="openCreate(section.value)"
+          >
+            {{ section.addLabel }}
+          </n-button>
         </template>
       </n-empty>
       <div v-else class="list">
@@ -720,9 +746,34 @@ onMounted(() => {
             <div v-else class="list-meta" style="margin-top: 4px">未登记模型 · 编辑后填写模型代号</div>
           </div>
           <StatusTag :status="conn.status" />
-          <n-button quaternary size="small" @click="testConnection(conn)">测试</n-button>
-          <n-button quaternary size="small" @click="openEdit(conn)">编辑</n-button>
-          <n-button quaternary size="small" type="error" @click="removeConnection(conn)">删除</n-button>
+          <n-button
+            quaternary
+            size="small"
+            :disabled="!canManage"
+            :title="canManage ? '重新测试这个连接的连通性' : '需要「模型管理」权限'"
+            @click="testConnection(conn)"
+          >
+            测试
+          </n-button>
+          <n-button
+            quaternary
+            size="small"
+            :disabled="!canManage"
+            :title="canManage ? '修改连接与密钥' : '需要「模型管理」权限'"
+            @click="openEdit(conn)"
+          >
+            编辑
+          </n-button>
+          <n-button
+            quaternary
+            size="small"
+            type="error"
+            :disabled="!canManage"
+            :title="canManage ? '删除这个连接及其模型登记' : '需要「模型管理」权限'"
+            @click="removeConnection(conn)"
+          >
+            删除
+          </n-button>
         </div>
       </div>
 

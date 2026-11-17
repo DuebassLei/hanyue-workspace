@@ -8,17 +8,23 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .core.db import Base
+
+# 生产用 PG 的 JSONB（可索引、可算子查询）；测试跑 SQLite 时自动退化成 JSON。
+JSONBDoc = JSON().with_variant(JSONB, "postgresql")
 
 
 def new_id() -> str:
@@ -1040,4 +1046,152 @@ class ScheduledTaskRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---------------- RBAC：角色 / 权限 / 菜单 ----------------
+#
+# 关系：用户 —(user_roles, 多对多)— 角色 —(role_permissions, 多对多)— 权限
+#       角色 —(role_menus, 多对多)— 菜单
+#
+# 两条不可动摇的约定：
+#   1. **菜单是权限的投影，不是权限本身。** 隐藏菜单只影响可见性，接口一律按
+#      require_permission 校验；绕过前端直接调接口照样 403。
+#   2. **超管靠 is_superadmin 表达，不靠塞一条 `*` 权限。** 通配符进表会让
+#      「这个角色到底有哪些权限」变得无法用 SQL 回答，审计时说不清楚。
+#
+# 菜单树用 parent_id + 冗余 path（写入时维护）表达：path 可索引、可排序、
+# 可直接做面包屑，避免每次渲染都跑递归 CTE。菜单总量是几十行量级，一次全查
+# 再在内存里组树，比递归查询更快也更好读。
+
+
+class Role(Base, TimestampMixin):
+    """角色。`is_system` 的内置角色不可删除（可改权限），避免把超管角色误删后锁死系统。"""
+
+    __tablename__ = "roles"
+    __table_args__ = (
+        CheckConstraint("sort >= 0", name="ck_roles_sort"),
+        Index("ix_roles_sort", "sort"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 稳定标识（代码里引用它，不用 id）：superadmin / operator / editor / member
+    role_key: Mapped[str] = mapped_column(String(48), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(48))
+    description: Mapped[str] = mapped_column(String(200), default="")
+    # 超管：拥有全部权限，且不受「权限点被删除」影响
+    is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    sort: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class Permission(Base):
+    """权限点目录。code 是稳定契约（前端 meta.permission 与后端 require_permission 共用）。
+
+    由启动播种维护：新增代码里的权限点会插入，删除的**不会**自动清理（可能有角色绑定），
+    只在管理页标记为「已废弃」由人工处理。
+    """
+
+    __tablename__ = "permissions"
+    __table_args__ = (Index("ix_permissions_module_sort", "module", "sort"),)
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+    # 分组：创作 / 运营 / 系统 / 权限
+    module: Mapped[str] = mapped_column(String(32), default="general")
+    sort: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RolePermission(Base):
+    __tablename__ = "role_permissions"
+
+    role_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True
+    )
+    permission_code: Mapped[str] = mapped_column(
+        String(64), ForeignKey("permissions.code", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class Menu(Base, TimestampMixin):
+    """菜单项。`menu_key` 对 page 类型必须等于前端路由 name，对 group 类型是分组标识。
+
+    icon 只存**字典键**（如 `studio`），不存 SVG：图标是前端资产，存进数据库会让
+    一次视觉调整变成数据迁移。
+    """
+
+    __tablename__ = "menus"
+    __table_args__ = (
+        CheckConstraint("kind IN ('group', 'page', 'link')", name="ck_menus_kind"),
+        CheckConstraint("sort >= 0", name="ck_menus_sort"),
+        Index("ix_menus_parent_sort", "parent_id", "sort"),
+        Index("ix_menus_path", "path"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 自引用用 RESTRICT：有子菜单时不允许删父级，必须先把子级移走
+    parent_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("menus.id", ondelete="RESTRICT"), nullable=True
+    )
+    menu_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    label: Mapped[str] = mapped_column(String(48))
+    short_label: Mapped[str] = mapped_column(String(24), default="")
+    icon: Mapped[str] = mapped_column(String(32), default="")
+    # 物化路径，如 /create/overview；写入时由服务端维护，不接受前端传入
+    path: Mapped[str] = mapped_column(String(200), default="")
+    kind: Mapped[str] = mapped_column(String(16), default="page", server_default="page")
+    # 该菜单要求的权限点；为空表示登录即可见（如「设置」）
+    permission_code: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("permissions.code", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    sort: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    visible: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+
+class RoleMenu(Base):
+    __tablename__ = "role_menus"
+
+    role_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True
+    )
+    menu_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("menus.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class UserRole(Base):
+    __tablename__ = "user_roles"
+
+    user_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    role_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class RbacAuditLog(Base):
+    """权限变更审计。改角色、改菜单、给别人授权，都必须留一条。
+
+    没有这张表，"谁把我的后台权限关了" 这种问题是查不出来的。
+    """
+
+    __tablename__ = "rbac_audit_logs"
+    __table_args__ = (Index("ix_rbac_audit_target", "target_type", "target_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 操作人；账号被删时置空，但审计记录本身保留
+    actor_user_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    action: Mapped[str] = mapped_column(String(48), index=True)
+    target_type: Mapped[str] = mapped_column(String(24), default="")
+    target_id: Mapped[str] = mapped_column(String(64), default="")
+    detail: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
 

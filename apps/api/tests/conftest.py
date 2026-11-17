@@ -74,7 +74,65 @@ def ai_test_double(request, monkeypatch):
     monkeypatch.setattr(ai_gateway, "generate_text", fake_generate_text)
 
 
-def login(client, subject="user-a"):
+@pytest.fixture(autouse=True)
+def business_role(monkeypatch, request):
+    """业务用例里登录的账号默认拿到 `superadmin`（最大权限）。
+
+    绝大多数用例检验的是功能本身（发布、排版、模型、定时任务……），不是权限边界。
+    这些模块接上 `require_permission` 之后，如果测试账号仍是低权限角色，
+    几百个用例会集体 403——那检验的是夹具，不是业务代码。
+
+    为什么是超管而不是运营：运营已经收窄成「可看模型配置、不可改密钥」，
+    而模型类用例需要建连接、换 Key、跑探针。业务用例以最大权限运行，
+    权限边界交给 `tests/test_permission_gate.py` 用显式角色去验，两边不互相绑架。
+
+    `tests/test_rbac.py` 不参与这个替换：那里的新用户照旧是 `member`，
+    才能验出「没权限就是 403」。需要精确控制角色的用例，用
+    `conftest.login(client, role="member")`。
+    """
+    if request.node.fspath.basename == "test_rbac.py":
+        return
+    from app.services import rbac_service
+
+    original = rbac_service.assign_default_role
+
+    def assign_default(db, user_id, role_key="superadmin"):
+        # 显式传了角色（比如测试自己要 member）就尊重调用方
+        return original(db, user_id, role_key)
+
+    monkeypatch.setattr(rbac_service, "assign_default_role", assign_default)
+
+
+def login(client, subject="user-a", role="superadmin"):
+    """登录并赋予角色，返回鉴权头。
+
+    业务用例检验的是功能本身，不是权限边界，所以默认给 `superadmin`（最大权限）。
+    **权限边界的用例必须显式传角色**（`role="member"` / `"operator"` / `"editor"`），
+    或像 `tests/test_rbac.py` 那样自己建用户，否则「没权限要 403」的断言会被夹具架空。
+    """
     res = client.post("/api/v1/auth/login", json={"subject": subject, "displayName": subject})
     assert res.status_code == 200, res.text
-    return {"Authorization": f"Bearer {res.json()['token']}"}
+    body = res.json()
+    _assign_role(body["user"]["id"], role)
+    return {"Authorization": f"Bearer {body['token']}"}
+
+
+def _assign_role(user_id: str, role_key: str) -> None:
+    """把用户重置为单一角色。登录时播种已给过 member，这里先清再绑。"""
+    # 延迟导入：conftest 顶层不能碰 app.core.db，否则 engine 会在收集阶段被绑到开发库
+    from sqlalchemy import delete, select
+
+    from app import models
+    from app.core.db import SessionLocal
+
+    with SessionLocal() as db:
+        role_id = db.scalar(select(models.Role.id).where(models.Role.role_key == role_key))
+        assert role_id, f"角色 {role_key} 未播种"
+        current = db.scalar(
+            select(models.UserRole.role_id).where(models.UserRole.user_id == user_id)
+        )
+        if current == role_id:
+            return
+        db.execute(delete(models.UserRole).where(models.UserRole.user_id == user_id))
+        db.add(models.UserRole(user_id=user_id, role_id=role_id))
+        db.commit()

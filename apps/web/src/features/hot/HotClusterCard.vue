@@ -10,6 +10,10 @@ const props = defineProps({
   busy: { type: Boolean, default: false },
   detailLoading: { type: Boolean, default: false },
   expanded: { type: Boolean, default: false },
+  // 空串=有权限。透传而不是在卡片里读 store：卡片只负责展示，
+  // 权限判断留在页面，卡片保持可复用（弹窗里也会用）。
+  writeDenied: { type: String, default: '' },
+  stickerDenied: { type: String, default: '' },
 })
 
 const emit = defineEmits(['write', 'ignore', 'toggle', 'sticker'])
@@ -101,8 +105,11 @@ const score = computed(() => Number(props.cluster.score) || 0)
               type="primary"
               size="small"
               :loading="busy"
-              :disabled="cluster.status === 'ignored'"
-              :title="cluster.status === 'ignored' ? '已忽略，先恢复再写' : '基于这条热点新建稿件'"
+              :disabled="cluster.status === 'ignored' || Boolean(writeDenied)"
+              :title="
+                writeDenied ||
+                (cluster.status === 'ignored' ? '已忽略，先恢复再写' : '基于这条热点新建稿件')
+              "
               @click="emit('write', cluster)"
             >
               {{ cluster.status === 'generated' ? '再写一篇' : '写这篇' }}
@@ -113,7 +120,13 @@ const score = computed(() => Number(props.cluster.score) || 0)
             <n-button secondary size="small" :loading="detailLoading" @click="emit('toggle', cluster)">
               {{ expanded ? '收起原文' : '展开原文' }}
             </n-button>
-            <n-button secondary size="small" title="基于这条热点做一组贴图" @click="emit('sticker', cluster)">
+            <n-button
+              secondary
+              size="small"
+              :disabled="Boolean(stickerDenied)"
+              :title="stickerDenied || '基于这条热点做一组贴图'"
+              @click="emit('sticker', cluster)"
+            >
               做贴图
             </n-button>
             <a

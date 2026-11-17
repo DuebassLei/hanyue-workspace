@@ -23,7 +23,7 @@ from __future__ import annotations
 import io
 import zipfile
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import delete, select
 
 from .. import models, schemas
@@ -34,7 +34,9 @@ from ..core.security import sign_asset_url
 from ..services import sticker_styles
 from ..services.image_service import storage_path
 
-router = APIRouter(tags=["stickers"])
+from ..core.rbac import require_permission
+
+router = APIRouter(tags=["stickers"], dependencies=[require_permission("stickers.use", "hot_topics.view", mode="any")])
 
 # 可编辑图序的状态；generating/deleted 不允许改 outline。
 # done 放行是给「再补一张」闭环用的——put_outline 内部会拒绝仍有在跑任务的归档集合。

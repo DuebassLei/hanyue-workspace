@@ -21,6 +21,12 @@ storage/
 # 本地运行时配置
 infra/platform-evidence.json
 
+# 本机原生 PostgreSQL 集群（infra/scripts/dev-pg.sh 创建，可随时 reset）
+infra/.pgdev/
+
+# 本机一键启停的运行时状态（infra/scripts/dev.ps1：PID、日志、连库探针）
+infra/.dev/
+
 # 视频渲染 / 截图测试产物，不入库
 *.mp4
 

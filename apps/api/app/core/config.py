@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # 邮箱密码注册：默认关闭。仅当库里还没有任何密码账号时例外（首个账号 bootstrap，
     # 否则新部署永远进不去）。多人自用/内网想开放注册时设为 true。
     allow_registration: bool = False
+    # ── RBAC ───────────────────────────────────────────────────────────
+    # 首个注册用户自动成为超级管理员。新库需要一个能进后台的人；
+    # 公网部署若走邀请制，可设为 false 后由人工在库里授予。
+    bootstrap_first_user_superadmin: bool = True
     # 密码策略与登录爆破防护
     password_min_length: int = 8
     auth_lock_threshold: int = 5  # 连续失败达到该次数即锁定

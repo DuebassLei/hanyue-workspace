@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
@@ -17,6 +17,17 @@ from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not
 from ..core.security import decrypt_secret, encrypt_secret, mask_secret
 from ..services import ai_gateway
 
+from ..core.rbac import require_permission
+
+# 这个模块混了三类东西，**不能整模块挂管理权限**：
+#   - 连接写操作 / 探针 / catalog 写操作 → models.manage（会碰密钥，误删代价极高）
+#   - GET /models/connections → models.view（看得见配置，改不了）
+#   - GET /models/catalog、/models/status → 所有创作者（模型下拉、状态栏）
+#   - /ai/text-generations、/ai/generations → 创作主通道，全员可用
+_ADMIN_ONLY = [require_permission("models.manage")]
+# 「能管必能看」：只读角色（models.view）可以看连接与模型清单；
+# 老的自定义角色可能只被授过 models.manage，这里一并放行，避免升级后突然进不去。
+_MODEL_READ = [require_permission("models.view", "models.manage", mode="any")]
 router = APIRouter(tags=["models"])
 
 
@@ -58,7 +69,7 @@ def _connection_out(
     )
 
 
-@router.get("/models/connections", response_model=list[schemas.ConnectionOut])
+@router.get("/models/connections", response_model=list[schemas.ConnectionOut], dependencies=_MODEL_READ)
 def list_connections(
     user: CurrentUser,
     db: DbSession,
@@ -79,7 +90,7 @@ def list_connections(
     return [_connection_out(row, db, default_id) for row in rows]
 
 
-@router.post("/models/connections", response_model=schemas.ConnectionOut, status_code=201)
+@router.post("/models/connections", response_model=schemas.ConnectionOut, status_code=201, dependencies=_ADMIN_ONLY)
 def create_connection(
     payload: schemas.ConnectionIn, user: CurrentUser, db: DbSession
 ) -> schemas.ConnectionOut:
@@ -100,7 +111,7 @@ def create_connection(
     return _connection_out(conn, db)
 
 
-@router.patch("/models/connections/{connection_id}", response_model=schemas.ConnectionOut)
+@router.patch("/models/connections/{connection_id}", response_model=schemas.ConnectionOut, dependencies=_ADMIN_ONLY)
 def update_connection(
     connection_id: str, payload: schemas.ConnectionPatch, user: CurrentUser, db: DbSession
 ) -> schemas.ConnectionOut:
@@ -126,7 +137,7 @@ def update_connection(
     return _connection_out(conn, db)
 
 
-@router.delete("/models/connections/{connection_id}", status_code=204)
+@router.delete("/models/connections/{connection_id}", status_code=204, dependencies=_ADMIN_ONLY)
 def delete_connection(connection_id: str, user: CurrentUser, db: DbSession) -> None:
     conn = db.get(models.ModelConnection, connection_id)
     if not conn or conn.owner_user_id != user.id:
@@ -138,7 +149,7 @@ def delete_connection(connection_id: str, user: CurrentUser, db: DbSession) -> N
     db.commit()
 
 
-@router.post("/models/connections/{connection_id}/test")
+@router.post("/models/connections/{connection_id}/test", dependencies=_ADMIN_ONLY)
 def test_connection(connection_id: str, user: CurrentUser, db: DbSession) -> dict:
     conn = db.get(models.ModelConnection, connection_id)
     if not conn or conn.owner_user_id != user.id:
@@ -186,7 +197,7 @@ def _probe_credentials(
     return validated, api_key
 
 
-@router.post("/models/probe/models")
+@router.post("/models/probe/models", dependencies=_ADMIN_ONLY)
 def probe_models(
     payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -207,7 +218,7 @@ def probe_models(
     }
 
 
-@router.post("/models/probe/test")
+@router.post("/models/probe/test", dependencies=_ADMIN_ONLY)
 def probe_model(
     payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession
 ) -> dict:
@@ -245,7 +256,7 @@ def list_catalog(user: CurrentUser, db: DbSession) -> list[schemas.CatalogOut]:
     return [_model_out(row, db, default_id) for row in rows]
 
 
-@router.post("/models/catalog", response_model=schemas.CatalogOut, status_code=201)
+@router.post("/models/catalog", response_model=schemas.CatalogOut, status_code=201, dependencies=_ADMIN_ONLY)
 def add_catalog(
     payload: schemas.CatalogIn, user: CurrentUser, db: DbSession
 ) -> schemas.CatalogOut:
@@ -264,7 +275,7 @@ def add_catalog(
     return _model_out(entry, db, ai_gateway.describe_default_model(db, user.id)["id"])
 
 
-@router.patch("/models/catalog/{model_id}", response_model=schemas.CatalogOut)
+@router.patch("/models/catalog/{model_id}", response_model=schemas.CatalogOut, dependencies=_ADMIN_ONLY)
 def update_catalog(
     model_id: str, payload: schemas.CatalogPatch, user: CurrentUser, db: DbSession
 ) -> schemas.CatalogOut:
@@ -283,7 +294,7 @@ def update_catalog(
     return _model_out(entry, db, ai_gateway.describe_default_model(db, user.id)["id"])
 
 
-@router.delete("/models/catalog/{model_id}", status_code=204)
+@router.delete("/models/catalog/{model_id}", status_code=204, dependencies=_ADMIN_ONLY)
 def delete_catalog(model_id: str, user: CurrentUser, db: DbSession) -> None:
     entry = db.get(models.ModelCatalogEntry, model_id)
     if not entry:

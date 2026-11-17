@@ -10,7 +10,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, or_, select
 
 from .. import models, schemas
@@ -20,7 +20,9 @@ from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not
 from ..core.security import sign_asset_url
 from ..services import tts_provider, video_render, video_script
 
-router = APIRouter(tags=["videos"])
+from ..core.rbac import require_permission
+
+router = APIRouter(tags=["videos"], dependencies=[require_permission("videos.use")])
 
 MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right")
 

@@ -53,9 +53,15 @@ async function request(path, options = {}) {
     if (response.status === 401) notifyUnauthorized(path)
     const detail = payload?.detail || payload || {}
     const structured = detail && !Array.isArray(detail) && typeof detail === 'object'
+    const code = structured ? detail.code || 'error' : 'validation_error'
+    // 权限被管理员收回（改角色/删权限点）时，前端手上的菜单和按钮已经过期。
+    // 抛给调用方提示的同时广播一次，让 rbac store 重新拉取，页面自己会收敛。
+    if (response.status === 403 && code === 'permission_denied') {
+      window.dispatchEvent(new CustomEvent('hanyue:permission-denied'))
+    }
     throw new ApiError(
       errorMessage(detail, `请求失败（HTTP ${response.status}）`),
-      structured ? detail.code || 'error' : 'validation_error',
+      code,
       structured ? detail.requestId : undefined,
       response.status,
     )

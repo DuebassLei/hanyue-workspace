@@ -31,7 +31,8 @@
 | `infra/docker-compose.dev.yml` | 本地开发库：只起 PG + Redis，独立项目名/卷/端口（5433、6380），不碰生产卷 |
 | `infra/postgres/init/01-init.sql` | PG 默认初始化脚本：库级时区、超时、`pg_trgm`（容器首次 initdb 时自动执行） |
 | `infra/postgres/create-role-and-db.sql` | 手工安装 PG（非 Docker）时的建库建用户脚本，幂等 |
-| `infra/scripts/dev-db.sh` | 本地库管理：up / down / reset / psql / status / bootstrap / import-sqlite |
+| `infra/scripts/dev-db.sh` | 本地库管理（Docker）：up / down / reset / psql / status / bootstrap / import-sqlite |
+| `infra/scripts/dev-pg.sh` | 本地库管理（**不用容器**）：同样的子命令，支持自建集群与复用系统已装 PG |
 | `infra/nginx/default.conf` | 站点配置：SPA history 回退、`/api` 动态解析反代、上传上限 25m、静态缓存、`/healthz` |
 | `infra/.env.example` | 变量模板；`init-env` 会基于它生成 `infra/.env` 并填入随机密钥 |
 | `infra/scripts/deploy.sh` | 部署入口：init-env / up / down / health / logs / backup / restore / migrate / create-user / mirror |
@@ -506,8 +507,10 @@ docker compose cp ../apps/api/storage/. api:/data/storage/
 | 新部署登录页没有「注册」入口 | `ALLOW_REGISTRATION=false` 且库里已有密码账号。用 `./scripts/deploy.sh create-user create --email ...` 建账号 |
 | 换用邮箱登录后「以前的稿件都不见了」 | 内容挂在旧开发态账号（如 `local-creator`）的 user.id 上。用 `create-user attach --subject local-creator --email ...` 转正，id 不变数据保留；不要新建账号 |
 | 本地启动报 `ModuleNotFoundError: No module named 'psycopg'` | 本地切 PG 后缺驱动：`apps/api/.venv/bin/pip install -r requirements-prod.txt`（或单装 `psycopg[binary]`） |
-| 本地 API 启动报 `connection refused ... 127.0.0.1:5433` | 本地库没起：`cd infra && ./scripts/dev-db.sh up`；`status` 看容器健康 |
-| `dev-db.sh` 报端口 5433 被占 | 改 `DEV_PG_PORT`（compose 与 `DATABASE_URL` 两处要一致），或停掉占用进程 |
+| 本地 API 启动报 `connection refused ... 127.0.0.1:5433` | 本地库没起：`cd infra && ./scripts/dev-db.sh up`（用容器）或 `./scripts/dev-pg.sh up`（用本机 PG）；`status` 看进程/容器与表数量 |
+| `dev-db.sh` 报端口 5433 被占 | 改 `DEV_PG_PORT`（compose 与 `DATABASE_URL` 两处要一致），或停掉占用进程；也可能是 `dev-pg.sh` 的集群还在跑：`./scripts/dev-pg.sh down` |
+| `dev-pg.sh` 报 `could not create any TCP/IP sockets` / `Permission denied` | `postgres.exe` 被安全软件或防火墙拦了监听，或端口落在 Windows 保留区间（`netsh int ipv4 show excludedportrange protocol=tcp`）。换端口 `DEV_PG_PORT=5434`，或改用 `PG_MODE=service ./scripts/dev-pg.sh up` 复用系统已装服务 |
+| `psql` 读初始化脚本报 `character with byte sequence ... has no equivalent in encoding "UTF8"` | Windows 客户端默认 GBK 解码 UTF-8 的 SQL：设 `PGCLIENTENCODING=UTF8`（脚本已内置），手工执行时也带上 |
 | 某容器反复重启、`docker inspect` 显示 `OOMKilled: true` / exit 137 | 撞到 `mem_limit` 或宿主机内存耗尽。2G 机器先确认小内存档已生效（`doctor` 会打印），再查是谁涨的：`docker stats --no-stream`。`worker` 被杀的常见原因是同时跑了多条视频渲染 |
 | `docker stats` 里 `db` 内存一路涨到上限 | `lowmem` 档未生效（`LOWMEM=0` 或内存 ≥3GB 未自动叠加），PG 用的是默认 `work_mem` / `max_connections`；手动 `docker compose -f docker-compose.yml -f docker-compose.lowmem.yml up -d` |
 

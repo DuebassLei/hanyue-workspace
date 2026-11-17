@@ -23,10 +23,15 @@ import PublishDrawer from '../features/publish/PublishDrawer.vue'
 import DraftLibraryModal from '../features/studio/DraftLibraryModal.vue'
 import { providerOptions, resolveSelectedModelId } from '../composables/imageProviders.js'
 import { toast } from '../ui/feedback'
+import { usePermission } from '../composables/usePermission'
 
 const route = useRoute()
 const router = useRouter()
 const modelSelection = useModelSelectionStore()
+
+// 创作空间本身只要 studio.use，但页内的「转为卡片/视频」「发布」各自需要别的权限点。
+// 置灰而不是隐藏：让用户知道有这个动作，也知道该找管理员要什么权限。
+const { disabledReason } = usePermission()
 
 const items = ref([])
 const detail = ref(null)
@@ -1199,8 +1204,8 @@ onBeforeUnmount(() => {
         <n-button
           quaternary
           size="small"
-          :disabled="!detail || !draftBody"
-          title="将当前正文带入图文卡片创作台"
+          :disabled="!detail || !draftBody || Boolean(disabledReason('cards.use', '图文卡片'))"
+          :title="disabledReason('cards.use', '图文卡片') || '将当前正文带入图文卡片创作台'"
           @click="router.push({ name: 'cards', state: { markdown: draftBody } })"
         >
           转为图文卡片
@@ -1208,13 +1213,19 @@ onBeforeUnmount(() => {
         <n-button
           quaternary
           size="small"
-          :disabled="!detail || !draftBody"
-          title="将当前正文带入视频创作，自动拆分镜"
+          :disabled="!detail || !draftBody || Boolean(disabledReason('videos.use', '视频创作'))"
+          :title="disabledReason('videos.use', '视频创作') || '将当前正文带入视频创作，自动拆分镜'"
           @click="router.push({ name: 'videos', state: { videoSource: draftBody, videoTitle: detail?.title || '' } })"
         >
           转为视频
         </n-button>
-        <n-button quaternary size="small" :disabled="!detail" @click="publishDrawerOpen = true">
+        <n-button
+          quaternary
+          size="small"
+          :disabled="!detail || Boolean(disabledReason('publishing.use', '发布管理'))"
+          :title="disabledReason('publishing.use', '发布管理') || '推送到公众号草稿箱'"
+          @click="publishDrawerOpen = true"
+        >
           发布
         </n-button>
         <n-button type="primary" size="small" :loading="saving" :disabled="!detail" @click="saveVersion">
