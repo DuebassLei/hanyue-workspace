@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -92,12 +92,38 @@ WECHAT_10W_UA = UA
 # 关键词来自环境变量，没配就不采集——不能替用户决定搜什么。
 WECHAT_SEARCH_UA = UA
 
+# 开源榜（kaiyuanbang.cn）：GitHub 开源项目榜单，服务端渲染的 HTML，直接解析。
+# 每个页面一个榜，URL 里的 slug 即平台名后缀；同一项目的「7 日增长」当热度。
+OPENRANK_BASE = "https://kaiyuanbang.cn/zh-cn/rankings"
+OPENRANK_SOURCES: tuple[tuple[str, str], ...] = (
+    ("开源榜·每日飙升", "today"),
+    ("开源榜·每周飙升", "weekly"),
+    ("开源榜·Star 总榜", "stars"),
+)
+
+# UAPI 全网热榜聚合（uapis.cn）：一个接口按 type 出各平台实时热榜。
+# 只接现有渠道覆盖不到的平台——微博/知乎走 60s、头条/百度/抖音直连官方接口，
+# 重复接入只会让同一事件多一个同平台分身，聚簇时反而添乱。
+UAPI_HOTBOARD_URL = "https://uapis.cn/api/v1/misc/hotboard"
+UAPI_SOURCES: tuple[tuple[str, str], ...] = (
+    ("B站", "bilibili"),
+    ("贴吧", "tieba"),
+    ("36氪", "36kr"),
+    ("虎嗅", "huxiu"),
+    ("IT之家", "ithome"),
+    ("酷安", "coolapk"),
+    ("掘金", "juejin"),
+    ("少数派", "sspai"),
+)
+
 ALL_PLATFORMS = tuple(
     [name for name, *_ in DIRECT_SOURCES]
     + [name for name, _ in AGG_SOURCES]
     + [name for name, _, _ in AIHOT_SOURCES]
     + [name for name, _, _ in AIHOT_AGENT_SOURCES]
     + ["微信 10w+ 爆文池", "微信文章搜索"]
+    + [name for name, _ in OPENRANK_SOURCES]
+    + [name for name, _ in UAPI_SOURCES]
 )
 
 
@@ -181,6 +207,31 @@ def _to_int(value) -> int | None:
     return int(text) if text.isdigit() else None
 
 
+# hot_items.url 是 VARCHAR(500)。今日头条热榜的 Url 带一大段 log_pb 追踪参数，
+# 实测 800+ 字符，直接落库会触发 StringDataRightTruncation 让整轮采集 500。
+URL_MAX_LENGTH = 500
+
+
+def _tidy_url(url: str) -> str:
+    """超长时才动刀：先去跟踪参数，仍超长再硬截到列宽以内。
+
+    正常长度的 URL 必须原样保留——搜狗微信的 `/link?url=` 载荷在查询串里，
+    无条件去参会把跳转链接废掉。只有超限的才值得牺牲查询参数：头条热榜的
+    log_pb 全是埋点，去掉后路径本身仍是可打开的原文地址。
+    """
+    if len(url) <= URL_MAX_LENGTH:
+        return url
+    try:
+        parts = urlsplit(url)
+        trimmed = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    except ValueError:
+        trimmed = url
+    if len(trimmed) < URL_MAX_LENGTH:
+        return trimmed
+    # 去参救不回来（载荷就在路径里），宁可截断留个前缀，也不能让入库炸掉
+    return url[:URL_MAX_LENGTH]
+
+
 def _clean_url(value) -> str:
     """平台给的是搜索页而不是原文时按「拿不到」处理，留空。"""
     url = str(value or "").strip()
@@ -189,7 +240,7 @@ def _clean_url(value) -> str:
     lowered = url.lower()
     if any(token in lowered for token in ("/s?word=", "/search?", "/search/", "s?wd=")):
         return ""
-    return url
+    return _tidy_url(url)
 
 
 def _rows_direct(
@@ -255,7 +306,7 @@ def _rows_aihot(platform: str, payload, kind: str) -> list[dict]:
             "rank": index,
             "title": title,
             "hot": _to_int(hot),
-            "url": str(links.get("original") or links.get("aihot") or ""),
+            "url": _clean_url(links.get("original") or links.get("aihot")),
         })
     return rows
 
@@ -284,7 +335,7 @@ def _rows_aihot_agent(platform: str, text: str, kind: str) -> list[dict]:
                 "rank": int(rank),
                 "title": title,
                 "hot": source_count or None,
-                "url": url.strip(),
+                "url": _clean_url(url),
             })
         return rows
 
@@ -299,7 +350,7 @@ def _rows_aihot_agent(platform: str, text: str, kind: str) -> list[dict]:
                 "rank": int(index),
                 "title": title,
                 "hot": None,
-                "url": url.strip(),
+                "url": _clean_url(url),
             })
     return rows
 
@@ -324,7 +375,7 @@ def _rows_wechat_10w(payload) -> list[dict]:
             "rank": index,
             "title": shown[:200],
             "hot": _to_int(clicks.replace("w+", "0000").replace("+", "")),
-            "url": str(item.get("oriUrl") or item.get("url") or "").strip(),
+            "url": _clean_url(item.get("oriUrl") or item.get("url")),
         })
     return rows
 
@@ -348,10 +399,113 @@ def _rows_wechat_search(html: str) -> list[dict]:
             "rank": index,
             "title": title[:200],
             "hot": None,
-            "url": "https://weixin.sogou.com" + href,
+            "url": _clean_url("https://weixin.sogou.com" + href),
         })
         if len(rows) >= 20:
             break
+    return rows
+
+
+_OPENRANK_ITEM_RE = re.compile(
+    r'<article class="ornav-repo[^"]*".*?</article>', re.DOTALL
+)
+_OPENRANK_LINK_RE = re.compile(r'data-orank-target-url="([^"]+)"')
+_OPENRANK_RANK_RE = re.compile(r'<div class="ornav-rank">(\d+)</div>')
+_OPENRANK_TITLE_RE = re.compile(r'<h3>\s*<a [^>]*>(.*?)</a>', re.DOTALL)
+_OPENRANK_DELTA_RE = re.compile(
+    r'<strong class="[^"]*"><bdi dir="ltr">([+\-]?[\d,]+)</bdi>\s*</strong>\s*<small>'
+)
+_OPENRANK_STARS_RE = re.compile(r'#orank-icon-star"/></svg></span><strong><bdi[^>]*>([\d,]+)')
+
+
+def _rows_openrank(platform: str, html: str) -> list[dict]:
+    """解析开源榜的 ornav-repo 条目。页面改版导致解析为空时返回空列表，不抛。
+
+    标题用「项目名：一句话简介」——只有仓库名看不出在讲什么，加上简介才像热榜标题。
+    热度优先取 N 日增长（飙升语义和热榜一致）。注意每个条目里有三个数字
+    （Stars / Forks / 增长），Star 的 SVG 引用里带 `#orank-icon-star`，
+    增长数的 class 是 up/down——两个正则都必须锚定到具体形态，
+    否则会把别的数字当热度（Star 总数当热度会让老仓库永远霸榜）。
+    """
+    rows: list[dict] = []
+    for chunk in _OPENRANK_ITEM_RE.findall(html or ""):
+        rank_match = _OPENRANK_RANK_RE.search(chunk)
+        title_match = _OPENRANK_TITLE_RE.search(chunk)
+        if not rank_match or not title_match:
+            continue
+        title = re.sub(r"<[^>]+>", "", title_match.group(1))
+        title = re.sub(r"\s+", " ", title).strip()
+        if not title:
+            continue
+        delta = _OPENRANK_DELTA_RE.search(chunk)
+        stars = _OPENRANK_STARS_RE.search(chunk)
+        hot = None
+        if delta:
+            hot = _to_int(delta.group(1).lstrip("+"))
+        elif stars:
+            hot = _to_int(stars.group(1))
+        link_match = _OPENRANK_LINK_RE.search(chunk)
+        link = link_match.group(1) if link_match else ""
+        rows.append({
+            "platform": platform,
+            "rank": int(rank_match.group(1)),
+            "title": title[:200],
+            "hot": hot,
+            # 站内详情页带中文解读，比直链 GitHub 更适合当选题素材入口
+            "url": _clean_url(f"https://kaiyuanbang.cn{link}" if link.startswith("/") else link),
+        })
+    return rows
+
+
+_UAPI_HOTNUM_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?[wk万亿]?)", re.IGNORECASE)
+
+
+def _uapi_hot_value(value) -> int | None:
+    """UAPI 的 hot_value 是自由格式字符串：'472995播放' / '热度:549' /
+    '评论:6 点赞:17' / ''。取第一个数字段当热度；多个指标并存时（评论+点赞）
+    没有统一口径，宁缺毋滥返回 None，不编一个合成数。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    # 「评论:6 点赞:17」这类多指标串里有两个数字段，直接拒掉
+    rest = _UAPI_HOTNUM_RE.sub("", text, count=1)
+    if _UAPI_HOTNUM_RE.search(rest):
+        return None
+    match = _UAPI_HOTNUM_RE.search(text)
+    if not match:
+        return None
+    token = match.group(1).replace(",", "")
+    multiplier = 1
+    if token[-1] in "wW万":
+        multiplier = 10000
+    elif token[-1] == "亿":
+        multiplier = 100000000
+    elif token[-1] == "k":
+        multiplier = 1000
+    number = token.rstrip("wW万亿kK")
+    try:
+        return int(float(number) * multiplier)
+    except ValueError:
+        return None
+
+
+def _rows_uapi(platform: str, payload) -> list[dict]:
+    items = (payload or {}).get("list") or []
+    rows: list[dict] = []
+    for index, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        rank = _to_int(item.get("index")) or index
+        rows.append({
+            "platform": platform,
+            "rank": rank,
+            "title": title[:300],
+            "hot": _uapi_hot_value(item.get("hot_value")),
+            "url": _clean_url(item.get("url")),
+        })
     return rows
 
 
@@ -429,6 +583,39 @@ def collect(platforms: list[str] | None = None) -> tuple[list[dict], list[str]]:
         except Exception as exc:  # noqa: BLE001
             notes.append(f"{name}：失败（{type(exc).__name__}）")
 
+    for name, board_type in UAPI_SOURCES:
+        if name not in wanted:
+            continue
+        try:
+            payload = _fetch_json(
+                f"{UAPI_HOTBOARD_URL}?type={board_type}", {"User-Agent": UA}
+            )
+            got = _rows_uapi(name, payload)
+            rows.extend(got)
+            notes.append(f"{name}：{len(got)} 条")
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"{name}：失败（{type(exc).__name__}）")
+
+    for name, slug in OPENRANK_SOURCES:
+        if name not in wanted:
+            continue
+        try:
+            response = ssrf.safe_request(
+                "GET",
+                f"{OPENRANK_BASE}/{slug}.html",
+                headers={"User-Agent": UA, "Accept": "text/html"},
+                timeout=_timeout(),
+            )
+            if response.status_code >= 300:
+                raise HotSourcesError(f"HTTP {response.status_code}")
+            got = _rows_openrank(name, response.text)
+            rows.extend(got)
+            notes.append(f"{name}：{len(got)} 条")
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"{name}：失败（{type(exc).__name__}）")
+
     if "微信 10w+ 爆文池" in wanted:
         url = _wechat_10w_url()
         try:
@@ -480,4 +667,8 @@ def source_catalog() -> list[dict]:
     ] + [
         {"platform": "微信 10w+ 爆文池", "kind": "wechat-10w"},
         {"platform": "微信文章搜索", "kind": "wechat-search"},
+    ] + [
+        {"platform": name, "kind": "openrank"} for name, _ in OPENRANK_SOURCES
+    ] + [
+        {"platform": name, "kind": "uapi"} for name, _ in UAPI_SOURCES
     ]

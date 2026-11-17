@@ -682,7 +682,9 @@ class HotItem(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(300))
     title_norm: Mapped[str] = mapped_column(String(300), index=True)
     hot: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    url: Mapped[str] = mapped_column(String(500), default="")
+    # 部分热榜源（头条）的 Url 带一大段跟踪参数，列宽放宽成 TEXT；
+    # 采集侧仍会去参/截断到 URL_MAX_LENGTH，这里只是入库兜底不再炸。
+    url: Mapped[str] = mapped_column(Text, default="")
     first_seen_at: Mapped[str] = mapped_column(String(16), default="")
     last_seen_at: Mapped[str] = mapped_column(String(16), default="")
     first_seen_day: Mapped[str] = mapped_column(String(10), default="")

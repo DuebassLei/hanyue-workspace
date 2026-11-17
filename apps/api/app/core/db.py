@@ -83,6 +83,13 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("video_shots", "focus", "JSON"),
 ]
 
+# 已存在列的加宽：(表名, 列名, 新类型)。PG 的 varchar→text 是纯元数据变更，不重写行；
+# SQLite 不强制列宽、无需处理。幂等靠读 information_schema 判断当前宽度。
+_WIDENED_COLUMNS: list[tuple[str, str, str]] = [
+    # 头条热榜 Url 带跟踪参数可达 800+ 字符，VARCHAR(500) 会整轮采集 500
+    ("hot_items", "url", "TEXT"),
+]
+
 # keyset 分页与队列恢复都按时间列做 seek，缺索引会退化成全表排序。
 # create_all 不会给已存在的表补索引，因此这里用 IF NOT EXISTS 幂等创建。
 _INDEXES: list[tuple[str, str]] = [
@@ -157,6 +164,21 @@ def _apply_additive_migrations() -> None:
             # PostgreSQL 下 TIMESTAMP 不带时区，与模型的 DateTime(timezone=True) 不一致
             effective_type = "TIMESTAMPTZ" if pg and ddl_type == "TIMESTAMP" else ddl_type
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {effective_type}"))
+        for table, column, new_type in _WIDENED_COLUMNS:
+            # SQLite 不强制列宽，放宽只对 PG 有意义；新库 create_all 已按模型建好
+            if not pg or table not in existing_tables:
+                continue
+            row = conn.execute(
+                text(
+                    "SELECT data_type, character_maximum_length FROM information_schema.columns "
+                    "WHERE table_name = :t AND column_name = :c"
+                ),
+                {"t": table, "c": column},
+            ).first()
+            # 已是 text（character_maximum_length 为 NULL）就跳过，保持幂等
+            if row is None or (row[0] == "text" and row[1] is None):
+                continue
+            conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE {new_type}"))
         for name, target in _INDEXES:
             table = target.split(" ", 1)[0]
             if table not in existing_tables:

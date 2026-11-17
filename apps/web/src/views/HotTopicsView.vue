@@ -233,7 +233,18 @@ async function writeFromCluster(cluster) {
   try {
     const item = await api.post(`/hot-topics/clusters/${cluster.id}/draft`, {})
     toast(`已新建稿件「${item.title}」，正在跳转到创作空间`)
-    router.push({ name: 'studio', query: { id: item.id } })
+    router.push({
+      name: 'studio',
+      query: { id: item.id },
+      state: {
+        hotDraft: {
+          itemId: item.id,
+          title: cluster.title,
+          track: cluster.track || '',
+          platforms: [...(cluster.platforms || [])],
+        },
+      },
+    })
   } catch (err) {
     error.value = err.message
   } finally {

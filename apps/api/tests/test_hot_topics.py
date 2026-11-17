@@ -415,6 +415,73 @@ def test_wechat_search_html_parsing():
     assert _rows_wechat_search("<html></html>") == []
 
 
+def test_clean_url_strips_tracking_and_caps_length():
+    """今日头条热榜 Url 带 800+ 字符的 log_pb 追踪参数，曾撑爆 VARCHAR(500)。"""
+    from app.services.hot_sources import URL_MAX_LENGTH, _clean_url
+
+    tracking = "&".join(f"p{i}={'x' * 40}" for i in range(20))
+    long_url = f"https://www.toutiao.com/trending/7708571384561074203/?{tracking}"
+    assert _clean_url(long_url) == "https://www.toutiao.com/trending/7708571384561074203/"
+
+    # 去参也救不回来的，硬截到列宽以内，不能让入库炸掉
+    monster = "https://example.com/" + "A" * 600
+    assert len(_clean_url(monster)) == URL_MAX_LENGTH
+
+    # 没超限的 URL 必须原样保留——搜狗 /link?url= 的载荷就在查询串里
+    sogou = "https://weixin.sogou.com/link?url=AAA&_ast=123"
+    assert _clean_url(sogou) == sogou
+
+
+def test_uapi_hotboard_parsing():
+    from app.services.hot_sources import _rows_uapi, _uapi_hot_value
+
+    # hot_value 是自由格式字符串，要归一成 int；多指标串宁缺毋滥给 None
+    assert _uapi_hot_value("472995播放") == 472995
+    assert _uapi_hot_value("热度:549") == 549
+    assert _uapi_hot_value("1,234.5万") == 12345000
+    assert _uapi_hot_value("评论:6 点赞:17") is None
+    assert _uapi_hot_value("") is None
+
+    rows = _rows_uapi("B站", {
+        "type": "bilibili",
+        "list": [
+            {"index": 1, "title": "某视频标题", "hot_value": "472995播放",
+             "url": "https://www.bilibili.com/video/BV1"},
+            {"index": 2, "title": "", "hot_value": "1", "url": ""},
+        ],
+    })
+    assert len(rows) == 1
+    assert rows[0]["hot"] == 472995
+    assert rows[0]["url"] == "https://www.bilibili.com/video/BV1"
+
+
+def test_openrank_html_parsing():
+    from app.services.hot_sources import _rows_openrank
+
+    def item(rank, title, key, stars, forks, delta):
+        return (
+            f'<article class="ornav-repo ready" data-orank-target-url="/zh-cn/repo/{key}.html">'
+            f'<div class="ornav-rank">{rank}</div>'
+            f'<h3><a href="/zh-cn/repo/{key}.html">{title}</a></h3>'
+            '<span class="ornav-repo-stat-icon"><svg><use href="/x.svg#orank-icon-star"/>'
+            f'</svg></span><strong><bdi dir="ltr">{stars}</bdi></strong><small>Stars</small>'
+            '<span class="ornav-repo-stat-icon"><svg><use href="/x.svg#orank-icon-fork"/>'
+            f'</svg></span><strong><bdi dir="ltr">{forks}</bdi></strong><small>Forks</small>'
+            f'<strong class="up"><bdi dir="ltr">+{delta}</bdi></strong><small>7 日增长</small>'
+            "</article>"
+        )
+
+    html = item(1, "REA：逆向工程工具层", "morluto-rea", "465,369", "113,902", 16640) + item(
+        2, "某项目", "foo-bar", "1,000", "10", 50
+    )
+    rows = _rows_openrank("开源榜·每周飙升", html)
+    assert [row["title"] for row in rows] == ["REA：逆向工程工具层", "某项目"]
+    # 热度取增长数，不能错抓成 Stars/Forks（Star 总数当热度会让老仓库永远霸榜）
+    assert rows[0]["hot"] == 16640
+    assert rows[0]["url"] == "https://kaiyuanbang.cn/zh-cn/repo/morluto-rea.html"
+    assert _rows_openrank("开源榜·每周飙升", "<html></html>") == []
+
+
 def test_wechat_search_skipped_without_keyword(monkeypatch):
     """没配关键词时跳过而不是报失败，其余源照常返回。"""
     from app.services import hot_sources
