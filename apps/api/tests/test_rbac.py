@@ -203,6 +203,129 @@ def test_last_superadmin_cannot_remove_self(client):
     assert res.json()["code"] == "last_superadmin"
 
 
+# ---------------- 用户生命周期 ----------------
+
+
+def test_admin_creates_user_with_one_time_password(client):
+    admin, _ = _superadmin(client)
+    member_id = _role_id(client, admin, "member")
+    email = f"new-{uuid.uuid4().hex[:8]}@example.com"
+
+    created = client.post(
+        f"{PREFIX}/rbac/users",
+        headers=admin,
+        json={"email": email, "displayName": "新人", "roleIds": [member_id]},
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["user"]["email"] == email
+    assert body["user"]["hasPassword"] is True
+    assert member_id in body["user"]["roleIds"]
+    password = body["initialPassword"]
+    assert password and "initialPassword" not in str(
+        client.get(f"{PREFIX}/rbac/users", headers=admin).json()
+    )
+
+    # 用一次性密码能登录，且只有被分配的角色
+    logged = client.post(f"{PREFIX}/auth/login", json={"email": email, "password": password})
+    assert logged.status_code == 200, logged.text
+    me = client.get(
+        f"{PREFIX}/rbac/me", headers={"Authorization": f"Bearer {logged.json()['token']}"}
+    )
+    assert me.json()["roleKeys"] == ["member"]
+
+    # 零角色、重复邮箱都要被拒
+    assert (
+        client.post(
+            f"{PREFIX}/rbac/users", headers=admin, json={"email": f"x-{email}", "roleIds": []}
+        ).status_code
+        == 422
+    )
+    taken = client.post(
+        f"{PREFIX}/rbac/users",
+        headers=admin,
+        json={"email": email.upper(), "roleIds": [member_id]},
+    )
+    assert taken.status_code == 409
+    assert taken.json()["code"] == "email_taken"
+
+
+def test_disable_blocks_next_request_and_protects_last_superadmin(client):
+    admin, admin_id = _superadmin(client)
+    member_headers, member_id = _login(client, "lifecycle")
+
+    disabled = client.patch(
+        f"{PREFIX}/rbac/users/{member_id}", headers=admin, json={"isActive": False}
+    )
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["isActive"] is False
+    # 停用在下一次请求生效：已签发的令牌不再被接受
+    assert client.get(f"{PREFIX}/rbac/me", headers=member_headers).status_code == 403
+
+    enabled = client.patch(
+        f"{PREFIX}/rbac/users/{member_id}", headers=admin, json={"isActive": True}
+    )
+    assert enabled.status_code == 200
+
+    cannot_self = client.patch(
+        f"{PREFIX}/rbac/users/{admin_id}", headers=admin, json={"isActive": False}
+    )
+    assert cannot_self.status_code == 409
+    assert cannot_self.json()["code"] == "cannot_disable_self"
+
+    # 停用的人默认不出现在列表里，但搜索跨状态仍能找到
+    listed = client.get(f"{PREFIX}/rbac/users?status=active", headers=admin).json()
+    assert all(item["isActive"] for item in listed)
+    client.patch(f"{PREFIX}/rbac/users/{member_id}", headers=admin, json={"isActive": False})
+    hidden = client.get(f"{PREFIX}/rbac/users", headers=admin).json()
+    assert member_id not in {item["id"] for item in hidden}
+    disabled_list = client.get(f"{PREFIX}/rbac/users?status=disabled", headers=admin).json()
+    assert member_id in {item["id"] for item in disabled_list}
+
+
+def test_reset_password_kicks_existing_session_and_not_self(client):
+    admin, admin_id = _superadmin(client)
+    member_id = _role_id(client, admin, "member")
+    email = f"reset-{uuid.uuid4().hex[:8]}@example.com"
+    created = client.post(
+        f"{PREFIX}/rbac/users",
+        headers=admin,
+        json={"email": email, "roleIds": [member_id]},
+    )
+    assert created.status_code == 201, created.text
+    user_id = created.json()["user"]["id"]
+    first = created.json()["initialPassword"]
+
+    session = client.post(f"{PREFIX}/auth/login", json={"email": email, "password": first})
+    old_headers = {"Authorization": f"Bearer {session.json()['token']}"}
+    assert client.get(f"{PREFIX}/auth/me", headers=old_headers).status_code == 200
+
+    reset = client.post(f"{PREFIX}/rbac/users/{user_id}/reset-password", headers=admin)
+    assert reset.status_code == 200, reset.text
+    new_password = reset.json()["initialPassword"]
+    assert new_password != first
+    # 旧会话立即失效；新密码可以登录
+    assert client.get(f"{PREFIX}/auth/me", headers=old_headers).status_code == 401
+    again = client.post(
+        f"{PREFIX}/auth/login", json={"email": email, "password": new_password}
+    )
+    assert again.status_code == 200, again.text
+
+    self_reset = client.post(f"{PREFIX}/rbac/users/{admin_id}/reset-password", headers=admin)
+    assert self_reset.status_code == 409
+    assert self_reset.json()["code"] == "cannot_reset_self"
+
+
+def test_member_cannot_create_users(client):
+    headers, _ = _login(client, "member")
+    res = client.post(
+        f"{PREFIX}/rbac/users",
+        headers=headers,
+        json={"email": "nope@example.com", "roleIds": ["x"]},
+    )
+    assert res.status_code == 403
+
+
 # ---------------- 菜单 CRUD ----------------
 
 

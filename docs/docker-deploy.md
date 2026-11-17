@@ -273,6 +273,50 @@ vi .env                           # 至少检查 WEB_PORT、TZ；需要生图/�
 `create-user` 在一次性 api 容器内执行（会按依赖先起 db，结束后自动删除容器），
 所以不需要 api 处于运行中，也不会留下常驻进程。
 
+**没有默认的初始用户或初始密码。** `up` 只起服务、不建账号，密码只在上面这条命令交互输入时存在，
+不写进任何文件，仓库和镜像里都查不到。忘记了就重置（该账号全部旧会话立即失效）：
+
+```bash
+./scripts/deploy.sh create-user reset-password --email you@example.com
+```
+
+**首个账号自动成为超级管理员。** `BOOTSTRAP_FIRST_USER_SUPERADMIN=true`（默认）时，API 启动发现库里
+还没有任何超管，就把最早注册的活跃账号提升为 `superadmin`；之后注册的都是 `member`。
+所以 `create-user create` 建的第一个账号就是超管。公网邀请制部署把该变量设为 `false` 可关闭。
+
+要确认当前谁是超管，进数据库查（`shell db` 进的是容器 shell，不是 psql，得再进一层）：
+
+```bash
+./scripts/deploy.sh shell db
+psql -U hanyue -d hanyue          # 容器内本地连接默认 trust，不需要 POSTGRES_PASSWORD
+```
+
+```sql
+SELECT u.email, u.display_name, u.created_at
+FROM users u
+JOIN user_roles ur ON ur.user_id = u.id
+JOIN roles r ON r.id = ur.role_id
+WHERE r.is_superadmin = true;
+```
+
+把某个已有账号提升为超管（幂等，重复执行不会插出重复行）：
+
+```sql
+INSERT INTO user_roles (user_id, role_id)
+SELECT u.id, r.id
+FROM users u
+JOIN roles r ON r.role_key = 'superadmin'
+WHERE u.email = 'you@example.com'
+  AND NOT EXISTS (
+    SELECT 1 FROM user_roles ur
+    WHERE ur.user_id = u.id AND ur.role_id = r.id
+  );
+```
+
+权限每次请求现算，**不需要重新登录**即生效；用户看不到新菜单时刷新一次页面即可。
+`\q` 退出 psql，`exit` 退出容器。本地开发库同样的 SQL，用 `./scripts/dev-pg.sh psql`（Windows：
+`.\scripts\dev-pg.ps1 psql`）进入。
+
 **从旧的开发态账号迁移**：以前用 `local-creator` 之类的 subject 登录时，
 稿件、素材、发布任务都挂在那个 user.id 上。直接新建邮箱账号会「内容全不见了」。
 用 `attach` 给旧账号补邮箱密码，id 不变，数据全部保留：

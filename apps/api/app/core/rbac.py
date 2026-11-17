@@ -54,7 +54,7 @@ PERMISSION_CATALOG: tuple[tuple[str, str, str, int], ...] = (
     ("settings.view", "设置", "系统", 320),
     ("rbac.role.manage", "角色管理", "权限", 400),
     ("rbac.menu.manage", "菜单管理", "权限", 410),
-    ("rbac.user.manage", "用户授权", "权限", 420),
+    ("rbac.user.manage", "用户管理", "权限", 420),
     ("rbac.audit.view", "审计日志", "权限", 430),
 )
 

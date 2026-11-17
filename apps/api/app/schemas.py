@@ -1593,12 +1593,33 @@ class UserRolesOut(CamelModel):
     display_name: str
     email: str | None = None
     is_active: bool = True
+    # 开发态账号没有邮箱，界面建号/重置密码都要求有邮箱
+    has_password: bool = False
     role_ids: list[str] = Field(default_factory=list)
     role_keys: list[str] = Field(default_factory=list)
 
 
 class UserRolesIn(CamelModel):
     role_ids: list[str] = Field(default_factory=list)
+
+
+class ManagedUserIn(CamelModel):
+    """管理员建号。密码由服务端生成，只在响应里出现一次。"""
+
+    email: str = Field(min_length=3, max_length=180)
+    display_name: str | None = Field(default=None, max_length=120)
+    role_ids: list[str] = Field(min_length=1)
+
+
+class ManagedUserPatch(CamelModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    is_active: bool | None = None
+
+
+class ManagedUserCreatedOut(CamelModel):
+    user: UserRolesOut
+    # 一次性初始密码。列表接口永不返回这个字段。
+    initial_password: str
 
 
 class RbacAuditOut(CamelModel):

@@ -11,14 +11,19 @@
 
 from __future__ import annotations
 
+import re
+import secrets
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Query
 from sqlalchemy import delete, func, select
 
 from .. import models, schemas
+from ..core.config import get_settings
 from ..core.deps import ApiError, CurrentUser, DbSession, conflict, not_found
 from ..core.rbac import Access, require_permission, resolve_access
+from ..core.security import hash_password, validate_password
 from ..services import rbac_service
 
 router = APIRouter(tags=["rbac"])
@@ -435,7 +440,64 @@ def _is_descendant(db, ancestor_id: str, candidate_id: str) -> bool:
     return False
 
 
-# ---------------- 用户授权 ----------------
+# ---------------- 用户管理 ----------------
+
+# 与 auth.py 同一把尺子：只挡明显不合法的地址，不做 RFC 全量校验。
+_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_EMAIL_MAX_LENGTH = 180
+
+
+def _user_out(user: models.User, role_ids: list[str], role_keys: list[str]) -> schemas.UserRolesOut:
+    return schemas.UserRolesOut(
+        id=user.id,
+        display_name=user.display_name,
+        email=user.email,
+        is_active=user.is_active,
+        has_password=bool(user.password_hash),
+        role_ids=role_ids,
+        role_keys=role_keys,
+    )
+
+
+def _roles_of(db, user_ids: list[str]) -> dict[str, tuple[list[str], list[str]]]:
+    if not user_ids:
+        return {}
+    rows = db.execute(
+        select(models.UserRole.user_id, models.Role.id, models.Role.role_key)
+        .join(models.Role, models.Role.id == models.UserRole.role_id)
+        .where(models.UserRole.user_id.in_(user_ids))
+    ).all()
+    by_user: dict[str, tuple[list[str], list[str]]] = {}
+    for user_id, role_id, role_key in rows:
+        cols = by_user.setdefault(user_id, ([], []))
+        cols[0].append(role_id)
+        cols[1].append(role_key)
+    return by_user
+
+
+def _generate_password() -> str:
+    """一次性初始密码：通过现有弱口令校验，且不含容易看错的字符。"""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    min_length = max(12, get_settings().password_min_length)
+    for _ in range(8):
+        candidate = "".join(secrets.choice(alphabet) for _ in range(min_length))
+        if validate_password(candidate, min_length=get_settings().password_min_length) is None:
+            return candidate
+    raise ApiError("password_generation_failed", "生成初始密码失败，请重试", 500)
+
+
+def _active_superadmin_count(db, *, exclude_user_id: str | None = None) -> int:
+    """启用中的超管人数。停用最后一个启用超管会把系统锁死。"""
+    query = (
+        select(func.count(func.distinct(models.UserRole.user_id)))
+        .select_from(models.UserRole)
+        .join(models.Role, models.Role.id == models.UserRole.role_id)
+        .join(models.User, models.User.id == models.UserRole.user_id)
+        .where(models.Role.is_superadmin.is_(True), models.User.is_active.is_(True))
+    )
+    if exclude_user_id:
+        query = query.where(models.UserRole.user_id != exclude_user_id)
+    return int(db.scalar(query) or 0)
 
 
 @router.get("/rbac/users", response_model=list[schemas.UserRolesOut])
@@ -443,9 +505,14 @@ def list_users(
     access: CanUsers,
     db: DbSession,
     q: str = Query(default="", max_length=120),
+    status: str = Query(default="active", pattern="^(active|disabled|all)$"),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[schemas.UserRolesOut]:
     query = select(models.User).order_by(models.User.created_at.desc()).limit(limit)
+    if status == "active":
+        query = query.where(models.User.is_active.is_(True))
+    elif status == "disabled":
+        query = query.where(models.User.is_active.is_(False))
     if q.strip():
         keyword = f"%{q.strip().lower()}%"
         query = query.where(
@@ -456,29 +523,143 @@ def list_users(
     if not users:
         return []
 
-    ids = [user.id for user in users]
-    rows = db.execute(
-        select(models.UserRole.user_id, models.Role.id, models.Role.role_key)
-        .join(models.Role, models.Role.id == models.UserRole.role_id)
-        .where(models.UserRole.user_id.in_(ids))
-    ).all()
-    by_user: dict[str, tuple[list[str], list[str]]] = {}
-    for user_id, role_id, role_key in rows:
-        cols = by_user.setdefault(user_id, ([], []))
-        cols[0].append(role_id)
-        cols[1].append(role_key)
-
+    by_user = _roles_of(db, [user.id for user in users])
     return [
-        schemas.UserRolesOut(
-            id=user.id,
-            display_name=user.display_name,
-            email=user.email,
-            is_active=user.is_active,
-            role_ids=by_user.get(user.id, ([], []))[0],
-            role_keys=by_user.get(user.id, ([], []))[1],
-        )
+        _user_out(user, *by_user.get(user.id, ([], [])))
         for user in users
     ]
+
+
+@router.post("/rbac/users", response_model=schemas.ManagedUserCreatedOut, status_code=201)
+def create_user(
+    payload: schemas.ManagedUserIn, access: CanUsers, current: CurrentUser, db: DbSession
+) -> schemas.ManagedUserCreatedOut:
+    email = payload.email.strip().lower()
+    if len(email) > _EMAIL_MAX_LENGTH or not _EMAIL_PATTERN.match(email):
+        raise ApiError("invalid_email", "请输入有效的邮箱地址")
+    if db.scalar(select(models.User.id).where(func.lower(models.User.email) == email)):
+        raise conflict("email_taken", "该邮箱已有账号")
+
+    roles = db.scalars(select(models.Role).where(models.Role.id.in_(payload.role_ids))).all()
+    unknown = set(payload.role_ids) - {role.id for role in roles}
+    if unknown:
+        raise ApiError("invalid_role", f"角色不存在：{'、'.join(sorted(unknown))}", 400)
+    password = _generate_password()
+    now = datetime.now(timezone.utc)
+    name = (payload.display_name or "").strip() or email.split("@", 1)[0]
+    user = models.User(
+        auth_subject=f"password:{email}",
+        email=email,
+        display_name=name,
+        password_hash=hash_password(password),
+        password_changed_at=now,
+        failed_login_attempts=0,
+        is_active=True,
+    )
+    db.add(user)
+    db.flush()
+    for role in roles:
+        db.add(models.UserRole(user_id=user.id, role_id=role.id))
+    rbac_service.audit(
+        db,
+        actor_user_id=current.id,
+        action="user.create",
+        target_type="user",
+        target_id=user.id,
+        detail={"email": email, "roleKeys": [role.role_key for role in roles]},
+    )
+    db.commit()
+    return schemas.ManagedUserCreatedOut(
+        user=_user_out(user, [role.id for role in roles], [role.role_key for role in roles]),
+        initial_password=password,
+    )
+
+
+@router.patch("/rbac/users/{user_id}", response_model=schemas.UserRolesOut)
+def update_user(
+    user_id: str,
+    payload: schemas.ManagedUserPatch,
+    access: CanUsers,
+    current: CurrentUser,
+    db: DbSession,
+) -> schemas.UserRolesOut:
+    target = db.get(models.User, user_id)
+    if not target:
+        raise not_found("用户")
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        raise ApiError("empty_patch", "没有需要更新的字段")
+
+    if "display_name" in data:
+        name = (data["display_name"] or "").strip()
+        if not name:
+            raise ApiError("invalid_display_name", "昵称不能为空")
+        target.display_name = name
+
+    if "is_active" in data and data["is_active"] is not target.is_active:
+        turning_off = data["is_active"] is False
+        if turning_off and target.id == current.id:
+            raise ApiError("cannot_disable_self", "不能停用自己的账号", 409)
+        if turning_off and _active_superadmin_count(db, exclude_user_id=target.id) == 0:
+            raise ApiError("last_superadmin", "这是最后一个启用中的超级管理员，不能停用", 409)
+        target.is_active = bool(data["is_active"])
+
+    rbac_service.audit(
+        db,
+        actor_user_id=current.id,
+        action="user.update",
+        target_type="user",
+        target_id=target.id,
+        detail={"changes": data},
+    )
+    db.commit()
+    roles = _roles_of(db, [target.id]).get(target.id, ([], []))
+    return _user_out(target, *roles)
+
+
+@router.post("/rbac/users/{user_id}/reset-password", response_model=schemas.ManagedUserCreatedOut)
+def reset_user_password(
+    user_id: str, access: CanUsers, current: CurrentUser, db: DbSession
+) -> schemas.ManagedUserCreatedOut:
+    """重置为一次性随机密码。改 password_changed_at 后，对方已发出的令牌立即失效。"""
+    target = db.get(models.User, user_id)
+    if not target:
+        raise not_found("用户")
+    if target.id == current.id:
+        raise ApiError("cannot_reset_self", "不能在这里重置自己的密码，请到账号设置里修改", 409)
+    if not target.email:
+        raise ApiError("no_email", "该账号没有邮箱，无法设置密码登录", 409)
+
+    password = _generate_password()
+    target.password_hash = hash_password(password)
+    target.password_changed_at = datetime.now(timezone.utc)
+    target.failed_login_attempts = 0
+    target.locked_until = None
+    # 开发态账号补上密码后，身份键保持不变：名下稿件不会因此换人
+    rbac_service.audit(
+        db,
+        actor_user_id=current.id,
+        action="user.password.reset",
+        target_type="user",
+        target_id=target.id,
+        detail={"email": target.email},
+    )
+    db.commit()
+    roles = _roles_of(db, [target.id]).get(target.id, ([], []))
+    return schemas.ManagedUserCreatedOut(
+        user=_user_out(target, *roles),
+        initial_password=password,
+    )
+
+
+def _load_roles(db, role_ids: list[str]) -> list[models.Role]:
+    roles = db.scalars(select(models.Role).where(models.Role.id.in_(role_ids))).all()
+    unknown = set(role_ids) - {role.id for role in roles}
+    if unknown:
+        raise ApiError("invalid_role", f"角色不存在：{'、'.join(sorted(unknown))}", 400)
+    if not roles:
+        raise ApiError("role_required", "至少选择一个角色", 400)
+    return list(roles)
 
 
 @router.put("/rbac/users/{user_id}/roles", response_model=schemas.UserRolesOut)
@@ -516,13 +697,10 @@ def set_user_roles(
         detail={"roleKeys": [role.role_key for role in roles]},
     )
     db.commit()
-    return schemas.UserRolesOut(
-        id=target.id,
-        display_name=target.display_name,
-        email=target.email,
-        is_active=target.is_active,
-        role_ids=[role.id for role in roles],
-        role_keys=[role.role_key for role in roles],
+    return _user_out(
+        target,
+        [role.id for role in roles],
+        [role.role_key for role in roles],
     )
 
 

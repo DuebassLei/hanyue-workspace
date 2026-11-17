@@ -29,7 +29,7 @@ function goHome() {
       <h1>这个页面你还没有权限</h1>
       <p v-if="missing">
         需要权限点 <code>{{ missing }}</code>。请让管理员在「角色管理」里给你的角色补上，
-        或在「用户授权」里把你加到合适的角色。
+        或在「用户管理」里把你加到合适的角色。
       </p>
       <p v-else>当前账号没有访问该页面的权限。</p>
       <div class="actions">

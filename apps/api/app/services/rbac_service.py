@@ -80,7 +80,7 @@ MENU_SEED: tuple[tuple[str, str, str, str, str | None, tuple], ...] = (
         "system",
         None,
         (
-            ("users", "用户授权", "用户", "characters", "rbac.user.manage"),
+            ("users", "用户管理", "用户", "characters", "rbac.user.manage"),
             ("roles", "角色管理", "角色", "settings", "rbac.role.manage"),
             ("menus", "菜单管理", "菜单", "logs", "rbac.menu.manage"),
         ),
@@ -120,6 +120,10 @@ def _seed_permissions(db) -> list[str]:
     created: list[str] = []
     for code, name, module, sort in PERMISSION_CATALOG:
         if code in existing:
+            if code == "rbac.user.manage":
+                row = db.get(models.Permission, code)
+                if row is not None and row.name == "用户授权":
+                    row.name = name
             continue
         db.add(models.Permission(code=code, name=name, module=module, sort=sort))
         created.append(code)
@@ -171,6 +175,9 @@ def _seed_menus(db) -> list[str]:
             existing = db.scalar(select(models.Menu).where(models.Menu.menu_key == key))
             if existing is not None:
                 _rename_menu_permission(existing, item_permission)
+                if key == "users" and existing.label == "用户授权":
+                    existing.label = label
+                    existing.short_label = short
                 continue
             menu = models.Menu(
                 parent_id=group.id,

@@ -41,7 +41,7 @@ const routes = [
     path: '/users',
     name: 'users',
     component: () => import('./views/UsersView.vue'),
-    meta: { title: '用户授权', icon: '☺', permission: 'rbac.user.manage' },
+    meta: { title: '用户管理', icon: '☺', permission: 'rbac.user.manage' },
   },
   {
     path: '/roles',

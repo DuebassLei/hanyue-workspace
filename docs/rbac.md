@@ -94,11 +94,16 @@ rbac_audit_logs  ← 记录每一次角色/菜单/授权变更
 | PUT | `/rbac/roles/{id}/menus` | `rbac.menu.manage` | **全量覆盖**菜单绑定 |
 | GET | `/rbac/menus` | `rbac.menu.manage` | 完整菜单树（含隐藏项与 id） |
 | POST/PATCH/DELETE | `/rbac/menus[/{id}]` | `rbac.menu.manage` | 菜单 CRUD |
-| GET | `/rbac/users?q=` | `rbac.user.manage` | 用户 + 角色 |
+| GET | `/rbac/users?q=&status=` | `rbac.user.manage` | 用户 + 角色。`status` 为 `active`（默认）/ `disabled` / `all`；搜索跨所选状态 |
+| POST | `/rbac/users` | `rbac.user.manage` | 建号。服务端生成一次性密码，只在本次响应的 `initialPassword` 里出现；至少选一个角色 |
+| PATCH | `/rbac/users/{id}` | `rbac.user.manage` | 改昵称、停用/启用。不能停用自己；不能停用最后一个**启用中**的超管 |
 | PUT | `/rbac/users/{id}/roles` | `rbac.user.manage` | 分配角色（最后一个超管 409） |
+| POST | `/rbac/users/{id}/reset-password` | `rbac.user.manage` | 重置为一次性随机密码，并令对方已登录会话立即失效。不能重置自己的；没有邮箱的开发态账号 409 |
 | GET | `/rbac/audits` | `rbac.audit.view` | 变更审计 |
 
-错误码：`403 forbidden`（缺权限）、`409 role_protected / role_in_use / last_superadmin / menu_has_children`、`400 invalid_menu / invalid_permission`。
+错误码：`403 forbidden`（缺权限）、`409 role_protected / role_in_use / last_superadmin / cannot_disable_self / cannot_reset_self / no_email / email_taken / menu_has_children`、`400 invalid_menu / invalid_permission / invalid_email`。
+
+停用只阻止后续请求（`is_active` 在每次鉴权时检查）。重置密码额外改 `password_changed_at`，令牌里的 `pwdv` 对不上就被拒，所以是立即踢下线。密码本身不进审计日志。
 
 ---
 
@@ -267,8 +272,20 @@ router = APIRouter(tags=["logs"], dependencies=[require_permission("logs.view")]
 
 ## 8. 运维
 
-- **首个超管**：`BOOTSTRAP_FIRST_USER_SUPERADMIN=true`（默认）时，库里没有超管就把最早注册的账号提为超管；公网邀请制部署可设为 `false`
-- **救援**：把自己降权后进不去后台 → 直接在库里执行
-  `INSERT INTO user_roles (user_id, role_id) SELECT '<你的 uid>', id FROM roles WHERE role_key='superadmin'`
+- **首个超管**：`BOOTSTRAP_FIRST_USER_SUPERADMIN=true`（默认）时，库里没有超管就把最早注册的活跃账号提为超管；之后注册的都是 `member`。Docker 部署里即 `create-user create` 建的第一个账号。公网邀请制部署可设为 `false`。
+- **查当前超管 / 手工提权**：`./scripts/deploy.sh shell db` 进的是容器 shell，要再 `psql -U hanyue -d hanyue`（本地开发库用 `dev-pg.sh psql` / `dev-pg.ps1 psql`）。完整 SQL 与注意事项见 `docs/docker-deploy.md` §3.1。提权本身就这一条，按邮箱匹配，幂等：
+
+  ```sql
+  INSERT INTO user_roles (user_id, role_id)
+  SELECT u.id, r.id
+  FROM users u
+  JOIN roles r ON r.role_key = 'superadmin'
+  WHERE u.email = 'you@example.com'
+    AND NOT EXISTS (
+      SELECT 1 FROM user_roles ur
+      WHERE ur.user_id = u.id AND ur.role_id = r.id
+    );
+  ```
+
 - **审计**：`GET /rbac/audits` 能看到谁在什么时候改了哪个角色的权限、删了哪个菜单
 - **迁移**：新表由 `create_all` 自动创建；`users` 表**不需要**加 `role` 列，角色关系全在 `user_roles`

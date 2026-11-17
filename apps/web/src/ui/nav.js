@@ -49,7 +49,7 @@ export const NAV_GROUPS = [
     key: 'rbac',
     label: '权限',
     items: [
-      { name: 'users', label: '用户授权', short: '用户', permission: 'rbac.user.manage' },
+      { name: 'users', label: '用户管理', short: '用户', permission: 'rbac.user.manage' },
       { name: 'roles', label: '角色管理', short: '角色', permission: 'rbac.role.manage' },
       { name: 'menus', label: '菜单管理', short: '菜单', permission: 'rbac.menu.manage' },
     ],
