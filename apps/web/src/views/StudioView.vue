@@ -19,6 +19,7 @@ import MarkdownEditor from '../components/MarkdownEditor.vue'
 import ModelSelector from '../components/ModelSelector.vue'
 import { useModelSelectionStore } from '../stores/modelSelection'
 import { articleBodyFromOutput, parseArticleOutput } from '../utils/aiArticle'
+import { markdownToHtml } from '../utils/markdownSerializer'
 import PublishDrawer from '../features/publish/PublishDrawer.vue'
 import DraftLibraryModal from '../features/studio/DraftLibraryModal.vue'
 import { providerOptions, resolveSelectedModelId } from '../composables/imageProviders.js'
@@ -108,6 +109,9 @@ const aiPrompt = ref('')
 const aiOutput = ref('')
 const aiRunning = ref(false)
 const aiError = ref('')
+const aiPromptError = ref('')
+const aiStopped = ref(false)
+const aiResultRef = ref(null)
 // 实际使用的模型（降级后由 generation.model 更正），不谎报首选
 const aiModelInfo = ref('')
 const aiTargetLength = ref(600)  // 字数目标
@@ -453,8 +457,24 @@ async function loadList() {
   }
 }
 
+function consumeHotDraft(id) {
+  const incoming = history.state?.hotDraft
+  if (!incoming || incoming.itemId !== id || !incoming.title) return
+  // 一次性消费，避免刷新或浏览器前进时覆盖用户已经修改的提示词。
+  history.replaceState({ ...history.state, hotDraft: null }, '')
+  aiPrompt.value = `围绕「${incoming.title}」写一篇初稿，语气平实`
+  if (incoming.track) aiPrompt.value += `\n赛道：${incoming.track}`
+  if (incoming.platforms?.length) aiPrompt.value += `\n热点来源：${incoming.platforms.join('、')}`
+  aiTask.value = 'article'
+  aiOpen.value = true
+  rightTab.value = 'ai'
+}
+
 async function openItem(id) {
-  if (detail.value?.item.id === id) return
+  if (detail.value?.item.id === id) {
+    consumeHotDraft(id)
+    return
+  }
   // 切换前先把上一篇待保存的草稿落库，避免 debounce 期间的内容丢失
   await flushAutoSave()
   let data
@@ -481,6 +501,7 @@ async function openItem(id) {
   await nextTick()
   loadingDraft = false
   autoSaveStatus.value = hasDraft && dirty.value ? 'saved' : 'idle'
+  consumeHotDraft(id)
   // 稿件库可能打开侧栏前 200 篇之外的稿子：补进行列，保证激活态有落点；
   // 归档稿按约定不进侧栏，即使正打开着也不补
   if (!data.item.archived && !items.value.some((row) => row.id === id)) {
@@ -639,9 +660,11 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
 
 function runAi() {
   if (!aiPrompt.value.trim()) {
-    aiError.value = '请先写清楚这次要做什么'
+    aiPromptError.value = '请先写清楚这次要做什么'
     return
   }
+  aiPromptError.value = ''
+  aiStopped.value = false
   const generationItemId = detail.value?.item.id
   const autoGenerateImages = aiAutoImages.value && aiTask.value === 'article'
   let generationSaved = false
@@ -649,6 +672,7 @@ function runAi() {
   aiError.value = ''
   aiModelInfo.value = ''
   aiRunning.value = true
+  nextTick(() => aiResultRef.value?.scrollIntoView({ block: 'start', behavior: 'auto' }))
   const request = {
     taskType: aiTask.value,
     prompt: aiPrompt.value,
@@ -696,12 +720,14 @@ function runAi() {
 }
 
 function stopAi() {
+  aiStopped.value = true
   abortStream?.()
   aiRunning.value = false
 }
 
 // AI 生成结果预览：结构化文章只展示正文，不让 JSON 字段糊在预览里
 const aiPreview = computed(() => articleBodyFromOutput(aiOutput.value))
+const aiPreviewHtml = computed(() => markdownToHtml(aiPreview.value))
 
 function useAiOutput() {
   // 文章类任务输出的是 JSON 契约，插入正文的只能是 markdown 正文
@@ -712,6 +738,7 @@ function useAiOutput() {
     draftBody.value = draftBody.value ? `${draftBody.value}\n\n${output}` : output
   }
   aiOutput.value = ''
+  aiStopped.value = false
   // 配图可能在用户点「使用结果」之前就生成完了，这里补插到占位符
   applyGeneratedInlineImages()
 }
@@ -776,7 +803,7 @@ async function saveVariant() {
 watch(
   () => route.query.id,
   (id) => {
-    if (id && id !== detail.value?.item.id) {
+    if (id) {
       openItem(id).catch((err) => {
         error.value = err.message
       })
@@ -1528,6 +1555,34 @@ onBeforeUnmount(() => {
           role="tabpanel"
           aria-labelledby="studio-tab-ai"
         >
+          <section v-if="aiRunning || aiOutput || aiError || aiStopped" ref="aiResultRef" class="studio-ai-output" aria-label="AI 生成结果">
+            <div class="studio-ai-output-head">
+              <div>
+                <span class="studio-ai-output-label">生成结果预览</span>
+                <p class="studio-model-usage">预览不会自动修改正文</p>
+              </div>
+              <n-button v-if="aiRunning" quaternary size="small" @click="stopAi">中断</n-button>
+            </div>
+            <p class="studio-ai-status" role="status">{{ aiRunning ? (aiOutput ? '正在生成…' : '正在等待生成结果…') : aiStopped ? (aiOutput ? '已中断，已有内容可继续使用' : '已中断') : aiError ? '生成失败' : '生成结束' }}</p>
+            <p v-if="aiModelInfo" class="studio-model-usage">{{ aiModelInfo }}</p>
+            <n-alert v-if="aiError" type="error" :bordered="false">{{ aiError }}</n-alert>
+            <template v-if="aiOutput">
+              <div class="studio-ai-output-content" tabindex="0" aria-label="生成内容预览">
+                <div class="studio-ai-output-markdown" v-html="aiPreviewHtml"></div>
+              </div>
+              <div class="ai-insert-mode">
+                <span class="ai-insert-label">插入方式</span>
+                <div class="ai-insert-group" role="group" aria-label="插入方式">
+                  <button class="ai-length-btn" :class="{ 'is-active': aiInsertMode === 'append' }" :aria-pressed="aiInsertMode === 'append'" @click="aiInsertMode = 'append'">追加末尾</button>
+                  <button class="ai-length-btn" :class="{ 'is-active': aiInsertMode === 'replace' }" :aria-pressed="aiInsertMode === 'replace'" @click="aiInsertMode = 'replace'">替换全文</button>
+                </div>
+              </div>
+              <n-space :size="8" class="studio-actions">
+                <n-button size="small" type="primary" @click="useAiOutput">插入正文</n-button>
+                <n-button quaternary size="small" @click="aiOutput = ''; aiStopped = false">丢弃</n-button>
+              </n-space>
+            </template>
+          </section>
           <div class="row studio-tool-head">
             <div>
               <span class="studio-section-label studio-section-label-flush">AI 写作</span>
@@ -1642,41 +1697,8 @@ onBeforeUnmount(() => {
               >
                 开始生成
               </n-button>
-              <n-button v-if="aiRunning" quaternary size="small" @click="stopAi">中断</n-button>
             </n-space>
-            <p v-if="aiModelInfo" class="studio-model-usage">{{ aiModelInfo }}</p>
-            <n-alert v-if="aiError" type="error" :bordered="false">{{ aiError }}</n-alert>
-            <section v-if="aiOutput" class="studio-ai-output" aria-label="AI 生成结果">
-              <span class="studio-ai-output-label">生成结果</span>
-              <!-- 渲染 Markdown 预览 -->
-              <div class="studio-ai-output-content">
-                <MarkdownEditor
-                  :model-value="aiPreview"
-                  :readonly="true"
-                  :toolbar="{}"
-                />
-              </div>
-              <!-- 插入方式 -->
-              <div class="ai-insert-mode">
-                <label class="ai-insert-label">插入方式</label>
-                <div class="ai-insert-group">
-                  <button
-                    class="ai-length-btn"
-                    :class="{ 'is-active': aiInsertMode === 'append' }"
-                    @click="aiInsertMode = 'append'"
-                  >追加末尾</button>
-                  <button
-                    class="ai-length-btn"
-                    :class="{ 'is-active': aiInsertMode === 'replace' }"
-                    @click="aiInsertMode = 'replace'"
-                  >替换全文</button>
-                </div>
-              </div>
-              <n-space :size="8" class="studio-actions">
-                <n-button size="small" type="primary" @click="useAiOutput">插入正文</n-button>
-                <n-button quaternary size="small" @click="aiOutput = ''">丢弃</n-button>
-              </n-space>
-            </section>
+            <n-alert v-if="aiPromptError" type="error" :bordered="false">{{ aiPromptError }}</n-alert>
           </div>
         </section>
 
@@ -2640,10 +2662,24 @@ onBeforeUnmount(() => {
 .ai-image-settings-status { color: var(--color-text-secondary); }
 .ai-image-settings-error { color: var(--color-danger); }
 .studio-ai-output {
+  min-width: 0;
+  margin-bottom: var(--space-4);
+  overflow-wrap: anywhere;
   padding: var(--space-3);
   border-left: 3px solid var(--color-accent);
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
   background: var(--color-accent-soft);
+}
+.studio-ai-output-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.studio-ai-status {
+  margin: var(--space-2) 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-xs);
 }
 .studio-ai-output-label {
   display: block;
@@ -2653,11 +2689,36 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 .studio-ai-output-content {
-  max-height: 300px;
-  overflow-y: auto;
+  max-height: min(300px, 40vh);
+  overflow: auto;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface-raised);
+}
+.studio-ai-output-markdown {
+  padding: var(--space-3);
+  color: var(--color-text-primary);
+  font-size: var(--font-sm);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.studio-ai-output-markdown :deep(h1),
+.studio-ai-output-markdown :deep(h2),
+.studio-ai-output-markdown :deep(h3) {
+  margin: 0.6em 0 0.3em;
+  font-size: 1em;
+  line-height: 1.4;
+}
+.studio-ai-output-markdown :deep(p),
+.studio-ai-output-markdown :deep(ul),
+.studio-ai-output-markdown :deep(ol),
+.studio-ai-output-markdown :deep(blockquote),
+.studio-ai-output-markdown :deep(pre) {
+  margin: 0.4em 0;
+}
+.studio-ai-output-markdown :deep(img) {
+  max-width: 100%;
+  height: auto;
 }
 .studio-ai-output .studio-actions {
   margin-top: var(--space-3);
