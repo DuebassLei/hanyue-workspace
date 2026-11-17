@@ -421,6 +421,7 @@ docker compose cp ../apps/api/storage/. api:/data/storage/
 
 | 现象 | 原因与处理 |
 |---|---|
+| 页面提示「无法建立本地会话：开发态登录已关闭」或「需要重新进入」 | 代码里唯一的登录入口是 `POST /auth/login`（按 subject 换 token），`ENVIRONMENT=production` 时启动门禁会拒绝它，而正式 IdP 登录尚未实现 → 五个服务全 healthy 但进不去应用。自用部署在 `infra/.env` 设 `ENVIRONMENT=development` + `ALLOW_DEV_LOGIN=true` 后 `up --no-build` 重建 api/worker。**对公网开放前必须改回**，并在安全组里只放行自己的 IP |
 | `api` 反复重启，日志 `生产配置不安全，已拒绝启动` | `.env` 的 `SECRET_KEY` 太短/是占位值、`ALLOW_DEV_LOGIN` 非 false，或 `DATABASE_URL` 还是 sqlite |
 | `worker` 显示 `unhealthy`，但 `logs worker` 正在正常渲染 | 旧镜像的心跳写在消费循环里，`run_job` 阻塞期间不刷新，2 核上超过约 130 秒必判不健康。`build worker` 更新镜像即可（新版心跳在独立线程，见 2.3）。**不要直接 restart**，会中断渲染 |
 | `db` 一直 unhealthy | `POSTGRES_PASSWORD` 为空或含 `${}` 等需转义字符；`docker compose logs db` 看 initdb 报错。改密码不会改已初始化卷，需进库 `ALTER USER` |

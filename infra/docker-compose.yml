@@ -24,9 +24,13 @@ x-pip-build-args: &pip-build-args
 x-app-env: &app-env
   DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hanyue}:${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hanyue}
   SECRET_KEY: ${SECRET_KEY:?请在 infra/.env 设置至少 32 字符的随机 SECRET_KEY}
-  ENVIRONMENT: production
-  # 生产必须关闭任意 subject 换 token 的开发登录入口
-  ALLOW_DEV_LOGIN: "false"
+  # 默认按生产跑（启动门禁会校验 SECRET_KEY / 登录开关 / 不用 SQLite）。
+  # 但仓库里还没有正式 IdP 登录实现，只有 POST /auth/login 这个开发态入口，
+  # 且在 production 下它会被门禁拒绝 —— 结果是「服务全绿但进不去应用」。
+  # 自用/内网部署：在 infra/.env 里设 ENVIRONMENT=development + ALLOW_DEV_LOGIN=true。
+  # 对公网开放前必须改回（否则任何人都能用任意 subject 登录并读写数据）。
+  ENVIRONMENT: ${ENVIRONMENT:-production}
+  ALLOW_DEV_LOGIN: ${ALLOW_DEV_LOGIN:-false}
   STORAGE_DIR: /data/storage
   REDIS_URL: redis://redis:6379/0
   TZ: ${TZ:-Asia/Shanghai}
