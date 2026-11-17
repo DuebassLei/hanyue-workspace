@@ -46,11 +46,17 @@ FROM nginx:1.27-alpine
 
 # 时区：容器默认 UTC 会让日志与「今天」的判定和宿主机差 8 小时
 ENV TZ=Asia/Shanghai
-# 国内构建：把 Alpine 源换成国内镜像（$APK_MIRROR，如 mirrors.aliyun.com）。
-# 只换主机名，v3.x/main|community 路径保留；留空则完全不动。
+# 国内构建：把 Alpine 源换成国内镜像（$APK_MIRROR）。两种写法：
+#   mirrors.aliyun.com            —— 只写主机名，协议沿用原 https
+#   http://mirrors.tencentyun.com/alpine —— 完整 base URL（腾讯云内网源按 http 走）
+# 留空则完全不动。
 ARG APK_MIRROR=
 RUN if [ -n "$APK_MIRROR" ]; then \
-        sed -i "s|dl-cdn.alpinelinux.org|$APK_MIRROR|g" /etc/apk/repositories; \
+        case "$APK_MIRROR" in \
+            http*) base="$APK_MIRROR" ;; \
+            *)     base="https://$APK_MIRROR/alpine" ;; \
+        esac; \
+        sed -i "s|https://dl-cdn.alpinelinux.org/alpine|$base|g" /etc/apk/repositories; \
     fi \
     && apk add --no-cache tzdata \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \

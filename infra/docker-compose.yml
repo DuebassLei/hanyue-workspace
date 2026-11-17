@@ -16,6 +16,7 @@ x-logging: &default-logging
 # （api 与 worker 共用：两者都要装 ffmpeg/字体，apt 阶段最容易卡住）
 x-pip-build-args: &pip-build-args
   PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+  PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
   APT_MIRROR: ${APT_MIRROR:-}
 
 # api 与 worker 必须共享同一份配置：模型、队列、存储、凭据任一不一致都会导致

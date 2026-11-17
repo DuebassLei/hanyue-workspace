@@ -24,6 +24,9 @@ DRY_RUN="${DRY_RUN:-0}"
 # 正常转发鉴权）或 200 即视为可用；000/超时/5xx 淘汰。
 # 最多取前 3 个：registry-mirrors 是 fallback 链，塞太多会在全挂时逐个试，反而更慢。
 DEFAULT_MIRRORS="https://docker.m.daocloud.io https://docker.1ms.run https://dockerproxy.net https://docker.1panel.live"
+# 腾讯云 CVM 内网加速器：不占公网带宽、无限流，但 VPC 外不可达（探测会自动淘汰）。
+# 通过 metadata 服务识别 CVM，只有在内网机器上才把它放进候选。
+TENCENT_INTERNAL_MIRROR="https://mirror.ccs.tencentyun.com"
 MAX_MIRRORS=3
 
 # 合并 daemon.json 的 python 片段。用 -c 传而不是 heredoc：heredoc 写在 $( ) 里
@@ -86,6 +89,18 @@ is_docker_desktop() {
   os_name="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)"
   case "$os_name" in
     *"Docker Desktop"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 腾讯云 CVM：metadata 服务只在 VPC 内可达。
+# 必须校验返回体是 ins- 开头的实例 ID——有些网络环境（代理/劫持）会把 DNS 失败
+# 也包装成 HTTP 200，只看 curl 退出码会误判。
+on_tencent_cvm() {
+  local id
+  id="$(curl -s -m 2 "http://metadata.tencentyun.com/latest/meta-data/instance-id" 2>/dev/null || true)"
+  case "$id" in
+    ins-*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -154,6 +169,10 @@ report() {
 main() {
   local candidates="${MIRRORS:-$DEFAULT_MIRRORS}"
   need_cmd curl
+  if on_tencent_cvm; then
+    info "检测到腾讯云 CVM：优先用内网加速 $TENCENT_INTERNAL_MIRROR"
+    candidates="$TENCENT_INTERNAL_MIRROR $candidates"
+  fi
   if [ "$DRY_RUN" = "0" ]; then
     check_docker
     if is_docker_desktop; then

@@ -173,6 +173,24 @@ free -m | grep -i swap
 
 重启 docker 会重启容器，`restart: unless-stopped` 的服务会自动回来，数据在卷里，不会丢。
 
+#### 腾讯云 CVM 上构建（内网源）
+
+`mirrors.tencentyun.com` 是 VPC **内网**源：免公网流量、不限速，但腾讯云机器之外不可达。
+`infra/.env` 换成这一组（`.env.example` 里有同款注释块）：
+
+```ini
+PIP_INDEX_URL=http://mirrors.tencentyun.com/pypi/simple
+PIP_TRUSTED_HOST=mirrors.tencentyun.com   # 内网 pip 源是 http，必须配，否则 pip 拒绝
+APT_MIRROR=mirrors.tencentyun.com
+APK_MIRROR=mirrors.tencentyun.com
+```
+
+npm 腾讯云没有镜像（`/npm/` 404），保持 `registry.npmmirror.com` 公网源。
+Docker Hub 走 `./scripts/deploy.sh mirror`：脚本通过 metadata 服务识别 CVM，
+自动把内网加速器 `https://mirror.ccs.tencentyun.com` 排到候选第一位——
+它不占公网带宽，拉 python/node/pg/redis 都是内网速度。
+在非腾讯云机器上跑同一条命令会自动跳过它（metadata 探测失败）。
+
 
 ### 2.5 视频成片的额外要求
 

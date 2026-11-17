@@ -34,11 +34,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY docker/fonts-cjk-alias.conf /etc/fonts/conf.d/99-cjk-alias.conf
 RUN fc-cache -f >/dev/null
 
-# 国内构建可传 --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+# 国内构建可传 --build-arg PIP_INDEX_URL=... 加速。
+# http 协议的源（如腾讯云内网 http://mirrors.tencentyun.com/pypi/simple）
+# 必须再传 PIP_TRUSTED_HOST=主机名，否则 pip 以不安全为由直接拒绝。
 ARG PIP_INDEX_URL=
+ARG PIP_TRUSTED_HOST=
 
 COPY requirements.txt requirements-prod.txt ./
-RUN pip install --no-cache-dir --retries 5 --timeout 60 ${PIP_INDEX_URL:+--index-url $PIP_INDEX_URL} \
+RUN pip install --no-cache-dir --retries 5 --timeout 60 \
+        ${PIP_INDEX_URL:+--index-url $PIP_INDEX_URL} \
+        ${PIP_TRUSTED_HOST:+--trusted-host $PIP_TRUSTED_HOST} \
         -r requirements.txt -r requirements-prod.txt
 
 COPY app ./app
