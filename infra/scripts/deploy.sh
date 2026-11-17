@@ -196,6 +196,11 @@ dump_failure_context() {
           warn "db 退出码 1 常见原因：卷里已有旧密码（改过 POSTGRES_PASSWORD）、密码含特殊字符、.env 用了 CRLF 行尾（file .env 可查）"
         fi ;;
     esac
+    # 处于重启退避的容器不会被 up 重新拉起，日志也可能是几十秒前那次的，
+    # 很容易被误读成「改了配置没生效」。
+    if [ "$state" = "restarting" ]; then
+      warn "$svc 处于 Docker 重启退避中：上面日志可能早于本次 up，且 up 不会重新拉起它。处理：./scripts/deploy.sh restart $svc（或 down && up）"
+    fi
   done
   free_gb="$(docker_root_free_gb || true)"
   if [ -n "${free_gb:-}" ] && [ "${free_gb:-99}" -lt 2 ]; then
