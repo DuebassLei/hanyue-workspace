@@ -87,6 +87,20 @@ def test_offset_reset_on_rotation(tmp_path):
     assert page.entries == []
 
 
+def test_tail_large_limit_not_capped_by_scan_window(tmp_path):
+    # 导出场景：limit=10000 时扫描预算应随 limit 放大，不能只拿到默认 4MB 窗口内的尾部
+    lines = [
+        _line("2026-11-15 06:00:00", "INFO", "app.bulk", f"b{i}", "x" * 200)
+        for i in range(30000)
+    ]
+    _write_log(tmp_path, "api", lines)
+    page = log_reader.read_logs("api", settings=_FakeSettings(tmp_path), limit=10000)
+    assert len(page.entries) == 10000
+    assert page.entries[0].request_id == "b20000"
+    # 文件比扫描窗口更大时 has_more=True 是预期语义（还有更早的日志未展示）
+    assert page.has_more
+
+
 def test_summary_counts(tmp_path):
     _write_log(
         tmp_path,

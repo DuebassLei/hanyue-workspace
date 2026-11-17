@@ -1,27 +1,30 @@
 <script setup>
 /**
  * LogsView — 系统日志（运维查看器）：直读服务端日志文件，按服务 / 级别 / 关键词 / requestId 过滤，
- * 支持按字节偏移增量拉取与可调频率的自动刷新。
+ * 支持按字节偏移增量拉取；自动刷新默认关闭，间隔可选（默认 10 秒）。
+ * 工具栏提供「复制」（当前视图纯文本进剪贴板）与「导出」（下载最近 1 万行 .log 文本）。
  *
  * 从设置页的「系统日志」分栏独立出来，和模型管理一样归入「系统」菜单组。
  * 日志不入库、不建索引：后端按需反向 tail + 内存过滤，页内只负责展示与轮询。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { NAlert, NButton, NCheckbox, NInput, NSelect, NTag } from 'naive-ui'
+import { NAlert, NButton, NCheckbox, NInput, NSelect, NTag, useMessage } from 'naive-ui'
 import { api } from '../api/client'
 
 const LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
 // 服务端只认 api / worker；日志目录里的 *.stderr / *.stdout 不能作为可选服务，否则查询必 400
 const LOG_SERVICES = ['api', 'worker']
-// 自动刷新频率：只允许预设档位；选择写入 localStorage，下次进页面沿用
+// 自动刷新频率：只允许预设档位（刻意放缓，默认 10 秒）；选择写入 localStorage，下次进页面沿用
 const LOG_POLL_OPTIONS = [
-  { label: '1 秒', value: 1000 },
-  { label: '2.5 秒', value: 2500 },
   { label: '5 秒', value: 5000 },
   { label: '10 秒', value: 10000 },
   { label: '30 秒', value: 30000 },
+  { label: '1 分钟', value: 60000 },
+  { label: '5 分钟', value: 300000 },
 ]
 const LOG_POLL_KEY = 'hanyue-log-poll-ms'
+// 导出一次拉取的行数上限（与后端 /logs limit 上限留余量）
+const LOG_EXPORT_LIMIT = 10000
 
 const logService = ref('api')
 const logMinLevel = ref('')
@@ -31,18 +34,22 @@ const logEntries = ref([])
 const logOffset = ref(null) // null = tail 模式；数字 = 增量轮询偏移
 const logLoading = ref(false)
 const logError = ref('')
-const logAuto = ref(true)
+// 默认不自动刷新，手动「查询」或勾选后再轮询
+const logAuto = ref(false)
 const logTruncated = ref(false)
+const logExporting = ref(false)
 const logSummary = ref({})
 const logStreamRef = ref(null)
 let logTimer = null
+
+const message = useMessage()
 
 const logLevelOptions = LOG_LEVELS.map((level) => ({ label: level, value: level }))
 const logServiceOptions = LOG_SERVICES.map((name) => ({ label: name, value: name }))
 
 function readLogPollMs() {
   const saved = Number(localStorage.getItem(LOG_POLL_KEY))
-  return LOG_POLL_OPTIONS.some((item) => item.value === saved) ? saved : 2500
+  return LOG_POLL_OPTIONS.some((item) => item.value === saved) ? saved : 10000
 }
 const logPollMs = ref(readLogPollMs())
 
@@ -148,13 +155,95 @@ function toggleLogAuto() {
 /** 改档位后立即按新间隔重启，不必先关再开自动刷新 */
 function setLogPollMs(value) {
   const next = Number(value)
-  logPollMs.value = LOG_POLL_OPTIONS.some((item) => item.value === next) ? next : 2500
+  logPollMs.value = LOG_POLL_OPTIONS.some((item) => item.value === next) ? next : 10000
   try {
     localStorage.setItem(LOG_POLL_KEY, String(logPollMs.value))
   } catch {
     /* 隐私模式下 localStorage 不可写，不影响本次会话 */
   }
   startLogPolling()
+}
+
+/** 条目 → 与日志文件同构的纯文本行（续行原样保留） */
+function entriesToText(entries) {
+  return entries.map((entry) => entry.raw ?? entry.message ?? '').join('\n')
+}
+
+function stamp() {
+  // 20261117-065313，用于导出文件名
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+async function writeClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    /* http 环境或权限受限，回退 execCommand */
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    ta.remove()
+    return ok
+  } catch {
+    return false
+  }
+}
+
+/** 复制当前视图内容（含当前过滤条件命中的条目） */
+async function copyLogText() {
+  if (!logEntries.value.length) {
+    message.info('当前没有可复制的日志')
+    return
+  }
+  const ok = await writeClipboard(entriesToText(logEntries.value))
+  ok
+    ? message.success(`已复制 ${logEntries.value.length} 条日志`)
+    : message.error('复制失败，请改用「导出」下载文本')
+}
+
+/** 导出：按当前过滤条件向服务端拉最近 1 万行，下载为 .log 文本文件 */
+async function exportLogText() {
+  if (logExporting.value) return
+  logExporting.value = true
+  try {
+    const params = new URLSearchParams()
+    params.set('service', logService.value)
+    params.set('limit', String(LOG_EXPORT_LIMIT))
+    if (logMinLevel.value) params.set('level', logMinLevel.value)
+    const keyword = String(logKeyword.value || '').trim()
+    const requestId = String(logRequestId.value || '').trim()
+    if (keyword) params.set('keyword', keyword)
+    if (requestId) params.set('requestId', requestId)
+    const data = await api.get(`/logs?${params.toString()}`)
+    const entries = data.entries || []
+    if (!entries.length) {
+      message.info('当前条件下没有可导出的日志')
+      return
+    }
+    const blob = new Blob([`${entriesToText(entries)}\n`], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `hanyue-${logService.value}-${stamp()}.log`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    message.success(`已导出最近 ${entries.length} 条日志`)
+  } catch (err) {
+    message.error(`导出失败：${err.message}`)
+  } finally {
+    logExporting.value = false
+  }
 }
 
 async function refreshLogSummary() {
@@ -235,6 +324,12 @@ onBeforeUnmount(stopLogPolling)
         <n-button size="small" type="primary" @click="loadLogsTail">查询</n-button>
         <n-button size="small" quaternary @click="resetLogFilters">清空条件</n-button>
         <div class="spacer" />
+        <n-button size="small" secondary :disabled="!logEntries.length" @click="copyLogText">
+          复制
+        </n-button>
+        <n-button size="small" secondary :loading="logExporting" @click="exportLogText">
+          导出
+        </n-button>
         <n-checkbox :checked="logAuto" size="small" @update:checked="toggleLogAuto">
           自动刷新
         </n-checkbox>
@@ -278,7 +373,7 @@ onBeforeUnmount(stopLogPolling)
         </div>
       </div>
       <p class="field-hint" style="margin-top: var(--space-2)">
-        筛选只影响展示，不会修改日志文件；点击 requestId 可按链路过滤。自动刷新间隔可调（1～30 秒），向上翻阅时暂停自动滚底。
+        筛选只影响展示，不会修改日志文件；点击 requestId 可按链路过滤。自动刷新默认关闭，开启后间隔可选（5 秒～5 分钟，默认 10 秒）。「复制」取当前视图文本，「导出」按当前条件下载最近 1 万行。
       </p>
     </section>
   </div>

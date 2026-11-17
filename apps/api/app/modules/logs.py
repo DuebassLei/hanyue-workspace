@@ -24,7 +24,8 @@ def read_logs(
     user: CurrentUser,
     service: str = Query(default="api"),
     offset: int | None = Query(default=None, ge=0),
-    limit: int = Query(default=200, le=1000),
+    # 上限放宽到 20000：前端「导出日志文本」一次拉最近 1 万行（带过滤条件）
+    limit: int = Query(default=200, le=20000),
     min_level: str | None = Query(default=None, alias="level"),
     keyword: str | None = Query(default=None, max_length=200),
     request_id: str | None = Query(default=None, alias="requestId", max_length=64),
@@ -33,7 +34,7 @@ def read_logs(
         raise ApiError("invalid_service", f"不支持的日志服务：{service}")
     min_level = min_level.upper() if min_level else None
     if min_level and min_level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-        raise ApiError("invalid_level", f"不支持的日志级别：{level}")
+        raise ApiError("invalid_level", f"不支持的日志级别：{min_level}")
     page = log_reader.read_logs(
         service,
         offset=offset,

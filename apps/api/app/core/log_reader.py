@@ -133,6 +133,9 @@ def read_logs(
     - offset=N：forward 模式，从第 N 字节向后读到 EOF（轮询新日志）；命中超过 limit
       置 truncated=True（next_offset 仍推进到 EOF，避免死循环）。
     - 文件总长小于 offset（轮转/清空）时 next_offset 归零，提示客户端重置。
+
+    max_scan_bytes 按 limit 放大（约每行 300 字节，上限 64MB），否则导出大 limit
+    （如近 1 万行）会被默认 4MB 扫描窗口卡住，只能拿到尾部一小截。
     """
     settings = settings or get_settings()
     files = _ordered_files(log_dir(settings), service, settings.log_backup_count)
@@ -141,10 +144,11 @@ def read_logs(
         return page
     min_rank = _LEVELS.index(min_level.upper()) if min_level and min_level.upper() in _LEVEL_SET else None
     needle = keyword.lower() if keyword else None
+    budget = max(max_scan_bytes, min(limit * 300, 64 * 1024 * 1024))
 
     if offset is None:
         return _read_tail(files, page, limit=limit, min_rank=min_rank, needle=needle,
-                          request_id=request_id, max_scan_bytes=max_scan_bytes)
+                          request_id=request_id, max_scan_bytes=budget)
     return _read_forward(files, page, offset=offset, limit=limit, min_rank=min_rank,
                          needle=needle, request_id=request_id)
 
