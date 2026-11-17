@@ -8,6 +8,7 @@
 #   up [--no-build]     构建并后台启动全部服务，等 api 健康后打印访问地址
 #   down                停止容器（数据卷保留）
 #   destroy             停止并删除数据卷（会二次确认，PG/素材/队列全部丢失）
+#   reset-db            只删 PG 数据卷后重建（素材/队列保留；用于半初始化残留）
 #   restart [服务...]    重启指定服务（默认全部）
 #   build [服务...]      重新构建镜像
 #   save-images [目录]   构建并导出全部镜像为 tar.gz（离线/搬服务器）
@@ -275,6 +276,32 @@ cmd_destroy() {
   read -r answer
   [ "$answer" = "yes" ] || die "已取消"
   "${COMPOSE[@]}" down --volumes --remove-orphans
+}
+
+# 只删 PG 数据卷（比 destroy 精准，不动素材与队列）。
+# 用于「卷已初始化但内容坏了」：官方 entrypoint 里 pg_setup_hba_conf 只在
+# 首次 initdb 之后执行一次，它靠 `postgres -C password_encryption <你的command参数>`
+# 求值；command 非法时这一步会失败，于是 pg_hba.conf 少掉
+#   host all all all <method>
+# 这行。而 initdb 已经成功，PG_VERSION 存在，之后每次启动都
+# "Skipping initialization" —— 那行永远补不上，api 报
+#   FATAL: no pg_hba.conf entry for host "172.x.x.x"
+cmd_reset_db() {
+  local project vol answer
+  warn "这会删除 PG 数据卷（数据库全部内容），storage / redisdata 不受影响。"
+  printf '确认请输入 yes：'
+  read -r answer
+  [ "$answer" = "yes" ] || die "已取消"
+  "${COMPOSE[@]}" rm -sf db >/dev/null 2>&1 || true
+  project="$(env_get COMPOSE_PROJECT_NAME || true)"
+  project="${project:-$(basename "$INFRA_DIR")}"
+  vol="${project}_pgdata"
+  if docker volume inspect "$vol" >/dev/null 2>&1; then
+    docker volume rm "$vol" >/dev/null
+    info "已删除 $vol；下次 up 会重新 initdb 并写入完整的 pg_hba.conf"
+  else
+    warn "没找到卷 $vol；用 docker volume ls | grep pgdata 确认实际名字"
+  fi
 }
 
 cmd_restart() { "${COMPOSE[@]}" restart "$@"; }
@@ -616,6 +643,7 @@ usage() {
   up [--no-build]     构建并后台启动全部服务，等 api 健康后打印访问地址
   down                停止容器（数据卷保留）
   destroy             停止并删除数据卷（二次确认，PG/素材/队列全部丢失）
+  reset-db            只删 PG 数据卷后重建（二次确认；素材/队列保留）
   restart [服务...]    重启指定服务（默认全部）
   build [服务...]      重新构建镜像
   save-images [目录]   构建并把全部镜像导出成 tar.gz（离线部署/搬服务器用）
@@ -647,6 +675,7 @@ main() {
     up)       need_docker; [ -f "$INFRA_DIR/.env" ] || cmd_init_env; require_env; cmd_up "$@" ;;
     down)     need_docker; cmd_down ;;
     destroy)  need_docker; cmd_destroy ;;
+    reset-db) need_docker; cmd_reset_db ;;
     restart)  need_docker; cmd_restart "$@" ;;
     build)    need_docker; cmd_build "$@" ;;
     save-images) need_docker; cmd_save_images "$@" ;;

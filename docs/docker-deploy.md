@@ -424,6 +424,8 @@ docker compose cp ../apps/api/storage/. api:/data/storage/
 | `api` 反复重启，日志 `生产配置不安全，已拒绝启动` | `.env` 的 `SECRET_KEY` 太短/是占位值、`ALLOW_DEV_LOGIN` 非 false，或 `DATABASE_URL` 还是 sqlite |
 | `worker` 显示 `unhealthy`，但 `logs worker` 正在正常渲染 | 旧镜像的心跳写在消费循环里，`run_job` 阻塞期间不刷新，2 核上超过约 130 秒必判不健康。`build worker` 更新镜像即可（新版心跳在独立线程，见 2.3）。**不要直接 restart**，会中断渲染 |
 | `db` 一直 unhealthy | `POSTGRES_PASSWORD` 为空或含 `${}` 等需转义字符；`docker compose logs db` 看 initdb 报错。改密码不会改已初始化卷，需进库 `ALTER USER` |
+| `api` 反复重启，日志 `no pg_hba.conf entry for host "172.x.x.x", user ...` | 卷是**半初始化残留**：`initdb` 成功但官方 entrypoint 的 `pg_setup_hba_conf` 没跑完（它靠 `postgres -C password_encryption <你的 command 参数>` 求值，command 非法就中断），于是 `pg_hba.conf` 少了 `host all all all <method>` 这行；而 `PG_VERSION` 已存在，之后每次启动都 `Skipping initialization`，那行永远补不上。`./scripts/deploy.sh reset-db` 后 `up --no-build` |
+| `db` 反复重启，日志 `FATAL: -c -c requires a value` | `docker-compose.lowmem.yml` 里 `db` 的 `command` 是「`-c` + 值」成对的列表，注释被插进了 `-c` 和值之间就会多出一个 `-c`。已由 `deploy.sh` 的 `lint_db_command` 在启动前拦截；修法是把注释挪到 `-c` 之前 |
 | `web` 打不开但 `api` 正常 | `docker compose logs web` 看 502：通常是 nginx 配置语法错（`nginx -t`）或 `api` 未 healthy |
 | 页面刷新 404 | `infra/nginx/default.conf` 的 `try_files ... /index.html` 被改动过 |
 | 前端请求 502 / 一直 pending | api 未健康或端口被占；`./scripts/deploy.sh health` |
