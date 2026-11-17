@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     secret_key: str = "dev-only-change-me"
     token_ttl_seconds: int = 60 * 60 * 24 * 7
     allow_dev_login: bool = True
+    # 邮箱密码注册：默认关闭。仅当库里还没有任何密码账号时例外（首个账号 bootstrap，
+    # 否则新部署永远进不去）。多人自用/内网想开放注册时设为 true。
+    allow_registration: bool = False
+    # 密码策略与登录爆破防护
+    password_min_length: int = 8
+    auth_lock_threshold: int = 5  # 连续失败达到该次数即锁定
+    auth_lock_minutes: int = 15  # 锁定时长
     database_url: str = f"sqlite:///{(BASE_DIR / 'hanyue.db').as_posix()}"
     storage_dir: Path = BASE_DIR / "storage"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

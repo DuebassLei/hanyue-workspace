@@ -28,11 +28,16 @@
 |---|---|
 | `infra/docker-compose.yml` | 五服务编排：web / api / worker / redis / db，含健康检查、启动顺序、日志轮转 |
 | `infra/docker-compose.lowmem.yml` | 小内存档（2 核 2G）：PG/Redis 参数收紧 + 容器内存上限，< 3 GB 内存时自动叠加（见 2.3） |
+| `infra/docker-compose.dev.yml` | 本地开发库：只起 PG + Redis，独立项目名/卷/端口（5433、6380），不碰生产卷 |
+| `infra/postgres/init/01-init.sql` | PG 默认初始化脚本：库级时区、超时、`pg_trgm`（容器首次 initdb 时自动执行） |
+| `infra/postgres/create-role-and-db.sql` | 手工安装 PG（非 Docker）时的建库建用户脚本，幂等 |
+| `infra/scripts/dev-db.sh` | 本地库管理：up / down / reset / psql / status / bootstrap / import-sqlite |
 | `infra/nginx/default.conf` | 站点配置：SPA history 回退、`/api` 动态解析反代、上传上限 25m、静态缓存、`/healthz` |
 | `infra/.env.example` | 变量模板；`init-env` 会基于它生成 `infra/.env` 并填入随机密钥 |
-| `infra/scripts/deploy.sh` | 部署入口：init-env / up / down / health / logs / backup / restore / migrate / mirror |
+| `infra/scripts/deploy.sh` | 部署入口：init-env / up / down / health / logs / backup / restore / migrate / create-user / mirror |
 | `infra/scripts/set-docker-mirror.sh` | 配 docker 的 `registry-mirrors`（国内拉基础镜像加速，见 2.4） |
 | `infra/scripts/migrate_sqlite_to_pg.py` | 本地 SQLite → PG 数据搬迁（一次性） |
+| `apps/api/scripts/create_user.py` | 账号管理 CLI：create / attach / reset-password / list / disable / enable（见 3.1） |
 | `apps/api/Dockerfile` | 后端镜像：非 root、`TZ` + `tzdata`、可选 pip 镜像源 |
 | `apps/worker/Dockerfile` | Worker 镜像：与 api 共用领域代码，保证两种执行后端语义一致 |
 | `apps/web/Dockerfile` | 前端镜像：Node 构建 → nginx 运行，产物不含源码 |
@@ -254,6 +259,47 @@ vi .env                           # 至少检查 WEB_PORT、TZ；需要生图/�
 `SECRET_KEY` ≥ 32 字符且不是占位值、`ALLOW_DEV_LOGIN=false`、`DATABASE_URL` 不是 SQLite。
 任一条不满足，容器会退出并以非 0 状态重启——这是预期行为，按日志提示改 `.env`。
 
+### 3.1 首个账号与登录
+
+正式登录是**邮箱 + 密码**（`/auth/register`、`/auth/login`、`/auth/password`），
+默认关闭开放注册（`ALLOW_REGISTRATION=false`）。首个账号用 CLI 创建：
+
+```bash
+./scripts/deploy.sh create-user create --email you@example.com
+# 密码交互输入；非交互（CI）用 HANYUE_NEW_PASSWORD=... ./scripts/deploy.sh create-user create ...
+```
+
+`create-user` 在一次性 api 容器内执行（会按依赖先起 db，结束后自动删除容器），
+所以不需要 api 处于运行中，也不会留下常驻进程。
+
+**从旧的开发态账号迁移**：以前用 `local-creator` 之类的 subject 登录时，
+稿件、素材、发布任务都挂在那个 user.id 上。直接新建邮箱账号会「内容全不见了」。
+用 `attach` 给旧账号补邮箱密码，id 不变，数据全部保留：
+
+```bash
+./scripts/deploy.sh create-user list                                    # 先看现有 subject
+./scripts/deploy.sh create-user attach --subject local-creator --email you@example.com
+```
+
+其他子命令：
+
+| 命令 | 用途 |
+|---|---|
+| `create-user list` | 列出邮箱 / subject / 显示名 / 登录方式 / 状态 |
+| `create-user reset-password --email x` | 忘记密码时由服务端重置（会让该账号全部旧会话失效） |
+| `create-user disable --email x` | 停用账号，现有令牌立即失效 |
+| `create-user enable --email x` | 恢复账号 |
+
+安全语义：
+
+- 密码用 **scrypt**（n=16384, r=8, p=1）加盐哈希，库被拖走也无法直接还原密码；
+- 同一账号连续失败 `AUTH_LOCK_THRESHOLD`（默认 5）次后锁定 `AUTH_LOCK_MINUTES`（默认 15）分钟；
+- 令牌里带 `pwdv`（密码修改时间的 epoch），改密后所有旧令牌立即 401，不需要黑名单；
+- 账号不存在与密码错误返回同一个 `invalid_credentials`，且都跑一次哈希，无法用响应时间枚举账号。
+
+关掉开放注册后，登录页只在「库里还没有任何密码账号」时显示注册入口（bootstrap），
+避免新部署出现「没有账号、也无法注册」的死锁。
+
 ## 4. 常用运维
 
 ```bash
@@ -346,7 +392,18 @@ docker push registry.example.com/hanyue/api:20261117   # 另两个同理
 
 ## 6. 从本地 SQLite 迁数据
 
-本地开发库是 `apps/api/hanyue.db`。首次上 Docker 时按需搬迁：
+本地开发现在也用 PostgreSQL（`docker-compose.dev.yml`），**正常开发不需要这一步**；
+只有「历史数据还在旧 SQLite 里」时才搬。
+
+本地库用 `dev-db.sh` 自带的封装（自动指向本地 PG、自动起库）：
+
+```bash
+cd infra
+./scripts/dev-db.sh import-sqlite                 # 默认 apps/api/hanyue.db
+./scripts/dev-db.sh import-sqlite /path/to/old.db # 指定文件
+```
+
+搬到**服务器上**的 PG 用 `deploy.sh`（脚本在 api 容器内执行）：
 
 ```bash
 cd infra
@@ -411,6 +468,8 @@ docker compose cp ../apps/api/storage/. api:/data/storage/
 
 - [ ] 前置 TLS（Caddy 或宿主机 Nginx → `127.0.0.1:8080`），只放行 443/80
 - [ ] `WEB_PORT` 不要直接暴露在公网裸奔；`API_PORT` 保持回环绑定
+- [ ] `ENVIRONMENT=production` + `ALLOW_DEV_LOGIN=false`；首个账号用 `create-user` 建，不要靠开发态入口
+- [ ] `ALLOW_REGISTRATION=false`（除非确实要对外开放注册）；密码策略保持默认或更严
 - [ ] `.env` 权限 600，且不进版本库（`.gitignore` 已忽略）
 - [ ] `backups/` 落在独立磁盘并异地同步
 - [ ] 给 `api`/`worker` 配资源上限（`deploy.resources.limits`），避免视频渲染拖垮宿主机
@@ -442,6 +501,13 @@ docker compose cp ../apps/api/storage/. api:/data/storage/
 | 任务时间戳差 8 小时 | 容器缺 `TZ`/`tzdata`，或迁移脚本未按 UTC 补时区；确认 Dockerfile 与 compose 的 `TZ` |
 | `platform-evidence.json` 变成目录 | 挂载源文件缺失时 Docker 自动建目录；删掉目录后 `init-env` 重新生成 |
 | 改了 `.env` 但配置没生效 | 配置只在进程启动时载入：`restart api worker` |
+| 登录页提示「该邮箱已注册」但忘了密码 | `./scripts/deploy.sh create-user reset-password --email x`；重置后该账号所有旧会话立即失效 |
+| 登录报 `account_locked` | 连续失败达 `AUTH_LOCK_THRESHOLD`（默认 5）次后被锁 `AUTH_LOCK_MINUTES`（默认 15）分钟；等锁过期，或 `create-user reset-password` 立即解锁 |
+| 新部署登录页没有「注册」入口 | `ALLOW_REGISTRATION=false` 且库里已有密码账号。用 `./scripts/deploy.sh create-user create --email ...` 建账号 |
+| 换用邮箱登录后「以前的稿件都不见了」 | 内容挂在旧开发态账号（如 `local-creator`）的 user.id 上。用 `create-user attach --subject local-creator --email ...` 转正，id 不变数据保留；不要新建账号 |
+| 本地启动报 `ModuleNotFoundError: No module named 'psycopg'` | 本地切 PG 后缺驱动：`apps/api/.venv/bin/pip install -r requirements-prod.txt`（或单装 `psycopg[binary]`） |
+| 本地 API 启动报 `connection refused ... 127.0.0.1:5433` | 本地库没起：`cd infra && ./scripts/dev-db.sh up`；`status` 看容器健康 |
+| `dev-db.sh` 报端口 5433 被占 | 改 `DEV_PG_PORT`（compose 与 `DATABASE_URL` 两处要一致），或停掉占用进程 |
 | 某容器反复重启、`docker inspect` 显示 `OOMKilled: true` / exit 137 | 撞到 `mem_limit` 或宿主机内存耗尽。2G 机器先确认小内存档已生效（`doctor` 会打印），再查是谁涨的：`docker stats --no-stream`。`worker` 被杀的常见原因是同时跑了多条视频渲染 |
 | `docker stats` 里 `db` 内存一路涨到上限 | `lowmem` 档未生效（`LOWMEM=0` 或内存 ≥3GB 未自动叠加），PG 用的是默认 `work_mem` / `max_connections`；手动 `docker compose -f docker-compose.yml -f docker-compose.lowmem.yml up -d` |
 

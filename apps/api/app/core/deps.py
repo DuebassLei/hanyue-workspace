@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from .db import get_db
-from .security import decode_token
+from .security import decode_token, epoch_seconds
 
 DbSession = Annotated[Session, Depends(get_db)]
 
@@ -60,6 +60,16 @@ def get_current_user(
     user = db.get(models.User, body["sub"])
     if not user:
         raise ApiError("unauthorized", "用户不存在", status.HTTP_401_UNAUTHORIZED)
+    if not user.is_active:
+        raise ApiError("account_disabled", "该账号已停用", status.HTTP_403_FORBIDDEN)
+    # 改密即全端下线：令牌里的 pwdv 落后于 password_changed_at 说明是旧会话。
+    # 旧令牌没有 pwdv 字段（值为 0），对已设密码的账号同样会被拒。
+    if user.password_changed_at and int(body.get("pwdv") or 0) < epoch_seconds(
+        user.password_changed_at
+    ):
+        raise ApiError(
+            "unauthorized", "密码已变更，请重新登录", status.HTTP_401_UNAUTHORIZED
+        )
     return user
 
 
@@ -81,7 +91,14 @@ def get_optional_user(
         return None
     if body.get("jti") and db.get(models.RevokedToken, body["jti"]):
         return None
-    return db.get(models.User, body["sub"])
+    user = db.get(models.User, body["sub"])
+    if not user or not user.is_active:
+        return None
+    if user.password_changed_at and int(body.get("pwdv") or 0) < epoch_seconds(
+        user.password_changed_at
+    ):
+        return None
+    return user
 
 
 OptionalUser = Annotated[models.User | None, Depends(get_optional_user)]

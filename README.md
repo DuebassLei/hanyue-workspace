@@ -10,7 +10,7 @@
 |---|---|
 | 前端 | Vue 3 + Vite + Pinia + Vue Router |
 | 后端 | FastAPI + SQLAlchemy 2 + Pydantic v2（27 个路由模块 / 33 个领域服务） |
-| 数据库 | 默认 SQLite（开发）；`DATABASE_URL` 可切 PostgreSQL |
+| 数据库 | 本地与生产统一用 PostgreSQL 16；`DATABASE_URL` 可指向任意实例，SQLite 仅作无 Docker 时的兜底（生产门禁会拒绝） |
 | 队列 | Redis + `apps/worker/worker.py`；未配置 Redis 时回退 API 内置线程池，两种后端共用 `job_runner`，任务状态都落 `background_jobs` 表 |
 | 图像 | Pillow 基础处理（同步小图 / 队列大图）+ 配置驱动的 AI 生图适配器 |
 | 平台 | OAuth2 + PKCE 连接器注册表 + Phase 0 能力核验证据文件 |
@@ -33,19 +33,36 @@ hanyue-workspace/
 
 ### A. 本地开发（最简，无需 Redis）
 
-**后端**必须在 `apps/api` 目录下启动：`.env` 固定读取 `apps/api/.env`，SQLite 相对路径也以该目录为基准。
+**1. 起本地数据库**（PostgreSQL 16 + Redis，独立卷与端口 5433/6380，不影响生产数据）：
+
+```bash
+cd infra
+./scripts/dev-db.sh up        # 首次会 initdb 并执行 postgres/init/01-init.sql
+# 输出：
+#   DATABASE_URL=postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue
+#   REDIS_URL=redis://127.0.0.1:6380/0
+```
+
+`apps/api/.env` 的 `DATABASE_URL` 已按上面的地址配好。常用命令：`status` / `psql` /
+`reset`（删卷重建）/ `bootstrap`（建表并创建首个账号）/ `import-sqlite`（搬旧 SQLite 数据）。
+没有 Docker 时可把 `.env` 里被注释的 `sqlite:///./hanyue.db` 打开，但生产必须用 PG。
+
+**2. 后端**必须在 `apps/api` 目录下启动：`.env` 固定读取 `apps/api/.env`，相对路径也以该目录为基准。
 
 ```bash
 cd apps/api
 python -m venv .venv
-./.venv/Scripts/python.exe -m pip install -r requirements.txt          # Windows
-# python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # macOS/Linux
+./.venv/Scripts/python.exe -m pip install -r requirements.txt -r requirements-prod.txt  # Windows
+# python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-prod.txt  # macOS/Linux
 cp .env.example .env                                                    # 可选，按需修改
 ./.venv/Scripts/python.exe -m uvicorn app.main:app --reload --port 8000 # Windows
 # .venv/bin/python -m uvicorn app.main:app --reload --port 8000         # macOS/Linux
 ```
 
-**前端**（另开一个终端）：
+> `requirements-prod.txt` 里有 PostgreSQL 驱动 `psycopg`；本地用 PG 时必须装，
+> 否则启动会报 `ModuleNotFoundError: No module named 'psycopg'`。
+
+**3. 前端**（另开一个终端）：
 
 ```bash
 cd apps/web
@@ -53,9 +70,13 @@ npm install
 npm run dev
 ```
 
+首次打开会停在登录页：点「立即注册」创建账号（库里还没有密码账号时自动放行），
+或用 `./scripts/dev-db.sh bootstrap` 一步建表 + 建账号。开发态免密入口
+（`local-creator`）仍保留，但只在 `ALLOW_DEV_LOGIN=true` 时显示。
+
 | 入口 | 地址 | 说明 |
 |---|---|---|
-| 前端 | http://localhost:5173 | 开发态自动以 `local-creator` 建立本地会话 |
+| 前端 | http://localhost:5173 | 邮箱密码登录；首次可自助注册 |
 | 后端 | http://127.0.0.1:8000 | Vite 把 `/api` 代理到这里 |
 | API 文档 | http://127.0.0.1:8000/docs | Swagger，可直接试调用 |
 
@@ -359,7 +380,7 @@ OAuth 平台的令牌验证端点按官方文档**显式配置**（`PLATFORM_<�
 - 队列**原子领取（CAS）**、取消协作式检查、终态写回不覆盖 `cancelled`；Redis 模式用 SETNX 去重键避免重复投递
 - 发布任务幂等提交用唯一约束兜底（并发不 500）、排期到点自动提升为待提交；手动指标只接受已知键与有限数值，汇总按来源拆分
 - Phase 0 证据文件强制校验日期时效、官方 HTTPS 链接、非空真实 scope、占位文本检测；示例模板默认 `confirmed=false`
-- 生产鉴权门禁：`ENVIRONMENT=production` 时拒绝弱 `SECRET_KEY` / `ALLOW_DEV_LOGIN=true` / SQLite；令牌带 `jti`，`POST /auth/logout` 可吊销；凭据加密使用随机 nonce
+- 生产鉴权门禁：`ENVIRONMENT=production` 时拒绝弱 `SECRET_KEY` / `ALLOW_DEV_LOGIN=true` / SQLite；登录为邮箱 + 密码（scrypt 哈希、失败锁定、改密踢旧会话），令牌带 `jti` 可吊销；凭据加密使用随机 nonce
 
 **明确未实现（避免伪造）**
 - 五个平台的**逐平台适配器字段映射**：OAuth 框架、令牌存储、能力核验注册表已就绪，但 `publish` / `sync*` 的具体请求体需按各平台官方文档与获批资质实现；未实现时明确报错，不猜测接口（公众号走独立的 AppSecret 实现，已按官方文档完成草稿箱三步，但**群发未实现**）
@@ -388,9 +409,9 @@ OAuth 平台的令牌验证端点按官方文档**显式配置**（`PLATFORM_<�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///<apps/api 绝对路径>/hanyue.db` | 生产用 `postgresql+psycopg://`；生产用 SQLite 会被拒绝 |
+| `DATABASE_URL` | `postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue` | 本地由 `infra/scripts/dev-db.sh up` 提供；生产指向 compose 的 `db`。用 SQLite 会被生产门禁拒绝 |
 | `ENVIRONMENT` | `development` | 设为 `production` 时启用启动安全门禁 |
-| `ALLOW_DEV_LOGIN` | `true` | 任意 subject 换 token 的开发入口；生产必须为 `false` |
+| `ALLOW_DEV_LOGIN` | `true`（本地） | 任意 subject 换 token 的开发入口；生产必须为 `false`，正式登录用邮箱密码 |
 | `SECRET_KEY` | `dev-only-change-me` | 令牌签名、凭据加密、上传会话签名；生产必须 ≥32 字符随机值 |
 | `TOKEN_TTL_SECONDS` | `604800` | 令牌有效期；吊销走 `POST /auth/logout` |
 | `JOB_LEASE_SECONDS` | `300` | `running` 超过该时长视为崩溃并回收 |
@@ -431,7 +452,7 @@ OAuth 平台的令牌验证端点按官方文档**显式配置**（`PLATFORM_<�
 ## 开发说明
 
 - **加列迁移**：`core/db.py` 的 `_apply_additive_migrations()` 用 `ALTER TABLE ... ADD COLUMN` 补列，幂等；新增字段记得登记到 `_ADDED_COLUMNS`。
-- **生产安全**：`ENVIRONMENT=production` 时 `get_settings()` 会校验密钥强度、关闭开发登录、拒绝 SQLite；`POST /auth/login` 在开发态以外返回 403，正式部署应替换为 IdP/OIDC 可信断言。所有出站 HTTP 必须走 `core/ssrf.py` 的 `safe_request` / `pin_url`，不要自己 new 一个 httpx client 直连外部域名。
+- **生产安全**：`ENVIRONMENT=production` 时 `get_settings()` 会校验密钥强度、关闭开发登录、拒绝 SQLite；正式登录为邮箱 + 密码（`/auth/register`、`/auth/login`、`/auth/password`），密码用 scrypt 加盐哈希、连续失败锁定、改密后旧令牌立即失效。所有出站 HTTP 必须走 `core/ssrf.py` 的 `safe_request` / `pin_url`，不要自己 new 一个 httpx client 直连外部域名。
 - **前端会话**：401 由 `api/client.js` 统一清 token 并触发 `hanyue:unauthorized`，`session` 尝试按上次 subject 重登；显式退出后不自动重登，需点「重新进入」。`setTheme()` 同步失败会在顶部显示可见提示，不再静默假装已保存。
 - **前端主题**：`data-theme` + CSS 变量；`session.boot()` 从 `/preferences` 拉取并以服务端为准，`localStorage` 只作离线回退。
 - **新增列表端点**：统一用 `core/pagination.py` 的 `paginate()`，务必带复合排序键 `id` 并用 `set_cursor_header()` 回传令牌；不要在测试文件顶层 `import app.services/app.core.db`，否则 `core.db` 会在 fixture 设置临时数据库前绑定默认开发库（测试会写脏 `hanyue.db`）。

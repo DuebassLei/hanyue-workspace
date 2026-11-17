@@ -20,6 +20,7 @@
 #   backup              备份 PG（自定义格式）+ storage 卷，并按 BACKUP_KEEP_DAYS 清理
 #   restore <文件>       从 .dump 恢复数据库（--clean，会二次确认）
 #   migrate [参数]       SQLite → PG 数据搬迁（参数透传给 migrate_sqlite_to_pg.py）
+#   create-user [参数]   账号管理（create / reset-password / list / disable / enable）
 #
 # 需要 Docker Engine + Compose v2；Windows 在 Git Bash 或 WSL 中执行。
 
@@ -477,6 +478,15 @@ cmd_migrate() {
     api python /scripts/migrate_sqlite_to_pg.py --sqlite /data/source.db "$@"
 }
 
+cmd_create_user() {
+  require_env
+  [ "$#" -gt 0 ] || die "用法：create-user create|reset-password|list|disable|enable [参数]"
+  info "在 api 容器内执行账号管理（数据库即 compose 的 db 服务）"
+  # run 会按依赖关系先起 db；一次性容器结束后自动删除，不留下常驻进程。
+  # 需要交互输入密码时不要在非 TTY 环境（CI/crontab）里跑，改用 HANYUE_NEW_PASSWORD。
+  "${COMPOSE[@]}" run --rm api python scripts/create_user.py "$@"
+}
+
 port_busy() {
   local p="$1"
   if command -v ss >/dev/null 2>&1; then
@@ -661,6 +671,9 @@ usage() {
   backup              备份 PG + storage 卷，并按 BACKUP_KEEP_DAYS 清理
   restore <文件>       从 .dump 恢复数据库（--clean，二次确认）
   migrate [参数]       SQLite → PG 数据搬迁（参数透传给 migrate_sqlite_to_pg.py）
+  create-user [参数]   账号管理（create / reset-password / list / disable / enable）
+                       例：./scripts/deploy.sh create-user create --email me@example.com
+                       密码优先交互输入；非交互场景用 HANYUE_NEW_PASSWORD
 
 环境变量：
   LOWMEM=1|0          强制启用/关闭小内存档（默认 auto：物理内存 < 3GB 自动启用）
@@ -693,6 +706,7 @@ main() {
     backup)   need_docker; cmd_backup ;;
     restore)  need_docker; cmd_restore "$@" ;;
     migrate)  need_docker; cmd_migrate "$@" ;;
+    create-user|user|users) need_docker; cmd_create_user "$@" ;;
     help|-h|--help) usage ;;
     *) usage; die "未知子命令：$cmd" ;;
   esac

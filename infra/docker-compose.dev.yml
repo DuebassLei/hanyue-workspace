@@ -1,0 +1,57 @@
+# 本地开发用的数据库编排：只起 PostgreSQL 与 Redis，不构建应用镜像。
+#
+# 与 docker-compose.yml 完全隔离：独立项目名（hanyue-dev）、独立卷、独立端口，
+# 不会覆盖生产/预发的 pgdata，也不会因为 `down -v` 误删生产数据。
+#
+#   cd infra && ./scripts/dev-db.sh up
+#
+# 应用侧用 apps/api/.env 里的 DATABASE_URL 连接：
+#   postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue
+#
+# 端口刻意避开默认值：本机可能已装 PostgreSQL(5432) 或 Redis(6379)。
+
+name: hanyue-dev
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DEV_POSTGRES_USER:-hanyue}
+      POSTGRES_PASSWORD: ${DEV_POSTGRES_PASSWORD:-hanyue_dev_pwd}
+      POSTGRES_DB: ${DEV_POSTGRES_DB:-hanyue}
+      # 官方镜像默认 UTF8；不要指定 --locale，alpine 版可能缺对应 locale 导致 initdb 失败
+      TZ: ${TZ:-Asia/Shanghai}
+      # 与生产保持一致：密码哈希与排序都以 UTF8 + C 排序规则运行，避免本地/线上行为差异
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --no-locale"
+    ports:
+      - "127.0.0.1:${DEV_PG_PORT:-5433}:5432"
+    volumes:
+      - pgdata-dev:/var/lib/postgresql/data
+      # 只在数据卷为空时执行；改脚本后要 reset 才会重跑（见 dev-db.sh reset）
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${DEV_POSTGRES_USER:-hanyue} -d ${DEV_POSTGRES_DB:-hanyue}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "900", "1"]
+    ports:
+      - "127.0.0.1:${DEV_REDIS_PORT:-6380}:6379"
+    volumes:
+      - redisdata-dev:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata-dev:
+  redisdata-dev:

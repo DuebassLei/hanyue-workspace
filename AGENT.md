@@ -16,7 +16,7 @@
 |---|---|---|
 | 前端 | Vue 3 + Vite + Pinia + Vue Router | `apps/web/` |
 | 后端 | FastAPI + SQLAlchemy 2 + Pydantic v2 | `apps/api/` |
-| 数据库 | SQLite（开发）/ PostgreSQL（生产） | `DATABASE_URL` env |
+| 数据库 | PostgreSQL 16（本地 `infra/docker-compose.dev.yml` + 生产 compose）；SQLite 仅无 Docker 兜底 | `DATABASE_URL` env |
 | 队列 | Redis + Worker / 内置线程池回退 | `apps/worker/worker.py` |
 | 图像 | Pillow（同步小图/队列大图）+ AI 生图适配器 | `apps/api/app/services/image_service.py` |
 | 容器 | Docker Compose（web + api + worker + redis + postgres），入口 `infra/scripts/deploy.sh` | `infra/docker-compose.yml` |
@@ -77,7 +77,7 @@ hanyue-workspace/
 
 | 文件 | 路由前缀 | 职责 |
 |---|---|---|
-| `auth.py` | `/api/v1/auth` | 开发登录、登出、令牌吊销 |
+| `auth.py` | `/api/v1/auth` | 邮箱密码注册/登录/改密、开发态 subject 登录、令牌吊销 |
 | `workspaces.py` | `/api/v1/workspaces` | 工作区 CRUD、多工作区隔离 |
 | `topics.py` | `/api/v1/workspaces/current` | 当前工作区上下文（选题库已下线，仅保留此端点） |
 | `content.py` | `/api/v1/content` | 稿件版本、平台版本 |
@@ -144,12 +144,23 @@ hanyue-workspace/
 
 ## 本地开发快速启动
 
+### 0. 本地数据库（PostgreSQL + Redis）
+
+```bash
+cd infra
+./scripts/dev-db.sh up        # 独立卷/端口 5433、6380，不会碰生产数据
+./scripts/dev-db.sh bootstrap # 可选：起库 + 建表 + 创建首个账号
+```
+
+`apps/api/.env` 的 `DATABASE_URL` 已指向 `127.0.0.1:5433`。
+
 ### 1. 后端
 
 ```bash
 cd apps/api
 python -m venv .venv
-.venv/Scripts/python.exe -m pip install -r requirements.txt   # Windows
+.venv/Scripts/python.exe -m pip install -r requirements.txt -r requirements-prod.txt  # Windows
+# requirements-prod.txt 提供 PG 驱动 psycopg，本地用 PG 必须装
 cp .env.example .env                                           # 按需修改
 .venv/Scripts/python.exe -m uvicorn app.main:app --reload --port 8000
 ```
@@ -171,11 +182,23 @@ npm run dev   # http://localhost:5173
 
 ### 3. 获取开发 Token
 
+正式登录（邮箱 + 密码，先注册；库里没有密码账号时首个账号自动放行）：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"me@example.com","password":"Str0ng-pass-2026"}'
+```
+
+开发态免密入口（需 `ALLOW_DEV_LOGIN=true`，生产关闭）：
+
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"subject":"local-dev"}'
 ```
+
+两个接口都返回 `{token, user, workspaceId}`，后续请求带 `Authorization: Bearer <token>`。
 
 ---
 
@@ -229,7 +252,7 @@ cd ../web && npm run build                             # 前端构建
 3. **出站 HTTP 必过 SSRF 防护**：`safe_request()` 校验字面量 IP、DNS 解析、逐跳重定向，且把校验后 IP 固定连接层防 DNS rebinding。
 4. **发布超时结果未知 → `needs_attention`**，绝不自动重发；远端已有内容则直接视为成功。
 5. **自动发布五条件**：平台能力已核验 + 接口支持发布 + 官方 OAuth 授权 + 账号开启自动发布 + 已人工审核，缺一不可。
-6. **生产安全门禁**：`ENVIRONMENT=production` 时拒绝弱 `SECRET_KEY` / `ALLOW_DEV_LOGIN=true` / SQLite。
+6. **生产安全门禁**：`ENVIRONMENT=production` 时拒绝弱 `SECRET_KEY` / `ALLOW_DEV_LOGIN=true` / SQLite；正式登录为邮箱密码（scrypt 哈希、失败锁定、改密踢旧会话）。
 
 ---
 
@@ -248,7 +271,9 @@ cd ../web && npm run build                             # 前端构建
 | `HOT_TOPICS_REFRESH_COOLDOWN` | `15` | 热点刷新冷却（秒），0 关闭 |
 | `HOT_TOPICS_API_URL` | 空 | 旧版单源热点接口；仅在库中无评分簇时回落使用 |
 | `ENVIRONMENT` | `development` | 设 `production` 开启安全门禁 |
-| `ALLOW_DEV_LOGIN` | `true` | 生产必须为 `false` |
+| `ALLOW_DEV_LOGIN` | `true`（本地） | 生产必须为 `false` |
+| `ALLOW_REGISTRATION` | `false` | 开放注册；首个密码账号始终放行（bootstrap） |
+| `AUTH_LOCK_THRESHOLD` / `AUTH_LOCK_MINUTES` | `5` / `15` | 连续失败锁定策略 |
 
 完整变量列表见 `README.md` 末尾的环境变量表，或 `apps/api/.env.example`。
 

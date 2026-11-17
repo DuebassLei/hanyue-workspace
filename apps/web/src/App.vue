@@ -30,6 +30,7 @@ import FontMenu from './features/shell/FontMenu.vue'
 import AccountMenu from './features/shell/AccountMenu.vue'
 import ModelStatusBar from './features/shell/ModelStatusBar.vue'
 import AccountDrawer from './features/shell/AccountDrawer.vue'
+import LoginView from './views/LoginView.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -422,7 +423,7 @@ onBeforeUnmount(() => {
             >
               <span>{{ session.error || session.themeSyncError }}</span>
               <n-button v-if="session.needsLogin" size="small" type="primary" @click.stop="session.reenter()">
-                重新进入
+                去登录
               </n-button>
             </div>
 
@@ -430,13 +431,7 @@ onBeforeUnmount(() => {
                  （main 同为 hidden）→ 滚轮链截断、整页滚不动。这里让它成为唯一原生滚动器。 -->
             <n-layout-content class="main-content">
               <RouterView v-if="session.ready && !session.needsLogin" />
-              <div v-else-if="session.needsLogin" class="page">
-                <div class="card">
-                  <h2 class="card-title">需要重新进入</h2>
-                  <p class="page-sub">当前会话已退出或失效；开发态会按上次的身份重新建立本地会话。</p>
-                  <n-button type="primary" @click="session.reenter()">重新进入</n-button>
-                </div>
-              </div>
+              <LoginView v-else-if="session.needsLogin" />
               <div v-else class="page" aria-busy="true">
                 <div class="skeleton" style="width: 28%; height: 28px" />
                 <div class="skeleton" style="width: 100%; height: 120px" />

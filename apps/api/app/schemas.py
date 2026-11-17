@@ -20,17 +20,56 @@ class CamelModel(BaseModel):
 
 # ---------- auth ----------
 class LoginRequest(CamelModel):
-    subject: str = Field(default="local-creator", min_length=1, max_length=190)
-    display_name: str = Field(default="创作者", max_length=120)
+    """两种登录方式二选一。
+
+    - 邮箱密码：`identifier`（或 `email`）+ `password`
+    - 开发态便利入口：只给 `subject`，且服务端 ALLOW_DEV_LOGIN=true
+
+    两者都不给时按「缺少凭据」返回 400，不再默默给一个默认账号。
+    """
+
+    identifier: str | None = Field(default=None, max_length=190)
+    email: str | None = Field(default=None, max_length=190)
+    password: str | None = Field(default=None, max_length=200)
+    subject: str | None = Field(default=None, min_length=1, max_length=190)
+    display_name: str | None = Field(default=None, max_length=120)
+
+
+class RegisterRequest(CamelModel):
+    email: str = Field(min_length=3, max_length=190)
+    password: str = Field(min_length=1, max_length=200)
+    display_name: str | None = Field(default=None, max_length=120)
+
+
+class PasswordChangeRequest(CamelModel):
+    """改密。已有密码时必须提供 current_password，防止令牌被盗后直接换密码。"""
+
+    current_password: str | None = Field(default=None, max_length=200)
+    new_password: str = Field(min_length=1, max_length=200)
+
+
+class AuthConfigOut(CamelModel):
+    """登录页渲染所需的能力开关（未登录可访问，不泄露任何账号信息）。"""
+
+    password_login: bool = True
+    allow_dev_login: bool
+    allow_registration: bool
+    # 库里还没有密码账号时为 true：此时允许注册首个账号
+    bootstrap_available: bool
+    password_min_length: int
 
 
 class UserOut(CamelModel):
     id: str
     display_name: str
     timezone: str
-    # 身份来源：idp = 正式身份提供者；local-dev = 开发态按 subject 换的本地会话
+    # 身份来源：password = 邮箱密码；local-dev = 开发态按 subject 换的本地会话；idp = 正式身份提供者
     auth_subject: str
     auth_provider: str
+    # 登录邮箱。开发态/IdP 账号可能为空
+    email: str | None = None
+    # 是否可用密码登录（前端据此显示「修改密码」入口）
+    has_password: bool = False
     created_at: datetime
 
 

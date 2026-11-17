@@ -18,14 +18,26 @@
 
 ### 方式 A：本地开发（最简）
 
-后端**必须在 `apps/api` 目录启动**：`.env` 固定为 `apps/api/.env`，`DATABASE_URL=sqlite:///./hanyue.db` 里的相对路径也以该目录为基准。
+**先起本地数据库**（PostgreSQL 16 + Redis，独立卷与端口 5433/6380）：
+
+```bash
+cd infra
+./scripts/dev-db.sh up     # 首次 initdb 会自动执行 postgres/init/01-init.sql
+./scripts/dev-db.sh status
+```
+
+它会打印 `DATABASE_URL` 与 `REDIS_URL`，与 `apps/api/.env` 里的默认值一致。
+`./scripts/dev-db.sh bootstrap` 可一次完成「起库 + 建表 + 创建首个账号」。
+
+后端**必须在 `apps/api` 目录启动**：`.env` 固定为 `apps/api/.env`，
+`DATABASE_URL` 里的相对 SQLite 路径（仅无 Docker 时的兜底）也以该目录为基准。
 
 **Windows PowerShell**
 
 ```powershell
 cd apps/api
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-prod.txt
 Copy-Item .env.example .env          # 可选；按需修改
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
@@ -35,10 +47,12 @@ Copy-Item .env.example .env          # 可选；按需修改
 ```bash
 cd apps/api
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt -r requirements-prod.txt
 cp .env.example .env                 # 可选；按需修改
 .venv/bin/python -m uvicorn app.main:app --reload --port 8000
 ```
+
+> `requirements-prod.txt` 提供 PostgreSQL 驱动 `psycopg`，本地用 PG 时必须安装。
 
 前端（另开一个终端，任意平台）：
 
@@ -50,7 +64,7 @@ npm run dev
 
 | 入口 | 地址 | 说明 |
 |---|---|---|
-| 前端 | http://localhost:5173 | 开发态自动以 `local-creator` 建立本地会话 |
+| 前端 | http://localhost:5173 | 邮箱密码登录；库里没有密码账号时可自助注册首个账号 |
 | 后端 | http://127.0.0.1:8000 | `apps/web/vite.config.js` 把 `/api` 代理到这里 |
 | API 文档 | http://127.0.0.1:8000/docs | Swagger，可直接试调用 |
 
@@ -154,7 +168,7 @@ shell / compose 注入的环境变量  >  apps/api/.env  >  代码默认值
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///<apps/api 绝对路径>/hanyue.db` | 生产用 `postgresql+psycopg://` |
+| `DATABASE_URL` | `postgresql+psycopg://hanyue:hanyue_dev_pwd@127.0.0.1:5433/hanyue` | 本地由 `infra/scripts/dev-db.sh up` 提供；生产用 compose 的 `db`。SQLite 仅作无 Docker 兜底 |
 | `SECRET_KEY` | `dev-only-change-me` | 令牌签名、凭据加密、上传会话签名；生产必须替换 |
 | `STORAGE_DIR` | `apps/api/storage` | 素材存储目录 |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 逗号分隔 |
@@ -419,7 +433,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/schedules/<taskId>/run \
 | 自动发布入口仍是禁用 | `platform-evidence.json` 为空、证据过期、URL 含占位文本或 scopes 为空 | 这是设计要求的诚实降级；按 `infra/platform-evidence.example.json` 替换为真实官方证据（示例默认 `confirmed=false`）后再启用 |
 | 换设备后主题没同步 | `/preferences` 写入失败或启动时拉取失败 | 页面顶部会显示可见提示；本地 `localStorage` 仍生效，恢复网络后重启页面会重新同步 |
 | 生产容器起不来，日志提示「生产配置不安全」 | `SECRET_KEY` 太短/仍是默认值、`ALLOW_DEV_LOGIN=true` 或仍用 SQLite | 按提示逐项修正 `infra/.env` 与 `DATABASE_URL` |
-| 前端反复提示需要重新进入 | 令牌过期 / 被吊销 / 显式退出 | 令牌带 `jti`，`logout` 后旧 token 立即失效；开发态点「重新进入」按上次 subject 重登，生产需接正式 IdP |
+| 前端反复提示需要重新登录 | 令牌过期 / 被吊销 / 改过密码 / 显式退出 | 令牌带 `jti`，`logout` 后旧 token 立即失效；改密会提升 `pwdv`，所有旧会话同时失效。开发态（`ALLOW_DEV_LOGIN=true`）可用「开发态免密进入」快速回到上次 subject |
 | 图像处理任务 `failed` + `invalid_image` | options 非法、输出格式不是 jpeg/png/webp，或条漫没检测到空白间隔 | 看任务 `errorMessage`；分格需是带明显水平留白的条漫长图，可调整 `minGap` / `maxPanels` |
 | 列表翻页返回 `400 invalid_cursor` | 游标伪造或已损坏 | 用服务端返回的 `X-Next-Cursor`（或 `/jobs` 的 `nextCursor`）原样回传，不要自行拼接 |
 | OAuth 平台「验证授权」报「未配置验证端点」 | 未设置 `PLATFORM_<代码>_VERIFY_PATH` | 按平台官方文档把用户信息接口路径（如 `/userinfo`）写入该变量；系统不猜测接口路径 |
@@ -436,7 +450,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/schedules/<taskId>/run \
 ## 8. 生产注意
 
 - 替换 `SECRET_KEY`（≥32 字符随机值）、设置 `ENVIRONMENT=production` 与 `ALLOW_DEV_LOGIN=false`，并使用 `postgresql+psycopg://`；`sqlite` 仅适合开发，生产会被启动门禁拒绝。
-- `POST /auth/login` 是**开发态便利入口**：任意 subject 都能换到该身份的令牌，生产必须关闭并改接 IdP/OIDC 可信断言；`POST /auth/logout` 会按 `jti` 吊销令牌。
+- 正式登录是**邮箱 + 密码**：`POST /auth/register`（默认关闭注册，首个账号自动放行）、`POST /auth/login`、`POST /auth/password`（改密即让所有旧会话失效）。密码用 scrypt 加盐哈希，连续失败会锁定账号。`POST /auth/login` 只带 `subject` 的开发态入口在生产必须关闭。首个账号或重置密码用 `apps/api/scripts/create_user.py`（容器内 `./scripts/deploy.sh create-user`）。
 - 未配置模型连接时 AI 生成明确报错，不会写占位稿件；进阶能力（OCR / 抠图）同样明确报错，不伪造结果。
 - 平台自动发布默认禁用，需同时满足：Phase 0 能力已核验 + 官方 OAuth 授权 + 账号开启自动发布 + 人工审核；逐平台字段映射尚未实现时会明确报错。
 - `STORAGE_DIR` 需挂持久卷（compose 已挂 `storage` 卷），否则容器重建后素材丢失。

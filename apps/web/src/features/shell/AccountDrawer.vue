@@ -23,6 +23,10 @@ const saving = ref(false)
 const formError = ref('')
 const workspaceName = ref('')
 const workspaceError = ref('')
+// 修改密码：成功后服务端会作废旧令牌并下发新令牌，session.changePassword 已接管
+const pwd = reactive({ current: '', next: '', confirm: '' })
+const pwdBusy = ref(false)
+const pwdError = ref('')
 
 const TIMEZONES = [
   { label: 'Asia/Shanghai（北京时间）', value: 'Asia/Shanghai' },
@@ -41,14 +45,20 @@ const displayName = computed(() => session.user?.displayName || '未登录')
 const initial = computed(() =>
   (displayName.value.trim().slice(0, 1) || '未').slice(0, 1).toUpperCase(),
 )
-const providerLabel = computed(() =>
-  session.user?.authProvider === 'idp' ? '正式身份提供者（IdP）' : '本地开发会话',
-)
-const providerHint = computed(() =>
-  session.user?.authProvider === 'idp'
-    ? '由身份提供者签发，账号信息以 IdP 为准。'
-    : '开发态按 subject 换取的本地账号；接入正式 IdP 后该字段将只读。',
-)
+const providerLabel = computed(() => {
+  const provider = session.user?.authProvider
+  if (provider === 'password') return '邮箱密码'
+  if (provider === 'idp') return '正式身份提供者（IdP）'
+  return '本地开发会话'
+})
+const providerHint = computed(() => {
+  const provider = session.user?.authProvider
+  if (provider === 'password') {
+    return '邮箱与密码由本服务保管；修改密码后其它设备上的登录会立即失效。'
+  }
+  if (provider === 'idp') return '由身份提供者签发，账号信息以 IdP 为准。'
+  return '开发态按 subject 换取的本地账号；在登录页注册邮箱账号即可转为正式账号。'
+})
 const timezoneOptions = computed(() => {
   const options = [...TIMEZONES]
   const current = session.user?.timezone
@@ -69,6 +79,7 @@ const dirty = computed(
     form.displayName.trim() !== (session.user?.displayName || '') ||
     form.timezone !== (session.user?.timezone || ''),
 )
+const minPasswordLength = computed(() => session.authConfig?.passwordMinLength || 8)
 
 function resetForm() {
   form.displayName = session.user?.displayName || ''
@@ -113,6 +124,45 @@ async function save() {
   }
 }
 
+function resetPasswordForm() {
+  pwd.current = ''
+  pwd.next = ''
+  pwd.confirm = ''
+  pwdError.value = ''
+}
+
+async function submitPassword() {
+  if (pwdBusy.value) return
+  if (!pwd.current) {
+    pwdError.value = '请输入当前密码'
+    return
+  }
+  if (pwd.next.length < minPasswordLength.value) {
+    pwdError.value = `新密码至少 ${minPasswordLength.value} 位`
+    return
+  }
+  if (pwd.next !== pwd.confirm) {
+    pwdError.value = '两次输入的新密码不一致'
+    return
+  }
+  if (pwd.next === pwd.current) {
+    pwdError.value = '新密码不能与当前密码相同'
+    return
+  }
+  pwdError.value = ''
+  pwdBusy.value = true
+  try {
+    // 服务端会作废旧令牌并返回新令牌，session 内部已替换，不会把自己踢下线
+    await session.changePassword(pwd.current, pwd.next)
+    resetPasswordForm()
+    toast('密码已更新，其它设备需重新登录')
+  } catch (err) {
+    pwdError.value = err.message || '修改失败，请重试'
+  } finally {
+    pwdBusy.value = false
+  }
+}
+
 function onKeydown(event) {
   if (event.key === 'Escape' && props.open) emit('close')
 }
@@ -122,6 +172,7 @@ watch(
   (value) => {
     if (!value) return
     resetForm()
+    resetPasswordForm()
     loadWorkspace()
   },
   { immediate: true },
@@ -229,6 +280,49 @@ onBeforeUnmount(() => {
               </div>
             </dl>
             <p class="field-hint">{{ providerHint }}</p>
+          </section>
+
+          <section v-if="session.user?.hasPassword" class="block">
+            <h3 class="block-title">修改密码</h3>
+            <div class="field">
+              <label class="field-label" for="pwd-current">当前密码</label>
+              <n-input
+                id="pwd-current"
+                v-model:value="pwd.current"
+                type="password"
+                show-password-on="click"
+                :input-props="{ autocomplete: 'current-password' }"
+              />
+            </div>
+            <div class="field">
+              <label class="field-label" for="pwd-next">新密码</label>
+              <n-input
+                id="pwd-next"
+                v-model:value="pwd.next"
+                type="password"
+                show-password-on="click"
+                :placeholder="`至少 ${minPasswordLength} 位`"
+                :input-props="{ autocomplete: 'new-password' }"
+              />
+            </div>
+            <div class="field">
+              <label class="field-label" for="pwd-confirm">确认新密码</label>
+              <n-input
+                id="pwd-confirm"
+                v-model:value="pwd.confirm"
+                type="password"
+                show-password-on="click"
+                :input-props="{ autocomplete: 'new-password' }"
+                @keyup.enter="submitPassword"
+              />
+              <p class="field-hint">修改后，其它设备上的登录会立即失效，需要重新登录。</p>
+            </div>
+            <p v-if="pwdError" class="field-error" role="alert">{{ pwdError }}</p>
+            <div class="pwd-actions">
+              <n-button size="small" type="primary" :loading="pwdBusy" @click="submitPassword">
+                更新密码
+              </n-button>
+            </div>
           </section>
 
           <section class="block">
@@ -376,6 +470,11 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 2px;
   margin: 0;
+}
+
+.pwd-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .fact {

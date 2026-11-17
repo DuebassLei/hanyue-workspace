@@ -37,12 +37,44 @@ class TimestampMixin:
 
 
 class User(Base, TimestampMixin):
+    """账号。
+
+    auth_subject 是**稳定的身份键**，与登录方式解耦：
+      - 密码账号：`password:<email>`
+      - 开发态账号：用户填的 subject
+      - 将来接 IdP：断言里的 sub
+    这样同一个用户换登录方式时，workspace/内容的归属不会断。
+
+    密码列一律可空：历史开发态账号没有密码，IdP 账号将来也不需要。
+    """
+
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     auth_subject: Mapped[str] = mapped_column(String(190), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(120), default="创作者")
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    # 登录邮箱（统一小写存储，唯一索引见 core/db.py::_INDEXES_EXTRA）
+    email: Mapped[str | None] = mapped_column(String(190), nullable=True, index=True)
+    # scrypt 哈希串，格式 scrypt$n$r$p$salt$digest（见 core/security.py）
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 改密时间：令牌里带 pwdv，早于该时间的会话一律失效
+    password_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # 连续失败计数与锁定截止时间：达到阈值后锁定一段时间，防在线爆破
+    failed_login_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="1"
+    )
 
 
 class RevokedToken(Base):

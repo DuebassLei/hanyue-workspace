@@ -36,6 +36,16 @@ def get_db() -> Iterator[Session]:
 
 # 已存在表需要补的列：(表名, 列名, 列定义)
 _ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    # 正式登录：邮箱密码。历史库没有这些列，必须在这里补（create_all 只管新表）
+    ("users", "email", "VARCHAR(190)"),
+    ("users", "password_hash", "VARCHAR(255)"),
+    ("users", "password_changed_at", "TIMESTAMP"),
+    ("users", "last_login_at", "TIMESTAMP"),
+    ("users", "failed_login_attempts", "INTEGER DEFAULT 0"),
+    ("users", "locked_until", "TIMESTAMP"),
+    # PG 不接受 BOOLEAN DEFAULT 0，统一写 false/true（SQLite 3.23+ 同样识别）。
+    # 必须是 true：补列会给**已有行**填这个默认值，填 false 会把所有老账号判成停用。
+    ("users", "is_active", "BOOLEAN DEFAULT true"),
     ("publish_jobs", "target", "VARCHAR(24) DEFAULT 'publish'"),
     ("publish_jobs", "theme_id", "VARCHAR(32) DEFAULT ''"),
     ("publish_jobs", "layout_snapshot", "JSON"),
@@ -51,7 +61,7 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("content_items", "draft_title", "VARCHAR(200)"),
     ("content_items", "draft_body", "TEXT"),
     # 稿件库：归档软隐藏（默认 False；SQLite 旧行 NULL 在查询里按未归档处理）
-    ("content_items", "archived", "BOOLEAN DEFAULT 0"),
+    ("content_items", "archived", "BOOLEAN DEFAULT false"),
     ("content_items", "archived_at", "TIMESTAMP"),
     # 贴图：锚点反推描述缓存（Q10-B 一致性兜底）
     ("sticker_sets", "meta_json", "JSON"),
@@ -172,6 +182,18 @@ def _apply_additive_migrations() -> None:
                 )
             except Exception as exc:
                 logger.warning("Skill 唯一索引创建失败（可忽略）：%s", exc)
+        # 邮箱唯一：partial index 让「历史开发态账号 email 为 NULL」不参与唯一性，
+        # 而 lower(email) 保证大小写不产生两个账号（写入前已小写，索引作兜底）。
+        if "users" in existing_tables:
+            try:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email "
+                        "ON users (lower(email)) WHERE email IS NOT NULL"
+                    )
+                )
+            except Exception as exc:
+                logger.warning("users 邮箱唯一索引创建失败（可忽略）：%s", exc)
 
 
 def init_db() -> None:

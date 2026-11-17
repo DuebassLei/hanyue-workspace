@@ -12,7 +12,8 @@ storage
 .tmp-skill-storage
 .pytest_cache
 tests
-scripts
+# scripts 要进镜像：deploy.sh create-user 直接调用 scripts/create_user.py，
+# 迁移脚本也从这里取（不能排除，否则容器内找不到脚本）
 **/*.log
 Dockerfile
 requirements*.txt.bak

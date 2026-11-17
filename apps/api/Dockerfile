@@ -47,6 +47,8 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
         -r requirements.txt -r requirements-prod.txt
 
 COPY app ./app
+# 运维脚本（账号管理 / 数据迁移）：deploy.sh 的 create-user 直接在容器内跑它们
+COPY scripts ./scripts
 
 # 以非 root 运行；命名卷首次挂载会继承镜像内 /data/storage 的属主
 RUN useradd --system --uid 10001 app \

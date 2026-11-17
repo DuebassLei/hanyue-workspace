@@ -77,12 +77,29 @@ def _reset_sequence(conn: Connection, table) -> None:
     )
 
 
+def _source_columns(src, table) -> tuple[list, list[str]]:
+    """只取源库里真实存在的列。
+
+    必须这么做：脚本按**当前模型**列去查源库，而旧 SQLite 往往没有新增列
+    （例如 users.email / password_hash），直接 `select(table)` 会报
+    `no such column: users.email`，整个迁移中断。缺失列交给目标库默认值/NULL。
+    """
+    existing = {col["name"] for col in inspect(src).get_columns(table.name)}
+    present = [col for col in table.columns if col.name in existing]
+    missing = [col.name for col in table.columns if col.name not in existing]
+    return present, missing
+
+
 def copy_table(src, table, *, truncate: bool, dry_run: bool) -> tuple[int, str]:
+    columns, missing = _source_columns(src, table)
+    if not columns:
+        return 0, "源表无匹配列"
     with src.connect() as s:
-        rows = s.execute(select(table)).all()
+        rows = s.execute(select(*columns)).all()
     count = len(rows)
+    note = f"缺列用默认值：{','.join(missing)}" if missing else ""
     if dry_run:
-        return count, "统计"
+        return count, f"统计（{note}）" if note else "统计"
 
     with dst_engine.begin() as d:
         has_rows = d.execute(select(table).limit(1)).first() is not None
@@ -94,14 +111,18 @@ def copy_table(src, table, *, truncate: bool, dry_run: bool) -> tuple[int, str]:
     if not rows:
         return 0, "空表"
 
-    payload = [_normalize_row(dict(row._mapping), table) for row in rows]
+    # row 是按 columns 顺序取出的位置元组，映射回列名后再做时区归一
+    payload = [
+        _normalize_row({col.name: row[i] for i, col in enumerate(columns)}, table)
+        for row in rows
+    ]
     with dst_engine.begin() as d:
         for start in range(0, len(payload), BATCH):
             d.execute(table.insert(), payload[start : start + BATCH])
 
     with dst_engine.begin() as d:
         _reset_sequence(d, table)
-    return count, "写入"
+    return count, f"写入（{note}）" if note else "写入"
 
 
 def main() -> int:
