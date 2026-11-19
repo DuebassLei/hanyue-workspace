@@ -53,6 +53,9 @@ def create_image_generation(
             "modelId": payload.model_id,
             "referenceAssetIds": payload.reference_asset_ids,
             "builtinReferenceStyleNumber": payload.builtin_reference_style_number,
+            # 负向词 / seed：地基已打通执行器与 provider，这里是从 HTTP 入队的最后一环。
+            "negativePrompt": payload.negative_prompt,
+            "seed": payload.seed,
         },
     )
     return {
