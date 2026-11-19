@@ -253,7 +253,10 @@ def resolve_activation(style: models.HanddrawStyle, model: str | None) -> Activa
         policy = {}
     model_code = normalize_model_code(model)
     default = dict(policy.get("default") or {})
-    profile = (policy.get("models") or {}).get(model_code)
+    # 未指定模型时只走 default。不要用 DEFAULT_MODEL 的逐风格标定顶上：
+    # 分镜未选模型、以及 style_usable 的可用性口径，都按「未校准 → 参考图兜底」理解。
+    # 显式传入 gpt-image-2（含 None 以外的等价写法）才套用该模型的 styles 表。
+    profile = None if model is None else (policy.get("models") or {}).get(model_code)
     entry = dict(default)
     if isinstance(profile, dict):
         entry.update({key: value for key, value in profile.items() if key != "styles"})
@@ -322,34 +325,58 @@ def compose_prompt(
     color_zh, color_en = resolve_color_sentence(color, accent)
     # 调用方知道供应商能力时显式传入；缺省保持旧行为（按风格自身决定）
     will_attach = activation.need_reference if attach_reference is None else attach_reference
-    zh_parts = [f"风格名称：{style.generation_name}。"]
+    segment_zh, segment_en = compose_style_segment(style, activation, will_attach)
+    zh_parts = [segment_zh[0]]
     if color_zh:
         zh_parts.append(color_zh)
     zh_parts.append(f"主题：{theme_text}。")
-    zh_parts.append(f"参考作者/风格名称：{style.reference_author}。")
-    if activation.include_traits and activation.traits:
-        zh_parts.append(f"核心风格特征：{activation.traits}。")
-    if will_attach:
-        zh_parts.append(f"参考图：随请求自动附加本风格参考图。{REFERENCE_ISOLATION_ZH}")
-    elif activation.need_reference:
-        zh_parts.append("当前图像供应商不支持参考图，请仅依据以上文字描述还原画风。")
-
-    en_parts = [f"Style name: {style.generation_name}."]
+    zh_parts.extend(segment_zh[1:])
+    en_parts = [segment_en[0]]
     if color_en:
         en_parts.append(color_en)
     en_parts.append(f"Theme: {theme_text}.")
-    en_parts.append(f"Reference author/style name: {style.reference_author}.")
-    if activation.include_traits and activation.traits:
-        en_parts.append(f"Core style traits: {activation.traits}.")
-    if will_attach:
-        en_parts.append(f"Reference image: attached automatically with this style. {REFERENCE_ISOLATION_EN}")
-    elif activation.need_reference:
-        en_parts.append(
-            "The image provider cannot accept a reference image; match the style from this text alone."
-        )
+    en_parts.extend(segment_en[1:])
 
     return {
         "promptZh": "".join(zh_parts),
         "promptEn": " ".join(en_parts),
         "language": detect_language(theme_text),
     }
+
+
+def compose_style_segment(
+    style: models.HanddrawStyle, activation: Activation, attach_reference: bool
+) -> tuple[list[str], list[str]]:
+    """风格段四句：风格名称、参考作者、核心特征（激活判定需要时）、参考图说明。
+
+    不含主题句与颜色句——那些是单图合成（compose_prompt）的事。分镜组级风格
+    只取这一段拼在 prompt 最前，画面主体由镜头自己承担。
+    """
+    zh = [f"风格名称：{style.generation_name}。", f"参考作者/风格名称：{style.reference_author}。"]
+    en = [
+        f"Style name: {style.generation_name}.",
+        f"Reference author/style name: {style.reference_author}.",
+    ]
+    if activation.include_traits and activation.traits:
+        zh.append(f"核心风格特征：{activation.traits}。")
+        en.append(f"Core style traits: {activation.traits}.")
+    if attach_reference:
+        zh.append(f"参考图：随请求自动附加本风格参考图。{REFERENCE_ISOLATION_ZH}")
+        en.append(f"Reference image: attached automatically with this style. {REFERENCE_ISOLATION_EN}")
+    elif activation.need_reference:
+        zh.append("当前图像供应商不支持参考图，请仅依据以上文字描述还原画风。")
+        en.append(
+            "The image provider cannot accept a reference image; match the style from this text alone."
+        )
+    return zh, en
+
+
+def style_usable(style: models.HanddrawStyle) -> bool:
+    """分镜选择器的可用性口径：有参考图，或特征词强到无需参考图。
+
+    两者皆无（如「参考绘本作者 XXX」且无参考图）无法保证组内画风统一，排除。
+    判定取默认模型（未校准 → 参考图兜底），不随某个具体模型浮动。
+    """
+    # None = 未指定模型，走 default 参考图兜底，而不是 gpt-image-2 的逐风格标定。
+    activation = resolve_activation(style, None)
+    return style.reference_available or not activation.need_reference

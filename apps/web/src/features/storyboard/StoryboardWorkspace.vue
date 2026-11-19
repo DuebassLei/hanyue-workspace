@@ -1,13 +1,13 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { NButton, NInput, NInputNumber, NSelect } from 'naive-ui'
-import { api } from '../../api/client'
+import { NButton, NInput } from 'naive-ui'
 import SceneTree from './SceneTree.vue'
 import ShotList from './ShotList.vue'
 import ShotInspector from './ShotInspector.vue'
 import AssetBoard from './AssetBoard.vue'
 import ShotImageViewer from './ShotImageViewer.vue'
 import ModelSelector from '../../components/ModelSelector.vue'
+import HanddrawStylePicker from './HanddrawStylePicker.vue'
 
 const props = defineProps({ store: { type: Object, required: true } })
 const emit = defineEmits(['export-board', 'export-prompts', 'delete-project', 'delete-shot', 'delete-scene'])
@@ -19,69 +19,25 @@ const preview = ref(null)
 const projectTitle = computed({ get: () => props.store.project.value?.title || '', set: (title) => props.store.patchProject({ title }) })
 const chapterLabel = computed(() => props.store.selectedScene.value?.chapter || '未选择场景')
 
-// ---- 组级统一风格 ----
+// ---- 组级统一画风：手绘风格库是唯一数据源 ----
 const styleUpdating = ref(false)
 const styleError = ref('')
-const styleAdvanced = ref(false)
-const imageProviders = ref([])
-const styleOptions = computed(() => (props.store.stylePresets.value || []).map((item) => ({ label: item.name, value: item.id })))
 const currentStyleConfig = computed(() => props.store.project.value?.styleConfig || {})
-const selectedStyleId = computed({
-  get: () => currentStyleConfig.value.styleId || null,
-  set: (value) => applyStylePreset(value || null),
+const selectedStyleNumber = computed({
+  get: () => currentStyleConfig.value.style_number || '',
+  set: (value) => saveStyleNumber(value),
 })
-const selectedPreset = computed(() => (props.store.stylePresets.value || []).find((item) => item.id === currentStyleConfig.value.styleId) || null)
-const styleReferenceOptions = computed(() => {
-  const assets = props.store.project.value?.assets || {}
-  return ['styles', 'locations', 'characters'].flatMap((key) =>
-    (assets[key] || [])
-      .filter((item) => item.assetId)
-      .map((item) => ({ label: `${item.name}（${{ styles: '风格', locations: '地点', characters: '角色' }[key]}）`, value: item.assetId })),
-  )
-})
-// seed 能力：拿不到供应商能力信息时如实提示「取决于图像模型」，不静默生效。
-const seedSupport = computed(() => {
-  if (!imageProviders.value.length) return 'unknown'
-  return imageProviders.value.some((item) => item.supportsSeed === true) ? 'yes' : 'no'
+const selectedHanddrawStyle = computed(() => props.store.handdrawStyles.value.find((style) => style.number === selectedStyleNumber.value) || null)
+
+onMounted(() => {
+  props.store.loadHanddrawStyles().catch((err) => { styleError.value = err.message })
 })
 
-onMounted(async () => {
-  props.store.loadStylePresets().catch((err) => { styleError.value = err.message })
-  try {
-    const status = await api.get('/ai/image-provider/status')
-    imageProviders.value = status.providers || []
-  } catch {
-    imageProviders.value = []
-  }
-})
-
-async function applyStylePreset(styleId) {
+async function saveStyleNumber(number) {
   styleError.value = ''
-  const preset = (props.store.stylePresets.value || []).find((item) => item.id === styleId)
-  const next = styleId ? {
-    styleId,
-    styleName: preset?.name || '',
-    promptSuffix: preset?.promptSuffix || '',
-    negativePrompt: preset?.negativePrompt || '',
-    referenceAssetId: currentStyleConfig.value.referenceAssetId || preset?.referenceAssetId || null,
-    seed: currentStyleConfig.value.seed ?? null,
-  } : {}
   styleUpdating.value = true
   try {
-    await props.store.saveStyleConfig(next)
-  } catch (err) {
-    styleError.value = err.message
-  } finally {
-    styleUpdating.value = false
-  }
-}
-
-async function updateStyleConfig(patch) {
-  styleError.value = ''
-  const next = { ...currentStyleConfig.value, ...patch }
-  styleUpdating.value = true
-  try {
-    await props.store.saveStyleConfig(next)
+    await props.store.saveStyleConfig(number ? { style_number: number } : {})
   } catch (err) {
     styleError.value = err.message
   } finally {
@@ -130,43 +86,14 @@ async function runBreakdown(scope) {
       <div class="project-title"><span class="project-mark">▧</span><n-input v-model:value="projectTitle" class="title-input" :bordered="false" aria-label="分镜项目名称" /></div>
       <div class="project-actions"><span class="save-indicator">{{ props.store.saving.value ? '保存中' : '已保存' }}</span><n-button quaternary size="small" type="error" @click="emit('delete-project')">删除项目</n-button><n-button quaternary size="small" @click="emit('export-board')">分镜板</n-button><n-button quaternary size="small" @click="emit('export-prompts')">提示词包</n-button><n-button secondary size="small" @click="props.store.createScene()">+ 场景</n-button></div>
     </header>
-    <section class="style-bar">
-      <div class="style-row">
-        <span class="style-label">统一画风</span>
-        <n-select
-          :value="selectedStyleId"
-          :options="styleOptions"
-          :loading="props.store.stylePresetsLoading.value"
-          :disabled="styleUpdating"
-          clearable
-          consistent-menu-width
-          placeholder="不设统一风格（用模型默认画风）"
-          aria-label="选择分镜统一风格"
-          @update:value="selectedStyleId = $event"
-        />
-        <button class="style-advanced-toggle" type="button" @click="styleAdvanced = !styleAdvanced">{{ styleAdvanced ? '收起细节' : '风格细节' }} <span>{{ styleAdvanced ? '−' : '+' }}</span></button>
-      </div>
-      <p class="style-suffix">{{ selectedPreset?.promptSuffix || currentStyleConfig.promptSuffix || '未选风格：每个镜头的画风由模型默认行为决定，可能跨镜头漂移。' }}</p>
-      <div v-if="styleAdvanced" class="style-detail">
-        <div class="style-detail-row">
-          <label>风格参考图（常驻，不被地点挤掉）</label>
-          <n-select :value="currentStyleConfig.referenceAssetId || null" :options="styleReferenceOptions" clearable :disabled="styleUpdating" placeholder="从项目视觉资产里选一张画风参考图" @update:value="updateStyleConfig({ referenceAssetId: $event || null })" />
-        </div>
-        <div class="style-detail-row">
-          <label>固定 seed</label>
-          <n-input-number :value="currentStyleConfig.seed ?? null" :show-button="false" clearable :disabled="styleUpdating || seedSupport === 'no'" placeholder="留空不固定" @update:value="updateStyleConfig({ seed: $event })" />
-          <small v-if="seedSupport === 'yes'">当前图像模型支持 seed，可复现画风。</small>
-          <small v-else-if="seedSupport === 'no'">当前图像模型不支持 seed，已禁用；画风靠后缀与参考图统一。</small>
-          <small v-else>是否生效取决于图像模型；不支持时会被忽略。</small>
-        </div>
-        <div class="style-detail-row">
-          <label>负向提示词</label>
-          <n-input :value="currentStyleConfig.negativePrompt || ''" size="small" placeholder="可选，如：低清晰度, 多余肢体" @update:value="updateStyleConfig({ negativePrompt: $event })" />
-        </div>
-      </div>
-      <p v-if="styleError" class="style-error">{{ styleError }}</p>
-      <p class="style-hint">改风格只影响新生成的镜头；已有镜头需重新生成才会应用新风格，历史图保留出图时的风格快照。</p>
-    </section>
+    <HanddrawStylePicker
+      v-model="selectedStyleNumber"
+      :styles="props.store.handdrawStyles.value"
+      :groups="props.store.handdrawGroups.value"
+      :loading="props.store.handdrawStylesLoading.value"
+      :disabled="styleUpdating"
+    />
+    <p v-if="styleError" class="style-error">{{ styleError }}</p>
     <section class="breakdown">
       <n-input v-model:value="sourceText" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" placeholder="粘贴故事正文。拆分只追加草稿，不覆盖已有场景和镜头。" />
       <div>
@@ -204,7 +131,7 @@ async function runBreakdown(scope) {
 
 <style scoped>
 .workspace { border:1px solid var(--paper-line-strong); background:var(--paper-bg); }.project-bar { min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 16px; border-bottom:1px solid var(--paper-line-strong); }.project-title,.project-actions { display:flex; align-items:center; gap:10px; }.project-mark { display:grid; place-items:center; width:30px; height:30px; background:var(--paper-accent-soft); color:var(--paper-accent); font-size:18px; }.title-input { max-width:360px; font-weight:650; }.save-indicator { color:var(--paper-ink-muted); font-size:11px; }
-.style-bar { padding:10px 16px; border-bottom:1px solid var(--paper-line); background:var(--paper-header); }.style-row { display:flex; align-items:center; gap:10px; }.style-label { color:var(--paper-ink-soft); font-size:12px; font-weight:650; white-space:nowrap; }.style-row :deep(.n-select) { max-width:320px; }.style-advanced-toggle { border:0; background:transparent; color:var(--paper-accent); font-size:11px; cursor:pointer; white-space:nowrap; }.style-suffix { margin:6px 0 0; color:var(--paper-ink-muted); font-size:11px; line-height:1.5; }.style-hint { margin:6px 0 0; color:var(--paper-ink-muted); font-size:11px; line-height:1.5; }.style-error { margin:6px 0 0; color:var(--paper-danger); font-size:11px; }.style-detail { display:flex; flex-direction:column; gap:8px; margin-top:10px; padding-top:10px; border-top:1px solid var(--paper-line); }.style-detail-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }.style-detail-row label { width:180px; flex-shrink:0; color:var(--paper-ink-soft); font-size:11px; }.style-detail-row :deep(.n-select),.style-detail-row :deep(.n-input),.style-detail-row :deep(.n-input-number) { width:min(320px,60vw); }.style-detail-row small { color:var(--paper-ink-muted); font-size:11px; }
+.style-error { margin:6px 16px; color:var(--paper-danger); font-size:11px; }
 .breakdown { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:start; padding:12px 16px; border-bottom:1px solid var(--paper-line); background:var(--paper-header); }.breakdown-model { grid-column:1/-1; }.breakdown div { display:flex; gap:8px; }.breakdown p { grid-column:1 / -1; margin:0; color:var(--paper-danger); font-size:12px; }.project-title,.project-actions { display:flex; align-items:center; gap:10px; }.project-mark { display:grid; place-items:center; width:30px; height:30px; background:var(--paper-accent-soft); color:var(--paper-accent); font-size:18px; }.title-input { max-width:360px; font-weight:650; }.save-indicator { color:var(--paper-ink-muted); font-size:11px; }.editor-grid { display:grid; grid-template-columns:220px minmax(360px,1fr) 310px; align-items:stretch; }.panel-scenes,.panel-inspector { min-width:0; }.panel-shots { min-width:0; border-right:1px solid var(--paper-line-strong); }.scene-heading { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:12px 18px; background:var(--paper-header); border-bottom:1px solid var(--paper-line); }.scene-heading span { display:block; color:var(--paper-ink-muted); font-size:10px; }.scene-heading :deep(.n-input) { width:min(250px,52vw); font-weight:600; }.mobile-tabs { display:none; }
 @media(max-width:1000px) { .editor-grid { grid-template-columns:190px minmax(330px,1fr); }.panel-inspector { grid-column:1/-1; border-top:1px solid var(--paper-line-strong); }.panel-inspector :deep(.inspector) { min-height:0; } }
 @media(max-width:720px) { .project-bar { align-items:flex-start; flex-direction:column; }.breakdown { grid-template-columns:1fr; }.project-actions { width:100%; flex-wrap:wrap; }.mobile-tabs { display:grid; grid-template-columns:repeat(3,1fr); border-bottom:1px solid var(--paper-line-strong); }.mobile-tabs button { padding:10px; border:0; background:var(--paper-sunken); color:var(--paper-ink-soft); }.mobile-tabs button.active { background:var(--paper-accent); color:var(--paper-on-accent); }.editor-grid { display:block; }.panel-scenes,.panel-shots,.panel-inspector { display:none; }.panel-scenes.mobile-active,.panel-shots.mobile-active,.panel-inspector.mobile-active { display:block; }.panel-shots { border:0; }.panel-inspector { border-top:0; } }

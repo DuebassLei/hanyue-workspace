@@ -14,7 +14,7 @@ from ..core.config import get_settings
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.security import sign_asset_url
 from ..services.image_service import storage_path
-from ..services.style_presets import get_preset
+from ..services import handdraw as handdraw_service
 
 from ..core.rbac import require_permission
 
@@ -389,52 +389,78 @@ def _first_pictured(assets, refs: list[str], category: str) -> dict | None:
     return None
 
 
-def _style_context(style_config: dict | None) -> dict:
-    """把项目级 style_config 展开成入队用的统一风格上下文。
+def _normalize_style_config(db, config: dict | None) -> dict:
+    """项目级统一风格：指向手绘风格库的 style_number。
 
-    prompt_suffix / negative_prompt / reference_asset_id 优先用项目里存的快照值；
-    缺失时回退到统一风格注册表（按 style_id）。snapshot 把生效配置 + 展开信息
-    放在一起，供 payload.styleSnapshot 追溯当时用的风格。
+    空配置合法（不强制选风格）；非空时 style_number 必须存在且达到可用性口径
+    （有参考图，或特征词强到无需参考图），否则明确报错，不静默存一个出不了图的配置。
+    """
+    if not config:
+        return {}
+    number = str(config.get("style_number") or "").strip()
+    if not number:
+        raise ApiError("style_invalid", "统一风格缺少 style_number")
+    style = db.scalar(
+        select(models.HanddrawStyle).where(models.HanddrawStyle.style_number == number.upper())
+    )
+    if style is None:
+        raise ApiError("style_not_found", f"手绘风格不存在：{number}", status_code=404)
+    if not handdraw_service.style_usable(style):
+        raise ApiError("style_unusable", f"风格 {number} 既无参考图也无可用特征词，无法保证组内统一")
+    return {
+        "style_number": style.style_number,
+        "generation_name": style.generation_name,
+        "group_key": style.group_key,
+    }
+
+
+def _style_context(db, style_config: dict | None, model_code: str | None, subject: str) -> dict:
+    """把项目级 style_config 展开成入队用的手绘风格上下文。
+
+    生效机制完整复用手绘库：resolve_activation 决定拼特征词还是带参考图，
+    compose_style_segment 产出风格段，语言跟随镜头主体（detect_language）。
+    snapshot 记入 payload.styleSnapshot，历史镜头可追溯当时的风格与激活方式。
     """
     config = style_config if isinstance(style_config, dict) else {}
-    style_id = str(config.get("style_id") or "").strip()
-    preset = get_preset(style_id) if style_id else None
-    suffix = str(config.get("prompt_suffix") or "").strip()
-    if not suffix and preset:
-        suffix = preset.prompt_suffix
-    negative = str(config.get("negative_prompt") or "").strip()
-    if not negative and preset:
-        negative = preset.negative_prompt
-    ref_id = config.get("reference_asset_id") or (preset.reference_asset_id if preset else None)
-    seed = config.get("seed")
+    number = str(config.get("style_number") or "").strip()
+    if not number:
+        return {"segment": "", "need_reference": False, "snapshot": None}
+    style = db.scalar(
+        select(models.HanddrawStyle).where(models.HanddrawStyle.style_number == number.upper())
+    )
+    if style is None:
+        # 配置在保存时已校验；库被重建导致编号消失时如实失败，不静默出无风格图。
+        raise ApiError("style_not_found", f"手绘风格不存在：{number}", status_code=404)
+    activation = handdraw_service.resolve_activation(style, model_code)
+    zh, en = handdraw_service.compose_style_segment(style, activation, activation.need_reference)
+    language = handdraw_service.detect_language(subject)
+    segment = "".join(zh) if language == "zh" else " ".join(en)
     snapshot = {
-        "styleId": style_id or None,
-        "styleName": preset.name if preset else (config.get("style_name") or None),
-        "promptSuffix": suffix,
-        "negativePrompt": negative,
-        "referenceAssetId": ref_id,
-        "seed": seed,
+        "styleNumber": style.style_number,
+        "generationName": style.generation_name,
+        "groupKey": style.group_key,
+        "referenceAuthor": style.reference_author,
+        "traits": activation.traits,
+        "activationMode": activation.activation_source,
+        "modelCode": activation.model_code,
+        "language": language,
+        "promptHead": segment,
+        "needReference": activation.need_reference,
     }
-    has_style = bool(style_id or suffix or negative or ref_id or seed is not None)
-    return {
-        "suffix": suffix, "negative": negative, "ref_id": ref_id, "seed": seed,
-        "snapshot": snapshot if has_style else None,
-    }
+    return {"segment": segment, "need_reference": activation.need_reference, "snapshot": snapshot}
 
 
-def _storyboard_references(assets, shot, stage: str, style_config: dict | None = None) -> list[tuple[str, dict | None]]:
+def _storyboard_references(assets, shot, stage: str, *, style_reserved: bool = False) -> list[tuple[str, dict | None]]:
     """最多 4 张：在场角色图 ≤3，地点 ≤1，风格 ≤1。名额不够先丢地点，风格最后丢。
 
     角色库条目带多张参考图时，按镜头景别/视角挑 1 张，绝不让一个人占满名额。
     正式图最后一张固定为已成功草图，因此角色+地点+风格先截到 3 张。
     草图阶段不带草图自己。请求体里的 reference_asset_ids 不并入。
 
-    项目级统一风格参考图（style_config.reference_asset_id）是常驻槽：先占位，
-    超额时优先牺牲地点、镜头里的风格资产，甚至多余角色，但尽量保留它。
+    项目选了手绘统一风格时（style_reserved），风格参考图由 job_runner 的
+    _builtin_reference 按 builtinReferenceStyleNumber 补到第 1 槽，这里给它
+    预扣 1 个名额：用户参考图上限从 4 降到 3，超额时按既有顺序丢弃，不报错。
     """
-    config = style_config if isinstance(style_config, dict) else {}
-    style_ref_id = config.get("reference_asset_id")
-    style_ref_name = str(config.get("style_name") or "统一风格")
     slots: list[tuple[str, dict | None]] = []
     for item in _present_characters(assets, shot):
         if len([row for row in slots if row[0] == "character"]) >= 3:
@@ -454,36 +480,24 @@ def _storyboard_references(assets, shot, stage: str, style_config: dict | None =
     style = _first_pictured(assets, shot.asset_refs or [], "styles")
     if style:
         slots.append(("style", style))
-    # 项目级统一风格参考图：常驻槽，标记 pinned 以免在 trim 时被优先挤掉。
-    if style_ref_id:
-        slots.append(("style", {
-            "id": style_ref_id, "name": style_ref_name, "description": "",
-            "asset_id": style_ref_id, "_pinned": True,
-        }))
     cap = 3 if stage == "final" else 4
+    if style_reserved:
+        cap -= 1
     while len(slots) > cap:
         kinds = [kind for kind, _ in slots]
-        # 丢弃优先级：地点 → 角色 → 镜头风格资产 →（兜底）项目风格图。
-        # 「风格最后丢」：连多余角色都先让位，风格参考尽量保留。
+        # 丢弃优先级：地点 → 角色 → 镜头风格资产。
         if "location" in kinds:
             drop_kind = "location"
         elif "character" in kinds:
             drop_kind = "character"
-        elif any(kind == "style" and not item.get("_pinned") for kind, item in slots):
-            drop_kind = "style"
         elif "style" in kinds:
             drop_kind = "style"
         else:
             break
-        candidates = [
-            i for i, (kind, item) in enumerate(slots)
-            if kind == drop_kind and not item.get("_pinned")
-        ]
+        candidates = [i for i, (kind, _) in enumerate(slots) if kind == drop_kind]
         if not candidates:
             break
         slots.pop(max(candidates))
-    # 清掉内部标记，避免泄漏进标签/快照。
-    slots = [(kind, {key: value for key, value in item.items() if key != "_pinned"}) for kind, item in slots]
     if stage == "final":
         slots.append(("sketch", None))
     return slots
@@ -524,17 +538,26 @@ def _sync_shot(db, shot):
     return changed
 
 
-def _generation_prompt(db, job_id: str | None) -> str | None:
-    """读取该阶段实际入队的完整提示词：包含镜头描述、参考图标注和角色一致性文案。
-
-    提示词在入队时按当时的画面/资产拼装，只有 job payload 保留了这份最终文本；
-    直接读 job 行无需加列或迁移，也不会与镜头后来被编辑过的 prompt 混淆。
-    """
+def _generation_payload(db, job_id: str | None) -> dict:
+    """读取入队时的 prompt 与风格快照；不存在 job 时返回空对象。"""
     if not job_id:
-        return None
+        return {}
     job = db.get(models.BackgroundJob, job_id)
-    prompt = (job.payload or {}).get("prompt") if job else None
-    return prompt or None
+    return job.payload if job and isinstance(job.payload, dict) else {}
+
+
+def _generation_prompt(db, job_id: str | None) -> str | None:
+    """读取入队时保存的完整提示词，不受镜头后续编辑影响。"""
+    return _generation_payload(db, job_id).get("prompt") or None
+
+
+def _generation_style_snapshot(db, job_ids: list[str | None]) -> dict | None:
+    """优先取正式图阶段，其次草图阶段的风格快照。"""
+    for job_id in job_ids:
+        snapshot = _generation_payload(db, job_id).get("styleSnapshot")
+        if isinstance(snapshot, dict):
+            return snapshot
+    return None
 
 
 def _shot_out(db, shot):
@@ -550,6 +573,7 @@ def _shot_out(db, shot):
         final_urls=[_url(asset_id) for asset_id in (shot.final_asset_ids or [])],
         final_job_id=shot.final_job_id, final_status=shot.final_status,
         final_error=shot.final_error, final_prompt=_generation_prompt(db, shot.final_job_id),
+        style_snapshot=_generation_style_snapshot(db, [shot.final_job_id, shot.sketch_job_id]),
         generation_version=shot.generation_version,
     )
 
@@ -629,7 +653,7 @@ def create_project(payload: schemas.StoryboardProjectCreate, user: CurrentUser, 
     row = models.StoryboardProject(
         owner_user_id=user.id, workspace_id=default_workspace(db, user).id,
         title=payload.title.strip(), summary=payload.summary, assets=stored,
-        style_config=payload.style_config or {},
+        style_config=_normalize_style_config(db, payload.style_config),
     )
     db.add(row)
     db.commit()
@@ -647,6 +671,8 @@ def patch_project(project_id: str, payload: schemas.StoryboardProjectPatch, user
     data = payload.model_dump(exclude_unset=True)
     if "assets" in data and data["assets"] is not None:
         data["assets"] = _validate_assets(db, user, data["assets"])
+    if "style_config" in data and data["style_config"] is not None:
+        data["style_config"] = _normalize_style_config(db, data["style_config"])
     for key, value in data.items():
         if value is not None:
             setattr(row, key, value.strip() if key == "title" else value)
@@ -861,18 +887,6 @@ def _queue_generation(db, user, shot, project, stage, payload):
     assets = _resolved_assets(db, project)
     _selected_assets(assets, shot.asset_refs or [])
     present = _present_characters(assets, shot)
-    style = _style_context(project.style_config)
-    slots = _storyboard_references(assets, shot, stage, project.style_config)
-    refs = [
-        shot.sketch_asset_id if kind == "sketch" else _item_asset_id(item)
-        for kind, item in slots
-    ]
-    for asset_id in refs:
-        asset = db.get(models.Asset, asset_id)
-        if not asset or asset.owner_user_id != user.id:
-            raise not_found("参考素材")
-    shot.generation_version += 1
-    version = shot.generation_version
     subject = shot.prompt.strip() or ", ".join(part for part in (
         shot.frame_description, shot.action, shot.dialogue,
         f"{shot.shot_size} shot", f"{shot.view_angle} view", f"{shot.camera_motion} camera motion",
@@ -886,9 +900,23 @@ def _queue_generation(db, user, shot, project, stage, payload):
         ]
         if names:
             subject = subject + " " + " ".join(names)
+    style = _style_context(db, project.style_config, payload.model_id, subject)
+    slots = _storyboard_references(assets, shot, stage, style_reserved=style["need_reference"])
+    refs = [
+        shot.sketch_asset_id if kind == "sketch" else _item_asset_id(item)
+        for kind, item in slots
+    ]
+    for asset_id in refs:
+        asset = db.get(models.Asset, asset_id)
+        if not asset or asset.owner_user_id != user.id:
+            raise not_found("参考素材")
+    shot.generation_version += 1
+    version = shot.generation_version
     labels = []
     pictured = {}
-    for index, (kind, item) in enumerate(slots, start=1):
+    # 手绘风格参考图由 job_runner 插到参考图列表最前（第 1 槽），这里的标注从 2 起算。
+    label_offset = 1 if style["need_reference"] else 0
+    for index, (kind, item) in enumerate(slots, start=1 + label_offset):
         if kind == "sketch":
             labels.append(
                 f"reference image {index} is the approved sketch. "
@@ -915,10 +943,10 @@ def _queue_generation(db, user, shot, project, stage, payload):
             "outfit, age and body. Do not redesign them. "
             + ", ".join(listed) + "."
         )
-    # 统一风格后缀置于 prompt 最前，作为整组镜头的画风锚点；其后依次是
+    # 手绘风格段置于 prompt 最前，作为整组镜头的画风锚点；其后依次是
     # 画面主体、参考图标注、角色一致性句。风格来自项目 style_config，改风格后
     # 新入队的镜头即应用新风格，历史镜头靠 payload 快照追溯旧风格。
-    prompt = "\n".join(part for part in (style["suffix"], subject, *labels, consistency) if part)
+    prompt = "\n".join(part for part in (style["segment"], subject, *labels, consistency) if part)
     # 生成时把实际用到的角色数据快照进 payload：之后改全局角色或删角色，
     # 历史镜头的「实际出图提示词」与当时用的参考图仍可追溯。
     pictured_assets = {
@@ -949,10 +977,12 @@ def _queue_generation(db, user, shot, project, stage, payload):
             "storyboardProjectId": project.id, "workspaceId": project.workspace_id,
             "generationStage": stage, "generationVersion": version,
             "characterSnapshot": character_snapshot,
-            # 统一风格：负向词/seed 由 job_runner 按供应商能力决定如何落地，
+            # 手绘统一风格：风格参考图沿用 job_runner 的 _builtin_reference 路径
+            # （按 builtinReferenceStyleNumber 补到参考图第 1 槽，缺失即明确失败）；
             # styleSnapshot 原样透传进 job.result 供历史镜头追溯当时风格。
-            "negativePrompt": style["negative"] or None,
-            "seed": style["seed"],
+            "builtinReferenceStyleNumber": (
+                style["snapshot"]["styleNumber"] if style["need_reference"] else None
+            ),
             "styleSnapshot": style["snapshot"],
         },
     )
@@ -1011,9 +1041,21 @@ def export_prompt_pack(project_id: str, user: CurrentUser, db: DbSession):
     for scene in data.scenes:
         lines.extend([f"## {scene.chapter} / {scene.title}", ""])
         for shot in scene.shots:
-            # 优先导出实际出图用的完整提示词；没生成过才回退到手写的画面提示词
+            # 优先导出实际出图用的完整提示词；没生成过才回退到手写的画面提示词。
+            # 风格快照单独导出，保留锁定机制与当时生效的模型信息，便于追溯。
             full_prompt = shot.final_prompt or shot.sketch_prompt or shot.prompt or shot.frame_description
-            lines.extend([f"### 镜头 {shot.sort_order + 1}", full_prompt, ""])
+            lines.extend([f"### 镜头 {shot.sort_order + 1}", "", full_prompt, ""])
+            if shot.style_snapshot:
+                snapshot = shot.style_snapshot
+                lines.extend([
+                    "风格快照：",
+                    f"- 风格：{snapshot.get('generationName') or snapshot.get('styleNumber')}",
+                    f"- 编号：{snapshot.get('styleNumber')}",
+                    f"- 锁定方式：{'参考图' if snapshot.get('needReference') else '文字特征'}",
+                    f"- 模型：{snapshot.get('modelCode') or '未指定'}",
+                    f"- 生效特征：{snapshot.get('traits') or '无'}",
+                    "",
+                ])
     return Response("\n".join(lines), media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": "attachment; filename=storyboard-prompts.md"})
 
 

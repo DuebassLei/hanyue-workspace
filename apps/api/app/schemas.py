@@ -1239,6 +1239,8 @@ class StoryboardShotOut(CamelModel):
     final_status: str
     final_error: str | None = None
     final_prompt: str | None = None
+    # 快照来自该阶段入队时的 job payload；最终图优先，否则回退草图阶段。
+    style_snapshot: dict | None = None
     generation_version: int
 
 

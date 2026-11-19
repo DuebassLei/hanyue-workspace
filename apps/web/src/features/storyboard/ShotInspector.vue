@@ -32,7 +32,7 @@ const images = computed(() => shotImages(props.shot))
 const generatedPrompt = computed(() => props.shot?.finalPrompt || props.shot?.sketchPrompt || '')
 const activeStyleLabel = computed(() => {
   const config = props.project?.styleConfig || {}
-  return config.styleName || (config.promptSuffix ? '自定义风格' : '')
+  return config.generation_name || ''
 })
 const framePrompt = computed(() => draft.value.prompt || props.shot?.frameDescription || '')
 const assetOptions = computed(() => {

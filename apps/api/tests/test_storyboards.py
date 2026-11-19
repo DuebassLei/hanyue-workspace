@@ -606,27 +606,24 @@ def test_generation_prompt_is_exposed_for_view_and_copy(client, monkeypatch):
 
 def test_project_style_config_persists_and_roundtrips(client):
     headers = login(client, "storyboard-style-persist")
-    config = {
-        "style_id": "manga", "prompt_suffix": "日系漫画风格，干净线条",
-        "negative_prompt": "低清晰度", "seed": 42,
-    }
+    config = {"style_number": "FA-001"}
     project = create_project(client, headers, styleConfig=config)
-    assert project["styleConfig"] == config
+    stored = project["styleConfig"]
+    assert stored["style_number"] == "FA-001"
+    assert stored["generation_name"]
+    assert stored["group_key"] == "FA"
 
     detail = client.get(f"/api/v1/storyboards/{project['id']}", headers=headers).json()
-    assert detail["styleConfig"] == config
+    assert detail["styleConfig"] == stored
     listed = client.get("/api/v1/storyboards", headers=headers).json()
-    assert listed[0]["styleConfig"] == config
+    assert listed[0]["styleConfig"] == stored
 
-    updated = {
-        "style_id": "watercolor", "prompt_suffix": "水彩手绘风格",
-        "reference_asset_id": None, "seed": None, "negative_prompt": "",
-    }
+    updated = {"style_number": "FB-001"}
     patched = client.patch(
         f"/api/v1/storyboards/{project['id']}", json={"styleConfig": updated}, headers=headers,
     )
     assert patched.status_code == 200, patched.text
-    assert patched.json()["styleConfig"] == updated
+    assert patched.json()["styleConfig"]["style_number"] == "FB-001"
 
     # 空对象清空配置
     cleared = client.patch(
@@ -634,16 +631,19 @@ def test_project_style_config_persists_and_roundtrips(client):
     )
     assert cleared.json()["styleConfig"] == {}
 
+    # 不存在的风格明确拒绝，不静默存下。
+    # 可用性口径（无参考图且无可用特征词）在当前资源快照下没有命中项：331 档全部带参考图。
+    missing = client.patch(
+        f"/api/v1/storyboards/{project['id']}", json={"styleConfig": {"style_number": "ZZ-999"}},
+        headers=headers,
+    )
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "style_not_found"
 
-def test_style_suffix_prepended_and_snapshot_in_payload(client, monkeypatch):
+
+def test_handdraw_style_segment_prepended_and_snapshot(client, monkeypatch):
     headers = login(client, "storyboard-style-prompt")
-    ref = _asset(client, headers)
-    config = {
-        "style_id": "manga", "prompt_suffix": "统一画风：日系漫画，赛璐璐",
-        "negative_prompt": "低清晰度, 多余肢体", "seed": 123456,
-        "reference_asset_id": ref, "style_name": "日系漫画",
-    }
-    project = create_project(client, headers, styleConfig=config)
+    project = create_project(client, headers, styleConfig={"style_number": "FA-001"})
     scene = _scene_for(client, headers, project)
     shot = client.post(
         f"/api/v1/storyboards/scenes/{scene['id']}/shots",
@@ -655,50 +655,35 @@ def test_style_suffix_prepended_and_snapshot_in_payload(client, monkeypatch):
 
     payload = captured["payload"]
     prompt = payload["prompt"]
-    # 风格后缀在最前，画面主体次之，角色一致性句保留
-    assert prompt.startswith("统一画风：日系漫画，赛璐璐\n")
+    # 中文主体 → 中文风格段置于最前，画面主体次之
+    assert prompt.startswith("风格名称：")
     assert "林夏站在雨里" in prompt
-    assert "雨" in prompt
-    assert payload["negativePrompt"] == "低清晰度, 多余肢体"
-    assert payload["seed"] == 123456
-    # 风格参考图常驻槽：即使没在镜头 asset_refs 里登记也进参考图
-    assert ref in payload["referenceAssetIds"]
+    assert prompt.index("风格名称：") < prompt.index("林夏站在雨里")
+    # 未校准模型走参考图兜底：风格参考图交给 job_runner 的内置参考图路径
+    assert payload["builtinReferenceStyleNumber"] == "FA-001"
 
     snapshot = payload["styleSnapshot"]
-    assert snapshot["styleId"] == "manga"
-    assert snapshot["styleName"] == "日系漫画"
-    assert snapshot["promptSuffix"] == "统一画风：日系漫画，赛璐璐"
-    assert snapshot["negativePrompt"] == "低清晰度, 多余肢体"
-    assert snapshot["referenceAssetId"] == ref
-    assert snapshot["seed"] == 123456
+    assert snapshot["styleNumber"] == "FA-001"
+    assert snapshot["groupKey"] == "FA"
+    assert snapshot["language"] == "zh"
+    assert snapshot["needReference"] is True
+    assert snapshot["promptHead"] == prompt.split("\n", 1)[0]
+
+    # 镜头详情与提示词包都能追溯入队时的风格快照。
+    detail = client.get(f"/api/v1/storyboards/{project['id']}", headers=headers).json()
+    shot_out = detail["scenes"][0]["shots"][0]
+    assert shot_out["styleSnapshot"]["styleNumber"] == "FA-001"
+    pack = client.get(f"/api/v1/storyboards/{project['id']}/exports/prompt-pack", headers=headers)
+    assert pack.status_code == 200
+    assert "风格快照：" in pack.text
+    assert "FA-001" in pack.text
+    assert "参考图" in pack.text
 
 
-def test_style_suffix_resolved_from_registry_when_snapshot_missing(client, monkeypatch):
-    headers = login(client, "storyboard-style-registry")
-    # 只存 style_id，prompt_suffix 留空：后端应从统一注册表展开
-    project = create_project(client, headers, styleConfig={"style_id": "manga"})
-    scene = _scene_for(client, headers, project)
-    shot = client.post(
-        f"/api/v1/storyboards/scenes/{scene['id']}/shots",
-        json={"frameDescription": "雨夜站台"}, headers=headers,
-    ).json()
-    captured = _enqueue_spy(monkeypatch)
-    response = client.post(f"/api/v1/storyboards/shots/{shot['id']}/generate-sketch", json={}, headers=headers)
-    assert response.status_code == 202, response.text
-    payload = captured["payload"]
-    assert payload["prompt"].startswith("日系漫画风格，干净线条，赛璐璐上色\n")
-    assert payload["styleSnapshot"]["styleName"] == "日系漫画"
-    assert payload["styleSnapshot"]["promptSuffix"] == "日系漫画风格，干净线条，赛璐璐上色"
-
-
-def test_style_reference_survives_cap_and_final_stage(client, monkeypatch):
+def test_handdraw_style_reference_reserves_slot(client, monkeypatch):
     headers = login(client, "storyboard-style-ref")
-    style_ref = _asset(client, headers)
     sketch_ref = _asset(client, headers)
-    project = create_project(
-        client, headers,
-        styleConfig={"style_id": "manga", "reference_asset_id": style_ref},
-    )
+    project = create_project(client, headers, styleConfig={"style_number": "FA-001"})
     scene = _scene_for(client, headers, project)
     shot = client.post(
         f"/api/v1/storyboards/scenes/{scene['id']}/shots",
@@ -707,9 +692,9 @@ def test_style_reference_survives_cap_and_final_stage(client, monkeypatch):
     captured = _enqueue_spy(monkeypatch)
     sketched = client.post(f"/api/v1/storyboards/shots/{shot['id']}/generate-sketch", json={}, headers=headers)
     assert sketched.status_code == 202, sketched.text
-    # 风格参考不在镜头 asset_refs 里也常驻
-    assert captured["payload"]["referenceAssetIds"] == [style_ref]
-    assert "reference image 1 is style 统一风格" in captured["payload"]["prompt"]
+    # 草图阶段没有用户参考图：风格参考图独占第 1 槽，用户侧参考图为空
+    assert captured["payload"]["referenceAssetIds"] == []
+    assert captured["payload"]["builtinReferenceStyleNumber"] == "FA-001"
 
     from app.core.db import SessionLocal
     from app import models
@@ -721,17 +706,14 @@ def test_style_reference_survives_cap_and_final_stage(client, monkeypatch):
         db.commit()
     final = client.post(f"/api/v1/storyboards/shots/{shot['id']}/generate-final", json={}, headers=headers)
     assert final.status_code == 202, final.text
-    # 正式图阶段：风格参考 + 锁构图草图
-    assert captured["payload"]["referenceAssetIds"] == [style_ref, sketch_ref]
-    assert "reference image 1 is style 统一风格" in captured["payload"]["prompt"]
-    assert "approved sketch" in captured["payload"]["prompt"]
+    # 正式图阶段：风格参考图占第 1 槽（由 builtin 补），草图锁构图排在其后，标注从 2 起算
+    assert captured["payload"]["referenceAssetIds"] == [sketch_ref]
+    assert "reference image 2 is the approved sketch" in captured["payload"]["prompt"]
 
 
-def test_style_change_applies_to_new_shots_only(client, monkeypatch):
+def test_style_change_applies_to_new_generations_only(client, monkeypatch):
     headers = login(client, "storyboard-style-change")
-    project = create_project(client, headers, styleConfig={
-        "style_id": "manga", "prompt_suffix": "旧风格锚点",
-    })
+    project = create_project(client, headers, styleConfig={"style_number": "FA-001"})
     scene = _scene_for(client, headers, project)
     shot = client.post(
         f"/api/v1/storyboards/scenes/{scene['id']}/shots",
@@ -739,17 +721,15 @@ def test_style_change_applies_to_new_shots_only(client, monkeypatch):
     ).json()
     captured = _enqueue_spy(monkeypatch)
     assert client.post(f"/api/v1/storyboards/shots/{shot['id']}/generate-sketch", json={}, headers=headers).status_code == 202
-    old_prompt = captured["payload"]["prompt"]
-    assert old_prompt.startswith("旧风格锚点\n")
+    old_head = captured["payload"]["styleSnapshot"]["promptHead"]
+    assert old_head in captured["payload"]["prompt"]
 
-    # 改项目风格后，同一镜头重新入队用新风格
     patched = client.patch(
         f"/api/v1/storyboards/{project['id']}",
-        json={"styleConfig": {"style_id": "watercolor", "prompt_suffix": "新风格锚点"}},
+        json={"styleConfig": {"style_number": "FB-001"}},
         headers=headers,
     )
     assert patched.status_code == 200
-    # 重置任务态，模拟镜头空闲后重新生成
     from app.core.db import SessionLocal
     from app import models
 
@@ -759,7 +739,26 @@ def test_style_change_applies_to_new_shots_only(client, monkeypatch):
         row.sketch_job_id = None
         db.commit()
     assert client.post(f"/api/v1/storyboards/shots/{shot['id']}/generate-sketch", json={}, headers=headers).status_code == 202
-    new_prompt = captured["payload"]["prompt"]
-    assert new_prompt.startswith("新风格锚点\n")
-    assert "旧风格锚点" not in new_prompt
+    new_head = captured["payload"]["styleSnapshot"]["promptHead"]
+    assert captured["payload"]["styleSnapshot"]["styleNumber"] == "FB-001"
+    assert new_head != old_head
+    assert old_head not in captured["payload"]["prompt"]
+
+
+def test_no_style_keeps_legacy_prompt(client, monkeypatch):
+    headers = login(client, "storyboard-style-none")
+    project = create_project(client, headers)
+    scene = _scene_for(client, headers, project)
+    shot = client.post(
+        f"/api/v1/storyboards/scenes/{scene['id']}/shots",
+        json={"frameDescription": "水墨风，中景", "prompt": "水墨风，中景"}, headers=headers,
+    ).json()
+    captured = _enqueue_spy(monkeypatch)
+    response = client.post(f"/api/v1/storyboards/shots/{shot['id']}/generate-sketch", json={}, headers=headers)
+    assert response.status_code == 202, response.text
+    payload = captured["payload"]
+    # 未选风格：prompt 以手写画面提示词开头，不带风格段，也不占参考图槽
+    assert payload["prompt"].startswith("水墨风，中景")
+    assert payload["styleSnapshot"] is None
+    assert payload["builtinReferenceStyleNumber"] is None
 

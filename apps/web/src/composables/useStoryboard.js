@@ -9,8 +9,10 @@ export function useStoryboard() {
 
   const projects = ref([])
   const project = ref(null)
-  const stylePresets = ref([])
-  const stylePresetsLoading = ref(false)
+  const handdrawStyles = ref([])
+  const handdrawGroups = ref([])
+  const handdrawStylesLoading = ref(false)
+  const handdrawStylesLoaded = ref(false)
   const selectedSceneId = ref('')
   const selectedShotId = ref('')
   const loading = ref(false)
@@ -36,15 +38,22 @@ export function useStoryboard() {
     projects.value = await api.get('/storyboards')
   }
 
-  /** 统一风格预设（与提示词库共用注册表），只拉适用于漫画分镜的项。 */
-  async function loadStylePresets() {
-    if (stylePresets.value.length) return stylePresets.value
-    stylePresetsLoading.value = true
+  /** 手绘库分页上限为 200；分两页读取，后端返回的 usable/activation 标记用于筛选与锁定方式提示。 */
+  async function loadHanddrawStyles() {
+    if (handdrawStylesLoaded.value) return handdrawStyles.value
+    handdrawStylesLoading.value = true
     try {
-      stylePresets.value = await api.get('/style-presets?applicableTo=comic_panel')
-      return stylePresets.value
+      const [first, second] = await Promise.all([
+        api.get('/handdraw/styles?page=1&pageSize=200'),
+        api.get('/handdraw/styles?page=2&pageSize=200'),
+      ])
+      handdrawStyles.value = [...(first.items || []), ...(second.items || [])]
+        .filter((style) => style.referenceAvailable || style.needReference === false)
+      handdrawGroups.value = first.groups || []
+      handdrawStylesLoaded.value = true
+      return handdrawStyles.value
     } finally {
-      stylePresetsLoading.value = false
+      handdrawStylesLoading.value = false
     }
   }
 
@@ -195,8 +204,8 @@ export function useStoryboard() {
 
   return {
     projects, project, scenes, selectedScene, shots, selectedShot, selectedSceneId, selectedShotId,
-    loading, saving, error, stylePresets, stylePresetsLoading,
-    loadProjects, loadProject, loadStylePresets, saveStyleConfig,
+    loading, saving, error, handdrawStyles, handdrawGroups, handdrawStylesLoading,
+    loadProjects, loadProject, loadHanddrawStyles, saveStyleConfig,
     createProject, patchProject, deleteProject,
     deletePermanently, restore, createScene, patchScene, deleteScene, createShot, patchShot, deleteShot, reorderShots, replaceShot,
     selectScene, selectShot, refresh, breakDownProject, breakDownScene, saveAssets,
