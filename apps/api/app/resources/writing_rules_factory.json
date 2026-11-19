@@ -38,6 +38,15 @@
           "enabled": true
         },
         {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
           "ruleType": "style_rule",
           "ruleKey": "sr-1",
           "payload": {
@@ -244,6 +253,15 @@
           "enabled": true
         },
         {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
           "ruleType": "style_rule",
           "ruleKey": "sr-1",
           "payload": {
@@ -359,6 +377,15 @@
           "ruleKey": "default",
           "payload": {
             "text": "作者退到记录员位置，冷静陈述，多用时间、地点、数字与引语，不抒情不评判"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
           },
           "sortOrder": 0,
           "enabled": true
@@ -493,6 +520,15 @@
           "enabled": true
         },
         {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
           "ruleType": "style_rule",
           "ruleKey": "sr-1",
           "payload": {
@@ -608,6 +644,15 @@
           "ruleKey": "default",
           "payload": {
             "text": "像懂行分析师在饭桌聊天，结论前置、敢下判断，但每一步都给来源与前提"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
           },
           "sortOrder": 0,
           "enabled": true
@@ -733,6 +778,15 @@
           "enabled": true
         },
         {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
           "ruleType": "style_rule",
           "ruleKey": "sr-1",
           "payload": {
@@ -853,6 +907,15 @@
           "enabled": true
         },
         {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
           "ruleType": "style_rule",
           "ruleKey": "sr-1",
           "payload": {
@@ -959,6 +1022,15 @@
           "ruleKey": "default",
           "payload": {
             "text": "像刚从现场回来的朋友讲见闻，多用感官细节与取舍判断，落到实处"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
           },
           "sortOrder": 0,
           "enabled": true
@@ -1084,6 +1156,15 @@
           "enabled": true
         },
         {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
           "ruleType": "style_rule",
           "ruleKey": "sr-1",
           "payload": {
@@ -1199,6 +1280,15 @@
           "ruleKey": "default",
           "payload": {
             "text": "懂行但不装的评论人，先给反共识判断，再用场景细节验证，尊重剧透边界"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
           },
           "sortOrder": 0,
           "enabled": true
@@ -1324,6 +1414,15 @@
           "enabled": true
         },
         {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
           "ruleType": "style_rule",
           "ruleKey": "sr-1",
           "payload": {
@@ -1439,6 +1538,15 @@
           "ruleKey": "default",
           "payload": {
             "text": "像把工具自己跑通的朋友在讲，第一人称实测，口语短句，一句一段。判断后置，不喊口号，不写死作者署名"
+          },
+          "sortOrder": 0,
+          "enabled": true
+        },
+        {
+          "ruleType": "prompt_template",
+          "ruleKey": "default",
+          "payload": {
+            "text": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。"
           },
           "sortOrder": 0,
           "enabled": true

@@ -58,7 +58,7 @@
 - `category` 只能是 `flow` 或 `style`；
 - `tools` 必须已在 `agent_policy.TOOL_CATALOG` 登记且非 forbidden，工作流步骤里的工具也必须在这个列表内；
 - `tone`、`styleRules`、`workflow`、`reviewRules`、`targetLength`、`factPolicy`、`imagePolicy`、`repairPolicy`、`exemplars` **都不写在条目上**，它们是规则行，由 `compose_manifest` 在运行期合成；
-- 派生文件的 `manifest` 只保留合成后的规则型 key，以及 `_build_builtin_manifest` 注入的 `promptTemplate`（style 类）、`input` / `output` / `riskLevel`。这是生成逻辑的不动点，不是可手改的源。
+- 派生文件的 `manifest` 只保留合成后的规则型 key，以及 `_build_builtin_manifest` 注入的 `input` / `output` / `riskLevel`。它是生成逻辑的不动点，不是可手改的源。
 
 规则行与 manifest 字段的对应关系：
 
@@ -66,7 +66,7 @@
 |---|---|---|---|
 | `tone` | `tone` | 单行 | 语气描述 |
 | `style_rule` | `styleRules` | 多行 | 顺序按 `sortOrder` |
-| `prompt_template` | `promptTemplate` | 单行 | 一般只给自定义 Skill 用，内置 style 由服务端注入统一契约 |
+| `prompt_template` | `promptTemplate` | 单行 | 每个会成文的 Skill 各一行（11 个 style + `article-drafting`），出厂值为 `DEFAULT_ARTICLE_PROMPT` 原文；保留 `{tone}` 占位符 |
 | `theme` | `defaultTheme` | 单行 | 取值必须在 `wechat_layout.PRESET_THEMES` 里 |
 | `target_length` | `targetLength` | 单行 | `payload.value` 为整数 |
 | `workflow_step` | `workflow` | 多行 | 每步 `tool` 必须在 `tools` 内，最多 12 步 |
@@ -88,6 +88,8 @@
 由此有两条必须记住的行为：管理员改过的全局规则重启后保留；被删掉的规则行重启后会从出厂数据长回来。所以「全部关掉」是写禁用行（`enabled=false`），不是删行。
 
 出厂数据或派生文件写错（重复 key、缺 `rules`、未登记工具、非法主题、规则类型不对、单行类重复）会**启动失败**，日志里有具体 key，而不是静默少一个 Skill。
+
+新增出厂规则行（例如给每个成文 Skill 补 `prompt_template`）只需改 `writing_rules_factory.json` 并重跑派生脚本：已有库在下次启动时由 `import_factory` 自动补齐，无需写迁移。反过来，**删**一条出厂行不会让已有库的旧行消失，需要 `reset` 或手工删。
 
 ## 3. 改规则与提示词
 

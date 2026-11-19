@@ -37,6 +37,7 @@ from app.services import (  # noqa: E402
     ai_article,
     ai_gateway,
     article_workflow,
+    skill_registry,
     writing_rules,
 )
 
@@ -52,11 +53,24 @@ SINGLE_TYPES = frozenset(
 )
 
 
-def _manifest_to_rules(manifest: dict) -> list[dict]:
-    """manifest 规则型 key → 原始规则行（键序贴近 YAML 阅读顺序）。"""
+def _manifest_to_rules(manifest: dict, category: str = "flow") -> list[dict]:
+    """manifest 规则型 key → 原始规则行（键序贴近 YAML 阅读顺序）。
+
+    `promptTemplate` 必须成行：原 YAML 的 style 条目只写 tone/styleRules/theme，
+    模板靠 `skill_registry._build_builtin_manifest` 注入 `DEFAULT_ARTICLE_PROMPT`。
+    若导出时不成行，规则表就没有 `prompt_template`，管理页「写作模板」永远为空、
+    改不动，且 `effective_manifest` 只能读派生快照——出厂 JSON 也就不再是唯一权威源。
+    因此 style 类缺该字段时按 R6 落 `DEFAULT_ARTICLE_PROMPT` 原文；成文流程
+    （article-drafting）同样落行，保证 Agent 路径的模板也可配。
+    """
     raw: list[dict] = []
     if "tone" in manifest:
         raw.append({"ruleType": "tone", "payload": {"text": manifest["tone"]}})
+    prompt_template = manifest.get("promptTemplate")
+    if prompt_template is None and (category == "style" or "workflow" in manifest):
+        prompt_template = skill_registry.DEFAULT_ARTICLE_PROMPT
+    if prompt_template:
+        raw.append({"ruleType": "prompt_template", "payload": {"text": prompt_template}})
     for i, text in enumerate(manifest.get("styleRules") or [], start=1):
         raw.append({"ruleType": "style_rule", "ruleKey": f"sr-{i}", "payload": {"text": text}})
     if "defaultTheme" in manifest:
@@ -183,15 +197,16 @@ def build_factory() -> dict:
         if key in seen:
             raise SystemExit(f"内置 Skill key 重复：{key}")
         seen.add(key)
+        category = item.get("category", "flow")
         skills.append(
             {
                 "key": key,
                 "version": item.get("version", "1.0.0"),
                 "name": item["name"],
                 "description": item.get("description", ""),
-                "category": item.get("category", "flow"),
+                "category": category,
                 "tools": list(item.get("tools") or []),
-                "rules": _manifest_to_rules(item.get("manifest") or {}),
+                "rules": _manifest_to_rules(item.get("manifest") or {}, category),
             }
         )
     return {"version": 1, "skills": skills, "prompt_rules": _prompt_rules()}

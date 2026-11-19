@@ -66,6 +66,7 @@ def test_factory_rule_counts_match_yaml_source():
     assert counts == {
         "target_length": 1,
         "tone": 1,
+        "prompt_template": 1,  # 成文流程也落模板行，Agent 路径才可配
         "style_rule": 5,  # 原 styleRules 5 条
         "theme": 1,
         "workflow_step": 5,  # 原 workflow 5 步
@@ -74,15 +75,16 @@ def test_factory_rule_counts_match_yaml_source():
         "fact_policy": 1,
         "repair_policy": 1,
     }
-    assert len(drafting) == 18
+    assert len(drafting) == 19
 
     for key, skill in skills.items():
         if not key.startswith("style-"):
             continue
         types = [rule["ruleType"] for rule in skill["rules"]]
         assert types.count("tone") == 1 and types.count("theme") == 1
-        # style 类的 promptTemplate 由 _build_builtin_manifest 注入，规则表里不放
-        assert "prompt_template" not in types
+        # 模板必须逐 skill 成行：只靠 _build_builtin_manifest 注入的话，
+        # 规则表里没有 prompt_template，管理页改不动、effective_manifest 也读不到。
+        assert types.count("prompt_template") == 1
 
     # 原 YAML 里每个 style 的 styleRules 条数（逐 key）
     expected_style_rules = {
@@ -122,6 +124,31 @@ def test_factory_rules_are_in_yaml_order_and_normalizable():
             normalized = writing_rules.validate_rule(rule)
             assert normalized["ruleType"] == rule["ruleType"]
             assert normalized["ruleKey"] == rule["ruleKey"]
+
+
+def test_every_writing_skill_has_prompt_template_rule():
+    """模板必须逐 skill 成行，且与出厂常量逐字一致。
+
+    回归点：导出脚本曾漏掉 `promptTemplate` 映射，style 类只靠
+    `_build_builtin_manifest` 注入派生快照——规则表里没有 `prompt_template`，
+    「写作模板」就在管理页消失、也改不动。
+    """
+    skills = _by_key()
+    template = skill_registry.DEFAULT_ARTICLE_PROMPT
+    targets = [spec.key for spec in skill_registry.get_builtin_specs() if spec.category == "style"]
+    targets.append("article-drafting")  # Agent 成文走的 flow，同样要可配
+    assert len(targets) == 12
+
+    for key in targets:
+        rows = [r for r in skills[key]["rules"] if r["ruleType"] == "prompt_template"]
+        assert len(rows) == 1, f"{key} 应有且仅有一行 prompt_template"
+        assert rows[0]["ruleKey"] == "default"
+        assert rows[0]["payload"]["text"] == template, key
+        assert rows[0]["enabled"] is True and rows[0]["sortOrder"] == 0
+
+    # 不生文的流程不落模板行：管理页不该出现无意义的分组
+    for key in ("topic-research", "publish-prep"):
+        assert "prompt_template" not in [r["ruleType"] for r in skills[key]["rules"]], key
 
 
 def test_factory_prompt_rules_match_code_constants():
@@ -409,7 +436,8 @@ def test_builtin_entries_keep_yaml_manifest_semantics(client):
         assert [r["id"] for r in manifest["reviewRules"]] == ["has-body", "no-absolute"]
         assert manifest["imagePolicy"]["coverAspectRatio"] == "3:4"
         assert manifest["factPolicy"] == {"requireSources": False, "forbidUnverifiedQuotes": True, "placeholder": "〔待核实〕", "extraInstructions": []} or manifest["factPolicy"]["forbidUnverifiedQuotes"] is True
-        assert "promptTemplate" not in manifest, "flow article-drafting 不写 promptTemplate"
+        # 成文流程的模板同样来自规则行（值为出厂常量，行为与迁移前一致）
+        assert manifest["promptTemplate"] == skill_registry.DEFAULT_ARTICLE_PROMPT
         assert manifest["input"] == {"goal": "string"} and manifest["output"] == {"draft": "object"}
 
         research = db.scalars(
@@ -430,6 +458,44 @@ def test_builtin_entries_keep_yaml_manifest_semantics(client):
         assert len(tech.manifest["styleRules"]) == 10
         assert tech.manifest["defaultTheme"] == "blue-business"
         assert "workflow" not in tech.manifest
+
+
+def test_prompt_template_rule_overrides_manifest_snapshot(client):
+    """规则行优先于条目 manifest 快照；个人没写时沿用全局出厂行。
+
+    此前 style 的模板只存在派生快照里，管理员在规则页既看不到也改不动，
+    `effective_manifest` 永远返回常量——这条用例锁住修复后的口径。
+    """
+    key = "style-news-and-gov"
+    owner = "prompt-template-owner"
+    with SessionLocal() as db:
+        entry = db.scalars(
+            select(models.SkillRegistryEntry).where(
+                models.SkillRegistryEntry.skill_key == key,
+                models.SkillRegistryEntry.owner_user_id.is_(None),
+            )
+        ).one()
+        assert writing_rules.effective_manifest(db, entry, None)["promptTemplate"] == (
+            skill_registry.DEFAULT_ARTICLE_PROMPT
+        )
+
+        writing_rules.replace_rules(
+            db,
+            skill_key=key,
+            owner_user_id=owner,
+            rules=[{"ruleType": "prompt_template", "payload": {"text": "个人模板：{tone}"}}],
+        )
+        db.commit()
+        try:
+            effective = writing_rules.effective_manifest(db, entry, owner)
+            assert effective["promptTemplate"] == "个人模板：{tone}"
+            # 没有个人行的其他用户照旧读全局出厂行
+            other = writing_rules.effective_manifest(db, entry, "another-owner")
+            assert other["promptTemplate"] == skill_registry.DEFAULT_ARTICLE_PROMPT
+        finally:
+            for row in writing_rules.list_rule_rows(db, skill_key=key, owner_user_id=owner):
+                db.delete(row)
+            db.commit()
 
 
 def test_derived_manifest_roundtrips_through_registry_builder():
