@@ -24,6 +24,7 @@ export const NAV_GROUPS = [
     label: '工作区',
     items: [
       { name: 'studio', label: '创作空间', short: '创作', permission: 'studio.use' },
+      { name: 'articles', label: '文章管理', short: '文章', permission: 'studio.use' },
       { name: 'cards', label: '图文卡片', short: '卡片', permission: 'cards.use' },
       { name: 'images', label: '图片生成', short: '图片', permission: 'images.use' },
       { name: 'stickers', label: '贴图创作', short: '贴图', permission: 'stickers.use' },
@@ -60,7 +61,6 @@ export const NAV_GROUPS = [
     items: [
       { name: 'models', label: '模型管理', short: '模型', permission: 'models.view' },
       { name: 'logs', label: '系统日志', short: '日志', permission: 'logs.view' },
-      { name: 'image-styles', label: '风格库', short: '风格', permission: 'image_styles.manage' },
       { name: 'settings', label: '设置', short: '我的', permission: 'settings.view' },
     ],
   },

@@ -61,6 +61,16 @@ class ArchivePatch(BaseModel):
     archived: bool
 
 
+class BatchArchivePatch(schemas.CamelModel):
+    ids: list[str]
+    archived: bool
+
+
+class BatchArchiveResult(schemas.CamelModel):
+    updated: int
+    skipped: int
+
+
 class ImageStyleLockIn(schemas.CamelModel):
     style_id: str | None
 
@@ -81,7 +91,11 @@ def list_content(
     cursor: str | None = Query(default=None),
     fields: str | None = Query(default=None, description="list=瘦身模式，不返回正文"),
     q: str | None = Query(default=None, description="标题关键词"),
-    status: str | None = Query(default=None),
+    status: str | None = Query(default=None, description="稿件自身状态（恒 draft，一般不用）"),
+    publish_status: str | None = Query(
+        default=None, alias="publishStatus",
+        description="按关联发布任务状态筛选（逗号分隔多值）；none=无发布任务",
+    ),
     type: str | None = Query(default=None),
     platform: str | None = Query(default=None, description="按平台版本的平台筛"),
     updated_from: datetime | None = Query(default=None, alias="updatedFrom"),
@@ -108,6 +122,23 @@ def list_content(
         stmt = stmt.where(models.ContentItem.title.ilike(f"%{q.strip()}%"))
     if status:
         stmt = stmt.where(models.ContentItem.status == status)
+    if publish_status:
+        # 真实发布态在 publish_jobs（稿件自身 status 恒为 draft），走 EXISTS 联表筛选，
+        # 让文章管理页的状态 chips 是真服务端过滤而不是前端假过滤。
+        wanted = [item.strip() for item in publish_status.split(",") if item.strip()]
+        if wanted == ["none"]:
+            stmt = stmt.where(
+                ~exists().where(
+                    models.PublishJob.content_item_id == models.ContentItem.id
+                )
+            )
+        elif wanted:
+            stmt = stmt.where(
+                exists().where(
+                    models.PublishJob.content_item_id == models.ContentItem.id,
+                    models.PublishJob.status.in_(wanted),
+                )
+            )
     if type:
         stmt = stmt.where(models.ContentItem.type == type)
     if platform:
@@ -178,6 +209,41 @@ def list_content(
     ]
 
 
+@router.post("/content/batch-archive", response_model=BatchArchiveResult)
+def batch_archive_content(
+    payload: BatchArchivePatch, user: CurrentUser, db: DbSession
+) -> BatchArchiveResult:
+    """批量归档/恢复稿件（软隐藏，不做硬删）。
+
+    每条都校验 owner_user_id == user.id（与单稿 archive 一致）：不属于自己的、
+    已删除的 id 一律跳过而不是让整批 404。返回更新与跳过条数，前端据此刷新列表。
+    """
+    ids = list(dict.fromkeys(payload.ids))
+    updated = 0
+    skipped = 0
+    if ids:
+        owned = {
+            row.id: row
+            for row in db.scalars(
+                select(models.ContentItem).where(
+                    models.ContentItem.id.in_(ids),
+                    models.ContentItem.owner_user_id == user.id,
+                )
+            ).all()
+        }
+        archived_at = utcnow() if payload.archived else None
+        for content_id in ids:
+            row = owned.get(content_id)
+            if row is None:
+                skipped += 1
+                continue
+            row.archived = payload.archived
+            row.archived_at = archived_at
+            updated += 1
+        db.commit()
+    return BatchArchiveResult(updated=updated, skipped=skipped)
+
+
 @router.patch("/content/{content_id}/archive", response_model=schemas.ContentOut)
 def set_content_archive(
     content_id: str, payload: ArchivePatch, user: CurrentUser, db: DbSession
@@ -206,16 +272,18 @@ def lock_content_image_style(
         item.base_style_prompt = ""
         item.base_style_deleted = False
     else:
-        style = db.get(models.ImageStyle, payload.style_id)
+        # 风格库已并入统一提示词库：基础风格是 prompt_templates 里 prompt_type=base
+        # 且启用的记录，正向提示词在 content 字段。快照仍落到稿件自身，不回写来源。
+        style = db.get(models.PromptTemplate, payload.style_id)
         if style is None:
             raise ApiError("style_not_found", "风格不存在", status_code=404)
-        if style.purpose != "base":
+        if style.prompt_type != "base":
             raise ApiError("style_not_base", "只能锁定基础风格")
         if not style.enabled:
             raise ApiError("style_disabled", "该风格已停用")
         item.base_style_id = style.id
-        item.base_style_name = style.name
-        item.base_style_prompt = style.prompt
+        item.base_style_name = style.title
+        item.base_style_prompt = style.content
         item.base_style_deleted = False
     db.commit()
     return _item_out(item, db)
