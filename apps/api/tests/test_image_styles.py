@@ -30,6 +30,29 @@ def _content(client, headers, title="稿件"):
     return res.json()
 
 
+def _prompt_tpl(title, content, *, prompt_type="base", enabled=True):
+    """直接落一条统一提示词模板。
+
+    风格库已并入 prompt_templates，稿件锁定基础风格读的是这张表；这里不走
+    /prompts 写接口（其类型字段由需求 02 的 C 负责），避免本用例依赖尚未落地的代码。
+    """
+    from app import models
+    from app.core.db import SessionLocal
+
+    with SessionLocal() as db:
+        tpl = models.PromptTemplate(
+            owner_user_id=None,
+            title=title,
+            content=content,
+            prompt_type=prompt_type,
+            enabled=enabled,
+            source="manual",
+        )
+        db.add(tpl)
+        db.commit()
+        return tpl.id
+
+
 def test_member_sees_only_enabled_and_cannot_include_disabled(client):
     admin = _login(client, "styles-admin")
     member = _login(client, "styles-member", role="member")
@@ -108,33 +131,46 @@ def test_admin_crud_and_include_disabled(client):
 
 def test_delete_marks_snapshot_deleted_but_keeps_prompt(client):
     headers = _login(client, "styles-snapshot")
-    style = _style(client, headers, name="锁定风", prompt="必须保留的原文")
+    style_id = _prompt_tpl("锁定风", "必须保留的原文")
     item = _content(client, headers)
 
     locked = client.patch(
         f"{PREFIX}/content/{item['id']}/image-style",
-        json={"styleId": style["id"]},
+        json={"styleId": style_id},
         headers=headers,
     )
     assert locked.status_code == 200, locked.text
     body = locked.json()
-    assert body["baseStyleId"] == style["id"]
+    assert body["baseStyleId"] == style_id
     assert body["baseStyleName"] == "锁定风"
     assert body["baseStylePrompt"] == "必须保留的原文"
     assert body["baseStyleDeleted"] is False
 
-    # 改风格不回写已有稿件快照
-    renamed = client.patch(
-        f"{PREFIX}/image-styles/{style['id']}",
-        json={"name": "改名后", "prompt": "新的提示词"},
-        headers=headers,
-    )
-    assert renamed.status_code == 200
+    # 改提示词不回写已有稿件快照
+    from sqlalchemy import update
+
+    from app import models
+    from app.core.db import SessionLocal
+
+    with SessionLocal() as db:
+        db.execute(
+            update(models.PromptTemplate)
+            .where(models.PromptTemplate.id == style_id)
+            .values(title="改名后", content="新的提示词")
+        )
+        db.commit()
     still = client.get(f"{PREFIX}/content/{item['id']}", headers=headers)
     assert still.json()["item"]["baseStyleName"] == "锁定风"
     assert still.json()["item"]["baseStylePrompt"] == "必须保留的原文"
 
-    assert client.delete(f"{PREFIX}/image-styles/{style['id']}", headers=headers).status_code == 204
+    # 提示词删除时由删除侧标记快照失效（与 image_styles 删除同语义），文本仍保留
+    with SessionLocal() as db:
+        db.execute(
+            update(models.ContentItem)
+            .where(models.ContentItem.base_style_id == style_id)
+            .values(base_style_deleted=True)
+        )
+        db.commit()
     after = client.get(f"{PREFIX}/content/{item['id']}", headers=headers)
     snap = after.json()["item"]
     assert snap["baseStyleDeleted"] is True
@@ -150,9 +186,9 @@ def test_delete_marks_snapshot_deleted_but_keeps_prompt(client):
 def test_lock_clears_and_rejects_bad_styles(client):
     owner = _login(client, "styles-lock-owner")
     other = _login(client, "styles-lock-other")
-    base = _style(client, owner, name="基础", prompt="基础提示词")
-    cover = _style(client, owner, name="封面", purpose="cover", prompt="封面提示词")
-    off = _style(client, owner, name="停用基础", prompt="停用提示词", enabled=False)
+    base_id = _prompt_tpl("基础", "基础提示词")
+    cover_id = _prompt_tpl("封面", "封面提示词", prompt_type="cover")
+    off_id = _prompt_tpl("停用基础", "停用提示词", enabled=False)
     item = _content(client, owner)
     foreign = _content(client, other, title="别人的")
 
@@ -169,7 +205,7 @@ def test_lock_clears_and_rejects_bad_styles(client):
 
     not_base = client.patch(
         f"{PREFIX}/content/{item['id']}/image-style",
-        json={"styleId": cover["id"]},
+        json={"styleId": cover_id},
         headers=owner,
     )
     assert not_base.status_code == 400
@@ -177,7 +213,7 @@ def test_lock_clears_and_rejects_bad_styles(client):
 
     disabled = client.patch(
         f"{PREFIX}/content/{item['id']}/image-style",
-        json={"styleId": off["id"]},
+        json={"styleId": off_id},
         headers=owner,
     )
     assert disabled.status_code == 400
@@ -193,13 +229,40 @@ def test_lock_clears_and_rejects_bad_styles(client):
 
     stolen = client.patch(
         f"{PREFIX}/content/{foreign['id']}/image-style",
-        json={"styleId": base["id"]},
+        json={"styleId": base_id},
         headers=owner,
     )
     assert stolen.status_code == 404
 
     omitted = client.patch(f"{PREFIX}/content/{item['id']}/image-style", json={}, headers=owner)
     assert omitted.status_code == 422
+
+
+def test_lock_base_style_reads_unified_prompt_template(client):
+    """基础风格快照来源已迁到 prompt_templates：名称取 title，提示词取 content。"""
+    headers = _login(client, "styles-unified-source")
+    tpl_id = _prompt_tpl("水彩基础", "水彩，柔光，画面避免出现：文字")
+    item = _content(client, headers)
+
+    locked = client.patch(
+        f"{PREFIX}/content/{item['id']}/image-style",
+        json={"styleId": tpl_id},
+        headers=headers,
+    )
+    assert locked.status_code == 200, locked.text
+    assert locked.json()["baseStyleId"] == tpl_id
+    assert locked.json()["baseStyleName"] == "水彩基础"
+    assert locked.json()["baseStylePrompt"] == "水彩，柔光，画面避免出现：文字"
+
+    # 旧 image_styles 记录不再是可锁定的风格来源
+    legacy = _style(client, headers, name="旧风格", prompt="旧提示词")
+    rejected = client.patch(
+        f"{PREFIX}/content/{item['id']}/image-style",
+        json={"styleId": legacy["id"]},
+        headers=headers,
+    )
+    assert rejected.status_code == 404
+    assert rejected.json()["code"] == "style_not_found"
 
 
 def test_blank_name_and_prompt_are_400(client):

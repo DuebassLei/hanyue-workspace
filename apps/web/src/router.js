@@ -15,6 +15,7 @@ const routes = [
   { path: '/schedules', name: 'schedules', component: () => import('./views/SchedulesView.vue'), meta: { title: '定时任务', icon: '⏱', permission: 'schedules.use' } },
   { path: '/calendar', name: 'calendar', component: () => import('./views/CalendarView.vue'), meta: { title: '内容日历', icon: '▦', permission: 'calendar.view' } },
   { path: '/studio', name: 'studio', component: () => import('./views/StudioView.vue'), meta: { title: '创作空间', icon: '✎', permission: 'studio.use' } },
+  { path: '/articles', name: 'articles', component: () => import('./views/ArticlesView.vue'), meta: { title: '文章管理', icon: '▤', permission: 'studio.use' } },
   { path: '/cards', name: 'cards', component: () => import('./views/CardsView.vue'), meta: { title: '图文卡片', icon: '▤', permission: 'cards.use' } },
   { path: '/images', name: 'images', component: () => import('./views/ImageGenView.vue'), meta: { title: '图片生成', icon: '✦', permission: 'images.use' } },
   { path: '/stickers', name: 'stickers', component: () => import('./views/StickersView.vue'), meta: { title: '贴图创作', icon: '❖', permission: 'stickers.use' } },
@@ -37,7 +38,8 @@ const routes = [
   },
   { path: '/models', name: 'models', component: () => import('./views/ModelsView.vue'), meta: { title: '模型管理', icon: '◎', permission: 'models.view' } },
   { path: '/logs', name: 'logs', component: () => import('./views/LogsView.vue'), meta: { title: '系统日志', icon: '≡', permission: 'logs.view' } },
-  { path: '/image-styles', name: 'image-styles', component: () => import('./views/ImageStylesView.vue'), meta: { title: '风格库', icon: '✧', permission: 'image_styles.manage' } },
+  // 风格库已并入提示词库：旧链接/书签保留可达，直接落到封面图类型的提示词。
+  { path: '/image-styles', redirect: { path: '/prompts', query: { type: 'cover' } } },
   {
     path: '/users',
     name: 'users',

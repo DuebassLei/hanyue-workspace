@@ -54,6 +54,51 @@ def test_list_filters_by_keyword_status_and_platform(client):
     assert rows == []
 
 
+def test_list_filters_by_publish_status(client):
+    """状态 chips 走服务端 EXISTS 联表，不是前端假过滤。"""
+    headers = _auth(client, "lib-pub-status")
+    with_job = _create(client, headers, "已排期稿")
+    no_job = _create(client, headers, "纯草稿")
+
+    acc = client.post(
+        "/api/v1/platform-accounts",
+        json={"platform": "wechat_official", "displayName": "筛选用账号"},
+        headers=headers,
+    ).json()
+    job = client.post(
+        "/api/v1/publishing/jobs",
+        json={
+            "accountId": acc["id"],
+            "idempotencyKey": "lib-pub-status-key",
+            "contentItemId": with_job,
+            "title": "已排期稿",
+            "body": "正文内容",
+            "reviewed": True,
+            "mode": "manual",
+            "scheduledAt": "2099-11-10T10:00:00Z",
+        },
+        headers=headers,
+    )
+    assert job.status_code == 201, job.text
+    assert job.json()["status"] == "queued"
+
+    ids = {
+        r["id"]
+        for r in client.get(
+            "/api/v1/content?fields=list&publishStatus=queued", headers=headers
+        ).json()
+    }
+    assert with_job in ids and no_job not in ids
+
+    ids = {
+        r["id"]
+        for r in client.get(
+            "/api/v1/content?fields=list&publishStatus=none", headers=headers
+        ).json()
+    }
+    assert no_job in ids and with_job not in ids
+
+
 def test_archive_hides_from_default_list_and_restores(client):
     headers = _auth(client, "lib-archive")
     item_id = _create(client, headers, "待归档稿")
@@ -81,6 +126,63 @@ def test_archive_hides_from_default_list_and_restores(client):
     assert res.json()["archivedAt"] is None
     default_ids = {r["id"] for r in client.get("/api/v1/content?fields=list", headers=headers).json()}
     assert item_id in default_ids
+
+
+def test_batch_archive_and_restore_skips_foreign_items(client):
+    headers = _auth(client, "lib-batch")
+    other = _auth(client, "lib-batch-other")
+    mine_a = _create(client, headers, "批量稿 A")
+    mine_b = _create(client, headers, "批量稿 B")
+    foreign = _create(client, other, "别人的稿")
+
+    res = client.post(
+        "/api/v1/content/batch-archive",
+        json={"ids": [mine_a, foreign, mine_b, mine_a], "archived": True},
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+    # 去重后 mine_a/mine_b 成功，foreign 不属于当前用户被跳过
+    assert res.json() == {"updated": 2, "skipped": 1}
+
+    default_ids = {r["id"] for r in client.get("/api/v1/content?fields=list", headers=headers).json()}
+    assert mine_a not in default_ids and mine_b not in default_ids
+    with_archived = {
+        r["id"]: r
+        for r in client.get(
+            "/api/v1/content?fields=list&includeArchived=true", headers=headers
+        ).json()
+    }
+    assert with_archived[mine_a]["archived"] is True
+    assert with_archived[mine_b]["archived"] is True
+    assert with_archived[mine_a]["archivedAt"]
+
+    res = client.post(
+        "/api/v1/content/batch-archive",
+        json={"ids": [mine_a, mine_b], "archived": False},
+        headers=headers,
+    )
+    assert res.json() == {"updated": 2, "skipped": 0}
+    default_ids = {r["id"] for r in client.get("/api/v1/content?fields=list", headers=headers).json()}
+    assert mine_a in default_ids and mine_b in default_ids
+
+    # 别人的稿没有被改动
+    foreign_row = next(
+        r
+        for r in client.get(
+            "/api/v1/content?fields=list&includeArchived=true", headers=other
+        ).json()
+        if r["id"] == foreign
+    )
+    assert foreign_row["archived"] is False
+
+
+def test_batch_archive_empty_ids_is_noop(client):
+    headers = _auth(client, "lib-batch-empty")
+    res = client.post(
+        "/api/v1/content/batch-archive", json={"ids": [], "archived": True}, headers=headers
+    )
+    assert res.status_code == 200, res.text
+    assert res.json() == {"updated": 0, "skipped": 0}
 
 
 def test_list_sort_by_title(client):
