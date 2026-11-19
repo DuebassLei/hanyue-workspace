@@ -140,6 +140,36 @@ class ContentItem(Base, TimestampMixin):
     # 归档：软隐藏而非删除。侧栏与稿件库默认视图排除，详情接口照常可开
     archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 基础风格快照：锁定当时的 id/名称/提示词，风格被删后只打 deleted，不回写快照
+    base_style_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    base_style_name: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    base_style_prompt: Mapped[str] = mapped_column(Text, default="", server_default="")
+    base_style_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+
+class ImageStyle(Base, TimestampMixin):
+    """全局风格库。无归属用户，启停与维护走 image_styles.manage。"""
+
+    __tablename__ = "image_styles"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('base','cover','inline')",
+            name="ck_image_styles_purpose",
+        ),
+        CheckConstraint(
+            "sort_order >= 0 AND sort_order <= 9999",
+            name="ck_image_styles_sort",
+        ),
+        Index("ix_image_styles_purpose_sort", "purpose", "sort_order", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(40))
+    purpose: Mapped[str] = mapped_column(String(16))
+    prompt: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
 
 class ContentVersion(Base, TimestampMixin):

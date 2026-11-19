@@ -171,7 +171,8 @@ def test_builtin_writing_styles_seeded(client):
     headers = login(client, "style-seed")
     skills = client.get("/api/v1/skills?limit=100", headers=headers).json()
     styles = [s for s in skills if s["skillKey"].startswith("style-")]
-    assert len(styles) == 10
+    # 与 builtin_skills.yaml 的 style- 条目数对齐；新增内置写作风格时同步改这里
+    assert len(styles) == 11
     assert all(s["source"] == "builtin" for s in styles)
     assert {
         s["manifest"]["defaultTheme"] for s in styles

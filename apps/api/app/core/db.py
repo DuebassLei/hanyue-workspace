@@ -63,6 +63,11 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     # 稿件库：归档软隐藏（默认 False；SQLite 旧行 NULL 在查询里按未归档处理）
     ("content_items", "archived", "BOOLEAN DEFAULT false"),
     ("content_items", "archived_at", "TIMESTAMP"),
+    # 稿件锁定的基础风格快照（风格库本身是新表，不进这里）
+    ("content_items", "base_style_id", "VARCHAR(32)"),
+    ("content_items", "base_style_name", "VARCHAR(40) DEFAULT ''"),
+    ("content_items", "base_style_prompt", "TEXT DEFAULT ''"),
+    ("content_items", "base_style_deleted", "BOOLEAN DEFAULT false"),
     # 贴图：锚点反推描述缓存（Q10-B 一致性兜底）
     ("sticker_sets", "meta_json", "JSON"),
     # 贴图：该行最近一次入队用的描述，用于识别「改了描述但还没重画」

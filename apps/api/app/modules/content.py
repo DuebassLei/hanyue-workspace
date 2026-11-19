@@ -9,7 +9,7 @@ from sqlalchemy import exists, func, or_, select
 from .. import models, schemas
 from ..core import pagination
 from ..models import utcnow
-from ..core.deps import CurrentUser, DbSession, default_workspace, not_found
+from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..services import article_workflow
 
 router = APIRouter(tags=["content"])
@@ -50,11 +50,19 @@ def _item_out(item: models.ContentItem, db: DbSession | None = None) -> schemas.
         latest_version=latest,
         draft_title=item.draft_title,
         draft_body=item.draft_body,
+        base_style_id=item.base_style_id,
+        base_style_name=item.base_style_name or "",
+        base_style_prompt=item.base_style_prompt or "",
+        base_style_deleted=bool(item.base_style_deleted),
     )
 
 
 class ArchivePatch(BaseModel):
     archived: bool
+
+
+class ImageStyleLockIn(schemas.CamelModel):
+    style_id: str | None
 
 
 _SORTABLE = {
@@ -159,6 +167,10 @@ def list_content(
             created_at=row.created_at,
             archived=bool(row.archived),
             archived_at=row.archived_at,
+            base_style_id=row.base_style_id,
+            base_style_name=row.base_style_name or "",
+            base_style_prompt=row.base_style_prompt or "",
+            base_style_deleted=bool(row.base_style_deleted),
             version_no=version_no_by_item.get(row.id),
             variant_count=variant_count_by_item.get(row.id, 0),
         )
@@ -176,6 +188,35 @@ def set_content_archive(
         raise not_found("稿件")
     item.archived = payload.archived
     item.archived_at = utcnow() if payload.archived else None
+    db.commit()
+    return _item_out(item, db)
+
+
+@router.patch("/content/{content_id}/image-style", response_model=schemas.ContentOut)
+def lock_content_image_style(
+    content_id: str, payload: ImageStyleLockIn, user: CurrentUser, db: DbSession
+) -> schemas.ContentOut:
+    """把当时的基础风格快照写进稿件。登录即可，只改自己的稿件。"""
+    item = db.get(models.ContentItem, content_id)
+    if not item or item.owner_user_id != user.id:
+        raise not_found("稿件")
+    if payload.style_id is None:
+        item.base_style_id = None
+        item.base_style_name = ""
+        item.base_style_prompt = ""
+        item.base_style_deleted = False
+    else:
+        style = db.get(models.ImageStyle, payload.style_id)
+        if style is None:
+            raise ApiError("style_not_found", "风格不存在", status_code=404)
+        if style.purpose != "base":
+            raise ApiError("style_not_base", "只能锁定基础风格")
+        if not style.enabled:
+            raise ApiError("style_disabled", "该风格已停用")
+        item.base_style_id = style.id
+        item.base_style_name = style.name
+        item.base_style_prompt = style.prompt
+        item.base_style_deleted = False
     db.commit()
     return _item_out(item, db)
 

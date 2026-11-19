@@ -175,6 +175,11 @@ class ContentOut(CamelModel):
     # 自动草稿字段：未 None 时说明有未提交为版本的自动保存内容
     draft_title: str | None = None
     draft_body: str | None = None
+    # 基础风格快照。风格库改名/改词不回写；删除后只把 deleted 打成 true
+    base_style_id: str | None = None
+    base_style_name: str = ""
+    base_style_prompt: str = ""
+    base_style_deleted: bool = False
     # fields=list 瘦身模式附带：最新版本号与平台版本数（列表页展示用）
     version_no: int | None = None
     variant_count: int | None = None

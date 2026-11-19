@@ -26,6 +26,7 @@ from .modules import (
     dashboard,
     handdraw,
     hot_topics,
+    image_styles,
     jobs,
     logs,
     models_module,
@@ -61,6 +62,8 @@ async def lifespan(app: FastAPI):
         handdraw_import.import_library(session)
         # 内置 Skill 在启动时同步；读接口不再承担写库/迁移职责
         skill_registry.sync_builtin_skills(session)
+        # 出厂配图风格：固化封面模板，Studio 的封面模板下拉开箱即用
+        image_styles.seed_factory_styles(session)
     publishing.sweep_legacy_platform_accounts()
     # 线程池后端没有独立 Worker：API 重启后自己回收崩溃遗留的 running 任务，
     # 并重投启动前创建、尚未开始的任务。Redis 后端由 Worker 负责，避免重复投递。
@@ -138,6 +141,7 @@ for module in (
     models_module,
     prompts,
     handdraw,
+    image_styles,
     assets,
     ai_images,
     ai_content,

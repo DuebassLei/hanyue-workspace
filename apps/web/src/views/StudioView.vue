@@ -23,7 +23,7 @@ import { markdownToHtml } from '../utils/markdownSerializer'
 import PublishDrawer from '../features/publish/PublishDrawer.vue'
 import DraftLibraryModal from '../features/studio/DraftLibraryModal.vue'
 import { providerOptions, resolveSelectedModelId } from '../composables/imageProviders.js'
-import { toast } from '../ui/feedback'
+import { confirm, toast } from '../ui/feedback'
 import { usePermission } from '../composables/usePermission'
 
 const route = useRoute()
@@ -120,7 +120,6 @@ const aiAutoImages = ref(false)
 const aiGenerateCover = ref(true)
 const aiCoverAspectRatio = ref('3:4')
 const aiInlineAspectRatio = ref('1:1')
-const aiPromptSuffix = ref('')
 const imagePreferencesLoaded = ref(false)
 const imagePreferencesLoading = ref(true)
 const imagePreferencesSaveStatus = ref('idle') // idle | saving | saved | error
@@ -140,18 +139,7 @@ const aiImagePreferences = computed(() => ({
   generateCover: aiGenerateCover.value,
   coverAspectRatio: aiCoverAspectRatio.value,
   inlineAspectRatio: aiInlineAspectRatio.value,
-  promptSuffix: aiPromptSuffix.value,
 }))
-
-function normalizeImagePromptSuffix(value) {
-  return String(value || '').trim().replace(/[\s,.;:，。；：、]+$/u, '')
-}
-
-function appendImagePromptSuffix(prompt) {
-  const base = String(prompt || '').trim()
-  const suffix = normalizeImagePromptSuffix(aiPromptSuffix.value)
-  return suffix ? `${base.replace(/[\s,.;:，。；：、]+$/u)}, ${suffix}` : base
-}
 
 function scheduleImagePreferencesSave() {
   if (hydratingImagePreferences || skipImagePreferencesSave || !imagePreferencesLoaded.value) return
@@ -187,7 +175,6 @@ async function loadImagePreferences() {
     aiGenerateCover.value = settings.generateCover !== false
     aiCoverAspectRatio.value = settings.coverAspectRatio || '3:4'
     aiInlineAspectRatio.value = settings.inlineAspectRatio || '1:1'
-    aiPromptSuffix.value = settings.promptSuffix || ''
     skipImagePreferencesSave = true
     imagePreferencesLoaded.value = true
     imagePreferencesSaveStatus.value = preferences.source === 'server' ? 'saved' : 'idle'
@@ -203,12 +190,190 @@ async function loadImagePreferences() {
 }
 
 watch(
-  [aiAutoImages, aiGenerateCover, aiCoverAspectRatio, aiInlineAspectRatio, aiPromptSuffix],
+  [aiAutoImages, aiGenerateCover, aiCoverAspectRatio, aiInlineAspectRatio],
   scheduleImagePreferencesSave,
 )
 watch(aiAutoImages, (enabled) => {
   if (enabled) loadImageProviderStatus()
 })
+
+const baseStyles = ref([])
+const baseStylesLoaded = ref(false)
+const coverStyles = ref([])
+const inlineStyles = ref([])
+const styleLocking = ref(false)
+const sceneDrafts = ref([])
+const sceneSubmitting = ref(false)
+
+const baseStylePrompt = computed(() => (detail.value?.item.baseStylePrompt || '').trim())
+const baseStyleLocked = computed(() => Boolean(baseStylePrompt.value))
+const baseStyleHint = computed(() => (
+  baseStylesLoaded.value && !baseStyles.value.length
+    ? '还没有可用风格，请管理员到风格库添加'
+    : '先选一个基础风格'
+))
+const baseStyleSelectValue = computed(() => {
+  const item = detail.value?.item
+  if (!item) return null
+  if (item.baseStyleDeleted) return '__deleted__'
+  return item.baseStyleId || null
+})
+const baseStyleOptions = computed(() => {
+  const item = detail.value?.item
+  const options = baseStyles.value.map((style) => ({
+    value: style.id,
+    label: style.summary ? `${style.name} · ${style.summary}` : style.name,
+  }))
+  if (item?.baseStyleDeleted) {
+    options.unshift({
+      value: '__deleted__',
+      label: `${item.baseStyleName || '基础风格'}（已删除）`,
+      disabled: true,
+    })
+  }
+  return options
+})
+
+function composeImagePrompt(scene) {
+  const description = String(scene || '').trim()
+  const style = baseStylePrompt.value
+  if (!style) return description
+  return description ? `${style}, ${description}` : style
+}
+
+async function loadStyles(purpose) {
+  try {
+    return await api.get(`/image-styles?purpose=${purpose}`)
+  } catch (err) {
+    imgError.value = err.message
+    return []
+  }
+}
+
+async function loadBaseStyles() {
+  baseStyles.value = await loadStyles('base')
+  baseStylesLoaded.value = true
+}
+
+async function loadCoverStyles() {
+  if (coverStyles.value.length) return
+  coverStyles.value = await loadStyles('cover')
+}
+
+async function loadInlineStyles() {
+  if (inlineStyles.value.length) return
+  inlineStyles.value = await loadStyles('inline')
+}
+
+function captureSceneDrafts(rawOutput) {
+  const prompts = parseArticleOutput(rawOutput)
+  if (!prompts) {
+    sceneDrafts.value = []
+    return
+  }
+  const rows = []
+  if (prompts.coverPrompt) {
+    rows.push({ key: 'cover', label: '封面', purpose: 'cover', scene: prompts.coverPrompt })
+  }
+  prompts.inlinePrompts.forEach((scene, index) => {
+    rows.push({
+      key: `inline-${index + 1}`,
+      label: `插图 ${index + 1}`,
+      purpose: 'inline',
+      scene,
+      inlineIndex: index + 1,
+      inlineTotal: prompts.inlinePrompts.length,
+      articleMarkdown: prompts.markdown,
+    })
+  })
+  sceneDrafts.value = rows
+}
+
+function applyCoverTemplate(id) {
+  const style = coverStyles.value.find((item) => item.id === id)
+  const row = sceneDrafts.value.find((item) => item.purpose === 'cover')
+  if (style && row) row.scene = style.prompt
+}
+
+function applyInlineTemplate(id) {
+  const style = inlineStyles.value.find((item) => item.id === id)
+  if (style) imgPrompt.value = style.prompt
+}
+
+async function changeBaseStyle(styleId) {
+  const item = detail.value?.item
+  if (!item || styleLocking.value) return
+  if (styleId === '__deleted__' || styleId === item.baseStyleId) return
+  const hasResults = imgResults.value.length > 0 || imgJobs.value.some((job) => job.status === 'succeeded')
+  if (hasResults) {
+    const ok = await confirm('已生成的图片不会变化', '更换基础风格')
+    if (!ok) return
+  }
+  styleLocking.value = true
+  try {
+    const updated = await api.patch(`/content/${item.id}/image-style`, { styleId: styleId || null })
+    if (detail.value?.item.id === item.id) detail.value = { ...detail.value, item: updated }
+  } catch (err) {
+    imgError.value = err.message
+    toast(err.message, 'error')
+  } finally {
+    styleLocking.value = false
+  }
+}
+
+async function submitSceneDrafts() {
+  const item = detail.value?.item
+  if (!item) return
+  if (!baseStyleLocked.value) {
+    toast(baseStyleHint.value)
+    return
+  }
+  const rows = sceneDrafts.value.filter((row) => row.scene.trim())
+  if (!rows.length) {
+    toast('请至少保留一条画面描述')
+    return
+  }
+  sceneSubmitting.value = true
+  imgError.value = ''
+  const contentItemId = item.id
+  try {
+    const results = await Promise.allSettled(rows.map(async (row) => {
+      const prompt = composeImagePrompt(row.scene)
+      const response = await api.post('/ai/image-generations', {
+        prompt,
+        purpose: row.purpose,
+        aspectRatio: row.purpose === 'cover' ? aiCoverAspectRatio.value : aiInlineAspectRatio.value,
+        count: 1,
+        modelId: imgModelId.value || null,
+      })
+      return {
+        id: response.jobId,
+        status: 'queued',
+        prompt,
+        scenePrompt: row.scene.trim(),
+        aspectRatio: row.purpose === 'cover' ? aiCoverAspectRatio.value : aiInlineAspectRatio.value,
+        label: row.label,
+        purpose: row.purpose,
+        inlineIndex: row.inlineIndex,
+        inlineTotal: row.inlineTotal,
+        articleMarkdown: row.articleMarkdown,
+        contentItemId,
+      }
+    }))
+    for (const result of results) {
+      if (result.status === 'fulfilled') imgJobs.value.unshift(result.value)
+      else imgError.value = result.reason?.message || '配图任务创建失败'
+    }
+    const ok = results.filter((result) => result.status === 'fulfilled').length
+    if (ok) {
+      toast(`${ok} 个配图任务已开始，完成后自动插入正文`)
+      startImgPoll()
+    }
+  } finally {
+    sceneSubmitting.value = false
+  }
+}
+
 const writingStyles = ref([])
 const writingStylesLoading = ref(false)
 const writingStyleKey = ref('article-drafting')
@@ -517,6 +682,8 @@ async function openItem(id) {
     })
   }
   if (route.query.id !== id) router.replace({ name: 'studio', query: { id } })
+  sceneDrafts.value = []
+  loadBaseStyles()
 }
 
 async function createItem() {
@@ -606,6 +773,10 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
     toast('文章已生成，但未提取到配图提示词')
     return
   }
+  if (!baseStylePrompt.value) {
+    toast(baseStyleHint.value)
+    return
+  }
   const settings = {
     coverAspectRatio: aiCoverAspectRatio.value,
     inlineAspectRatio: aiInlineAspectRatio.value,
@@ -613,10 +784,10 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
   }
   const requests = [
     settings.generateCover && prompts.coverPrompt
-      ? { prompt: prompts.coverPrompt, purpose: 'cover', label: '封面图', aspectRatio: settings.coverAspectRatio }
+      ? { scene: prompts.coverPrompt, purpose: 'cover', label: '封面图', aspectRatio: settings.coverAspectRatio }
       : null,
     ...prompts.inlinePrompts.map((prompt, index) => ({
-      prompt,
+      scene: prompt,
       purpose: 'inline',
       label: `正文插图 ${index + 1}`,
       aspectRatio: settings.inlineAspectRatio,
@@ -627,7 +798,7 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
     })),
   ].filter(Boolean)
   const results = await Promise.allSettled(requests.map(async (request) => {
-    const prompt = appendImagePromptSuffix(request.prompt)
+    const prompt = composeImagePrompt(request.scene)
     const response = await api.post('/ai/image-generations', {
       prompt,
       purpose: request.purpose,
@@ -639,6 +810,7 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
       id: response.jobId,
       status: 'queued',
       prompt,
+      scenePrompt: request.scene,
       aspectRatio: request.aspectRatio,
       label: request.label,
       purpose: request.purpose,
@@ -710,6 +882,9 @@ function runAi() {
         if (generationItemId && detail.value?.item.id === generationItemId) {
           const refreshed = await api.get(`/content/${generationItemId}`)
           detail.value = refreshed
+          if (aiTask.value === 'article' && generationSaved && !aiError.value) {
+            captureSceneDrafts(aiOutput.value)
+          }
           if (autoGenerateImages && generationSaved && !aiError.value) {
             void startAutoImageGeneration(aiOutput.value, generationItemId)
           }
@@ -918,7 +1093,7 @@ const imgResults = ref([]) // [{assetId, blobUrl, rawUrl, mime, jobId}]
 
 async function openImageTab() {
   rightTab.value = 'image'
-  await loadImageProviderStatus()
+  await Promise.all([loadImageProviderStatus(), loadInlineStyles(), loadBaseStyles()])
 }
 
 /** 从当前文章标题 + 正文前 300 字提炼图像 prompt（调用 SSE 流） */
@@ -971,11 +1146,17 @@ async function generateImages() {
     imgError.value = '请填写图像描述'
     return
   }
+  if (!baseStyleLocked.value) {
+    imgError.value = baseStyleHint.value
+    return
+  }
+  const scene = imgPrompt.value.trim()
   imgBusy.value = true
   imgError.value = ''
   try {
+    const prompt = composeImagePrompt(scene)
     const res = await api.post('/ai/image-generations', {
-      prompt: imgPrompt.value.trim(),
+      prompt,
       aspectRatio: imgAspectRatio.value,
       count: Number(imgCount.value),
       modelId: imgModelId.value || null,
@@ -983,7 +1164,8 @@ async function generateImages() {
     imgJobs.value.unshift({
       id: res.jobId,
       status: 'queued',
-      prompt: imgPrompt.value.trim(),
+      prompt,
+      scenePrompt: scene,
       aspectRatio: imgAspectRatio.value,
       count: Number(imgCount.value),
       label: '手动配图',
@@ -997,18 +1179,25 @@ async function generateImages() {
 }
 
 async function retryImageJob(job) {
-  if (!job.prompt || job.status !== 'failed') return
+  const scene = (job.scenePrompt || '').trim()
+  if (!scene || job.status !== 'failed') return
+  if (!baseStyleLocked.value) {
+    job.error = baseStyleHint.value
+    return
+  }
   job.status = 'retrying'
   job.error = ''
   try {
+    const prompt = composeImagePrompt(scene)
     const response = await api.post('/ai/image-generations', {
-      prompt: job.prompt,
+      prompt,
       purpose: job.purpose || 'cover',
       aspectRatio: job.aspectRatio || (job.purpose === 'cover' ? '3:4' : '1:1'),
       count: job.count || 1,
       modelId: imgModelId.value || null,
     })
     job.id = response.jobId
+    job.prompt = prompt
     job.status = 'queued'
     startImgPoll()
   } catch (err) {
@@ -1643,6 +1832,33 @@ onBeforeUnmount(() => {
                 <small>成文完成后自动生成封面图和正文插图</small>
               </span>
             </n-checkbox>
+            <section class="ai-image-settings" aria-label="基础风格与配图">
+              <div class="field">
+                <label class="field-label">基础风格</label>
+                <n-select
+                  :value="baseStyleSelectValue"
+                  :options="baseStyleOptions"
+                  :loading="styleLocking || !baseStylesLoaded"
+                  :disabled="!detail || styleLocking"
+                  placeholder="选择这篇稿的基础风格"
+                  aria-label="选择这篇稿的基础风格"
+                  @update:value="changeBaseStyle"
+                />
+                <p v-if="!baseStyleLocked" class="ai-image-settings-error">{{ baseStyleHint }}</p>
+                <p v-else class="ai-image-settings-status">已锁定在这篇稿上，之后新生成的图会带上这个风格。</p>
+              </div>
+              <div class="field">
+                <label class="field-label">封面模板</label>
+                <n-select
+                  :options="coverStyles.map((style) => ({ value: style.id, label: style.name }))"
+                  :disabled="!coverStyles.length"
+                  placeholder="选一个封面模板填入画面描述"
+                  aria-label="选择封面模板"
+                  @update:show="(open) => open && loadCoverStyles()"
+                  @update:value="applyCoverTemplate"
+                />
+              </div>
+            </section>
             <section v-if="aiAutoImages" class="ai-image-settings" aria-label="自动配图设置">
               <div class="field">
                 <label class="field-label">生图模型</label>
@@ -1669,16 +1885,6 @@ onBeforeUnmount(() => {
               <n-checkbox v-model:checked="aiGenerateCover" :disabled="aiRunning">
                 同时生成封面图
               </n-checkbox>
-              <div class="field">
-                <label class="field-label" for="ai-image-prompt-suffix">统一风格后缀</label>
-                <n-input
-                  id="ai-image-prompt-suffix"
-                  v-model:value="aiPromptSuffix"
-                  maxlength="200"
-                  show-count
-                  placeholder="例如：editorial illustration, clean composition"
-                />
-              </div>
               <p v-if="!imgProvider.available && imgProviderLoaded" class="ai-image-settings-error">
                 当前未配置生图供应商，文章仍可生成，但自动配图任务会失败。
               </p>
@@ -1699,6 +1905,27 @@ onBeforeUnmount(() => {
               </n-button>
             </n-space>
             <n-alert v-if="aiPromptError" type="error" :bordered="false">{{ aiPromptError }}</n-alert>
+            <section v-if="sceneDrafts.length" class="ai-image-settings" aria-label="手动配图">
+              <span class="studio-section-label studio-section-label-flush">画面描述</span>
+              <p class="ai-image-settings-status">只含画面，不含基础风格。改完再按此生成。</p>
+              <div v-for="row in sceneDrafts" :key="row.key" class="field">
+                <label class="field-label">{{ row.label }}</label>
+                <n-input
+                  v-model:value="row.scene"
+                  type="textarea"
+                  :autosize="{ minRows: 2, maxRows: 6 }"
+                  placeholder="画面描述"
+                />
+              </div>
+              <n-button
+                size="small"
+                type="primary"
+                :loading="sceneSubmitting"
+                :disabled="!baseStyleLocked || sceneSubmitting"
+                @click="submitSceneDrafts"
+              >按此生成</n-button>
+              <p v-if="!baseStyleLocked" class="ai-image-settings-error">{{ baseStyleHint }}</p>
+            </section>
           </div>
         </section>
 
@@ -1818,6 +2045,16 @@ onBeforeUnmount(() => {
 
           <div class="studio-tool-stack">
             <div class="field">
+              <label class="field-label">基础风格</label>
+              <p class="ai-image-settings-status">
+                {{ detail?.item.baseStyleDeleted
+                  ? `${detail.item.baseStyleName || '基础风格'}（已删除）`
+                  : (detail?.item.baseStyleName || '这篇稿还没有基础风格') }}
+              </p>
+              <n-button quaternary size="tiny" @click="rightTab = 'ai'">到 AI 面板修改</n-button>
+              <p v-if="!baseStyleLocked" class="ai-image-settings-error">{{ baseStyleHint }}</p>
+            </div>
+            <div class="field">
               <label class="field-label">生图模型</label>
               <n-select
                 v-model:value="imgModelId"
@@ -1842,6 +2079,14 @@ onBeforeUnmount(() => {
                   @click="suggestImagePrompt"
                 >✦ 从正文提炼</n-button>
               </div>
+              <n-select
+                :options="inlineStyles.map((style) => ({ value: style.id, label: style.name }))"
+                :disabled="!inlineStyles.length"
+                placeholder="配图模板（选中后填入下方描述）"
+                aria-label="选择配图模板"
+                style="margin-bottom: var(--space-2)"
+                @update:value="applyInlineTemplate"
+              />
               <n-input
                 id="img-prompt"
                 v-model:value="imgPrompt"
@@ -1878,7 +2123,7 @@ onBeforeUnmount(() => {
                 size="small"
                 type="primary"
                 :loading="imgBusy && imgJobs.some(j => ['queued','running'].includes(j.status))"
-                :disabled="imgBusy || !imgPrompt.trim()"
+                :disabled="imgBusy || !imgPrompt.trim() || !baseStyleLocked"
                 @click="generateImages"
               >
                 生成配图

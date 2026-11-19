@@ -37,6 +37,7 @@ const routes = [
   },
   { path: '/models', name: 'models', component: () => import('./views/ModelsView.vue'), meta: { title: '模型管理', icon: '◎', permission: 'models.view' } },
   { path: '/logs', name: 'logs', component: () => import('./views/LogsView.vue'), meta: { title: '系统日志', icon: '≡', permission: 'logs.view' } },
+  { path: '/image-styles', name: 'image-styles', component: () => import('./views/ImageStylesView.vue'), meta: { title: '风格库', icon: '✧', permission: 'image_styles.manage' } },
   {
     path: '/users',
     name: 'users',

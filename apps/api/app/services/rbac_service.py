@@ -94,6 +94,7 @@ MENU_SEED: tuple[tuple[str, str, str, str, str | None, tuple], ...] = (
         (
             ("models", "模型管理", "模型", "models", "models.view"),
             ("logs", "系统日志", "日志", "logs", "logs.view"),
+            ("image-styles", "风格库", "风格", "image-styles", "image_styles.manage"),
             ("settings", "设置", "我的", "settings", "settings.view"),
         ),
     ),
