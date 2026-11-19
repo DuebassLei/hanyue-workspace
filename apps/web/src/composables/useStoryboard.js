@@ -9,6 +9,8 @@ export function useStoryboard() {
 
   const projects = ref([])
   const project = ref(null)
+  const stylePresets = ref([])
+  const stylePresetsLoading = ref(false)
   const selectedSceneId = ref('')
   const selectedShotId = ref('')
   const loading = ref(false)
@@ -32,6 +34,22 @@ export function useStoryboard() {
 
   async function loadProjects() {
     projects.value = await api.get('/storyboards')
+  }
+
+  /** 统一风格预设（与提示词库共用注册表），只拉适用于漫画分镜的项。 */
+  async function loadStylePresets() {
+    if (stylePresets.value.length) return stylePresets.value
+    stylePresetsLoading.value = true
+    try {
+      stylePresets.value = await api.get('/style-presets?applicableTo=comic_panel')
+      return stylePresets.value
+    } finally {
+      stylePresetsLoading.value = false
+    }
+  }
+
+  async function saveStyleConfig(styleConfig) {
+    return patchProject({ styleConfig })
   }
 
   async function deleteProject(projectId) {
@@ -177,7 +195,9 @@ export function useStoryboard() {
 
   return {
     projects, project, scenes, selectedScene, shots, selectedShot, selectedSceneId, selectedShotId,
-    loading, saving, error, loadProjects, loadProject, createProject, patchProject, deleteProject,
+    loading, saving, error, stylePresets, stylePresetsLoading,
+    loadProjects, loadProject, loadStylePresets, saveStyleConfig,
+    createProject, patchProject, deleteProject,
     deletePermanently, restore, createScene, patchScene, deleteScene, createShot, patchShot, deleteShot, reorderShots, replaceShot,
     selectScene, selectShot, refresh, breakDownProject, breakDownScene, saveAssets,
   }
