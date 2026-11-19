@@ -204,6 +204,24 @@ CREATE TABLE IF NOT EXISTS platform_sync_jobs (
 	PRIMARY KEY (id)
 );
 
+-- prompt_rules
+CREATE TABLE IF NOT EXISTS prompt_rules (
+	id VARCHAR(32) NOT NULL, 
+	key VARCHAR(64) NOT NULL, 
+	category VARCHAR(24) NOT NULL, 
+	title VARCHAR(120) NOT NULL, 
+	description TEXT NOT NULL, 
+	content TEXT NOT NULL, 
+	payload JSON NOT NULL, 
+	enabled BOOLEAN DEFAULT 'true' NOT NULL, 
+	source VARCHAR(16) DEFAULT 'factory' NOT NULL, 
+	version INTEGER DEFAULT '1' NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_prompt_rules_category CHECK (category IN ('contract','system','outline','repair','tone_lexicon','workflow_note'))
+);
+
 -- revoked_tokens
 CREATE TABLE IF NOT EXISTS revoked_tokens (
 	jti VARCHAR(64) NOT NULL, 
@@ -245,7 +263,25 @@ CREATE TABLE IF NOT EXISTS skill_registry_entries (
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
-	CONSTRAINT uq_skill_owner_key UNIQUE (skill_key, owner_user_id)
+	CONSTRAINT uq_skill_owner_key_plain UNIQUE (skill_key, owner_user_id)
+);
+
+-- skill_writing_rules
+CREATE TABLE IF NOT EXISTS skill_writing_rules (
+	id VARCHAR(32) NOT NULL, 
+	skill_key VARCHAR(120) NOT NULL, 
+	owner_user_id VARCHAR(32), 
+	rule_type VARCHAR(24) NOT NULL, 
+	rule_key VARCHAR(64) NOT NULL, 
+	payload JSON NOT NULL, 
+	sort_order INTEGER DEFAULT '0' NOT NULL, 
+	enabled BOOLEAN DEFAULT 'true' NOT NULL, 
+	source VARCHAR(16) DEFAULT 'user' NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_swr_rule UNIQUE (skill_key, owner_user_id, rule_type, rule_key), 
+	CONSTRAINT ck_swr_type CHECK (rule_type IN ('tone','style_rule','prompt_template','theme','target_length','workflow_step','review_rule','fact_policy','image_policy','repair_policy','exemplar'))
 );
 
 -- users
@@ -1174,6 +1210,9 @@ CREATE INDEX IF NOT EXISTS ix_platform_access_tokens_platform ON platform_access
 -- platform_sync_jobs.ix_platform_sync_jobs_connected_account_id
 CREATE INDEX IF NOT EXISTS ix_platform_sync_jobs_connected_account_id ON platform_sync_jobs (connected_account_id);
 
+-- prompt_rules.ix_prompt_rules_key
+CREATE UNIQUE INDEX IF NOT EXISTS ix_prompt_rules_key ON prompt_rules (key);
+
 -- revoked_tokens.ix_revoked_tokens_expires_at
 CREATE INDEX IF NOT EXISTS ix_revoked_tokens_expires_at ON revoked_tokens (expires_at);
 
@@ -1191,6 +1230,15 @@ CREATE INDEX IF NOT EXISTS ix_skill_registry_entries_owner_user_id ON skill_regi
 
 -- skill_registry_entries.ix_skill_registry_entries_skill_key
 CREATE INDEX IF NOT EXISTS ix_skill_registry_entries_skill_key ON skill_registry_entries (skill_key);
+
+-- skill_writing_rules.ix_skill_writing_rules_owner_user_id
+CREATE INDEX IF NOT EXISTS ix_skill_writing_rules_owner_user_id ON skill_writing_rules (owner_user_id);
+
+-- skill_writing_rules.ix_skill_writing_rules_skill_key
+CREATE INDEX IF NOT EXISTS ix_skill_writing_rules_skill_key ON skill_writing_rules (skill_key);
+
+-- skill_writing_rules.ix_swr_lookup
+CREATE INDEX IF NOT EXISTS ix_swr_lookup ON skill_writing_rules (skill_key, owner_user_id, rule_type, sort_order);
 
 -- users.ix_users_auth_subject
 CREATE UNIQUE INDEX IF NOT EXISTS ix_users_auth_subject ON users (auth_subject);
@@ -1514,7 +1562,9 @@ CREATE INDEX IF NOT EXISTS ix_sched_runs_status ON scheduled_task_runs (status);
 
 -- ---------- 特殊唯一索引（来自 db.py._apply_additive_migrations） ----------
 
--- uq_skill_owner_key：模型已声明同名唯一约束（skipped，避免命名空间冲突；与应用 init_db 行为一致）。
+-- skill_registry_entries：同一 (skill_key, owner) 只允许一条；
+--   用 COALESCE 让 owner 为 NULL 的内置 Skill 也参与唯一性判断。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_owner_key ON skill_registry_entries (skill_key, (COALESCE(owner_user_id, '')));
 
 -- users：邮箱大小写不敏感唯一；NULL（历史开发态账号）不参与唯一性。
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email ON users (lower(email)) WHERE email IS NOT NULL;
