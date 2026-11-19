@@ -28,6 +28,10 @@ MAX_REVIEW_RULE_VALUE = 200
 MAX_FACT_INSTRUCTIONS = 10
 MAX_FACT_INSTRUCTION_LENGTH = 300
 MAX_IMAGE_PROMPT_SUFFIX = 200
+# 范例（few-shot）：给模型看「开头怎么写」的样稿，宁少勿多，太长会挤占正文预算
+MAX_EXEMPLARS = 3
+MAX_EXEMPLAR_TITLE = 60
+MAX_EXEMPLAR_EXCERPT = 600
 IMAGE_ASPECT_RATIOS = ("1:1", "3:4", "4:3", "16:9", "9:16")
 REVIEW_KINDS = ("contains", "not_contains", "min_chars", "max_chars")
 REVIEW_FIELDS = ("markdown", "title", "summary")
@@ -104,12 +108,36 @@ class ImagePolicy(BaseModel):
 
 
 class RepairPolicy(BaseModel):
-    """本批只做校验与存储，不接入模型重试。"""
+    """退回修复策略：审核不过时是否重试、是否要求补齐输出契约。
+
+    当前只做校验与存储（含规则表合成）；生成侧接入见文章质量计划的任务链路。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     retries: int = Field(default=0, ge=0, le=1)
     requireContract: bool = False
+
+
+class Exemplar(BaseModel):
+    """开头范例：标题 + 正文开头摘录。excerpt 可空（只有标题也足以定调）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=MAX_EXEMPLAR_TITLE)
+    excerpt: str = Field(default="", max_length=MAX_EXEMPLAR_EXCERPT)
+
+    @field_validator("title", "excerpt")
+    @classmethod
+    def _trim(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("title")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        if not value:
+            raise ValueError("范例标题不能为空")
+        return value
 
 
 class SkillManifest(BaseModel):
@@ -119,15 +147,17 @@ class SkillManifest(BaseModel):
     tone: str | None = Field(default=None, max_length=MAX_TONE)
     styleRules: list[str] | None = None
     defaultTheme: str | None = None
+    targetLength: int | None = Field(default=None, ge=100, le=5000)
     input: dict | None = None
     output: dict | None = None
     riskLevel: str | None = None
-    # 以下五个策略字段可选：不写即 None，落库时被 exclude_none 去掉，checksum 与旧数据一致。
+    # 以下策略/列表字段可选：不写即 None，落库时被 exclude_none 去掉，checksum 与旧数据一致。
     workflow: list[WorkflowStep] | None = Field(default=None, max_length=MAX_WORKFLOW_STEPS)
     reviewRules: list[ReviewRule] | None = Field(default=None, max_length=MAX_REVIEW_RULES)
     factPolicy: FactPolicy | None = None
     imagePolicy: ImagePolicy | None = None
     repairPolicy: RepairPolicy | None = None
+    exemplars: list[Exemplar] | None = Field(default=None, max_length=MAX_EXEMPLARS)
 
     @field_validator("reviewRules")
     @classmethod

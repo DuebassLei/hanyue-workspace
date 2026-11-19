@@ -130,6 +130,7 @@ MENU_SEED: tuple[MenuSeed, ...] = (
         (
             _page("models", "模型管理", "模型", "models", "models.view"),
             _page("logs", "系统日志", "日志", "logs", "logs.view"),
+            _page("writing-rules", "创作规则", "规则", "settings", "writing_rules.use"),
             _page("settings", "设置", "我的", "settings", "settings.view"),
         ),
     ),

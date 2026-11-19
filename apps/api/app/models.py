@@ -462,9 +462,11 @@ class AgentProviderConnection(Base, TimestampMixin):
 
 class SkillRegistryEntry(Base, TimestampMixin):
     __tablename__ = "skill_registry_entries"
-    # 新建库由该约束兜底；已有库由 core/db.py 的表达式唯一索引兜住内置行（owner 为 NULL）
+    # 新库由该约束保证 (skill_key, owner) 唯一；老库由 core/db.py 的表达式唯一索引
+    # `uq_skill_owner_key` 兜住内置行（owner 为 NULL）。两者在 SQLite 与 PG 共用同一套
+    # 索引名，同名会冲突，所以模型约束改用 _plain；db.py 仍是 NULL owner 口径的唯一来源。
     __table_args__ = (
-        UniqueConstraint("skill_key", "owner_user_id", name="uq_skill_owner_key"),
+        UniqueConstraint("skill_key", "owner_user_id", name="uq_skill_owner_key_plain"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
@@ -480,6 +482,64 @@ class SkillRegistryEntry(Base, TimestampMixin):
     trust_status: Mapped[str] = mapped_column(String(24), default="trusted")
     allowed_tool_ids: Mapped[list] = mapped_column(JSON, default=list)
     risk_level: Mapped[str] = mapped_column(String(24), default="read_only")
+
+
+class SkillWritingRule(Base, TimestampMixin):
+    """Skill 的写作规则：一行一条，type+key 唯一。
+
+    owner_user_id 为空 = 全局规则（内置 / 管理员维护）；非空 = 该用户的个人副本。
+    manifest 里不再保存规则型 key，运行时由 skill_registry.compose_manifest 合成。
+    """
+
+    __tablename__ = "skill_writing_rules"
+    __table_args__ = (
+        UniqueConstraint("skill_key", "owner_user_id", "rule_type", "rule_key", name="uq_swr_rule"),
+        CheckConstraint(
+            "rule_type IN ('tone','style_rule','prompt_template','theme','target_length',"
+            "'workflow_step','review_rule','fact_policy','image_policy','repair_policy','exemplar')",
+            name="ck_swr_type",
+        ),
+        Index("ix_swr_lookup", "skill_key", "owner_user_id", "rule_type", "sort_order"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 不指向 skill_registry_entries：规则可以先于条目存在（出厂导入、个人副本），
+    # 也可能在条目被删后残留，由维护页展示「孤儿规则」，不应被外键阻断。
+    skill_key: Mapped[str] = mapped_column(String(120), index=True)
+    owner_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    rule_type: Mapped[str] = mapped_column(String(24))
+    rule_key: Mapped[str] = mapped_column(String(64))
+    # 单行类（tone/prompt_template/theme/target_length 与三个策略块）：存对象；列表类条目：存单条对象
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # factory = 出厂初始化导入，可被「按出厂重建」覆盖；user = 界面创建
+    source: Mapped[str] = mapped_column(String(16), default="user", server_default="user")
+
+
+class PromptRule(Base, TimestampMixin):
+    """全局提示词与词表：一行一个 key，管理员维护。"""
+
+    __tablename__ = "prompt_rules"
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('contract','system','outline','repair','tone_lexicon','workflow_note')",
+            name="ck_prompt_rules_category",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # key 是 SQL 关键字，但作为列名合法（建表/反射都会被正确引号化）；读取一律走 services.prompt_rules
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    category: Mapped[str] = mapped_column(String(24))
+    title: Mapped[str] = mapped_column(String(120), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    # 词表/句式等结构化规则
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    source: Mapped[str] = mapped_column(String(16), default="factory", server_default="factory")
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class WorkspaceSkill(Base, TimestampMixin):
