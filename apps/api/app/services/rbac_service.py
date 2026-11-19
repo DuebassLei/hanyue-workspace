@@ -346,28 +346,49 @@ _MIGRATION_SETTING_KEY = "rbac.migrations"
 # 老库里的运营是旧矩阵发下来的，光靠补新权限点收不回来。
 MIGRATION_MODEL_READ_SPLIT = "2026-11.models-read-split"
 
+# 2026-11：风格库并入提示词库后，旧的 image-styles 菜单已废弃（路由已重定向到 /prompts）。
+# 菜单播种是「只增不减」，无法自动删除，故用一次性迁移清理老库的废弃菜单。
+# 只删这一批明确废弃的 key，不碰管理员自建菜单。
+MIGRATION_PRUNE_LEGACY_MENUS = "2026-11.prune-legacy-menus"
+_DEPRECATED_MENU_KEYS = ("image-styles",)
+
 
 def _run_migrations(db) -> None:
     setting = db.get(models.AppSetting, _MIGRATION_SETTING_KEY)
     done = set((setting.value or {}).get("done", [])) if setting else set()
-    if MIGRATION_MODEL_READ_SPLIT in done:
-        return
+    changed = False
 
-    operator_id = db.scalar(select(models.Role.id).where(models.Role.role_key == "operator"))
-    if operator_id:
-        db.execute(
-            delete(models.RolePermission).where(
-                models.RolePermission.role_id == operator_id,
-                models.RolePermission.permission_code == "models.manage",
+    # 迁移 1：运营权限收窄（保留原逻辑，改为独立判断以支持多个迁移并存）
+    if MIGRATION_MODEL_READ_SPLIT not in done:
+        operator_id = db.scalar(select(models.Role.id).where(models.Role.role_key == "operator"))
+        if operator_id:
+            db.execute(
+                delete(models.RolePermission).where(
+                    models.RolePermission.role_id == operator_id,
+                    models.RolePermission.permission_code == "models.manage",
+                )
             )
-        )
+        done.add(MIGRATION_MODEL_READ_SPLIT)
+        changed = True
 
-    done.add(MIGRATION_MODEL_READ_SPLIT)
-    if setting is None:
-        setting = models.AppSetting(key=_MIGRATION_SETTING_KEY, value={})
-        db.add(setting)
-    setting.value = {"done": sorted(done)}
-    db.flush()
+    # 迁移 2：清理已废弃的菜单（image-styles 等）。RoleMenu 为 ON DELETE CASCADE，
+    # 显式删除可跨 SQLite（测试库）与 PostgreSQL（运行库）兼容。
+    if MIGRATION_PRUNE_LEGACY_MENUS not in done:
+        legacy = db.scalars(
+            select(models.Menu).where(models.Menu.menu_key.in_(_DEPRECATED_MENU_KEYS))
+        ).all()
+        for menu in legacy:
+            db.execute(delete(models.RoleMenu).where(models.RoleMenu.menu_id == menu.id))
+            db.delete(menu)
+        done.add(MIGRATION_PRUNE_LEGACY_MENUS)
+        changed = True
+
+    if changed:
+        if setting is None:
+            setting = models.AppSetting(key=_MIGRATION_SETTING_KEY, value={})
+            db.add(setting)
+        setting.value = {"done": sorted(done)}
+        db.flush()
 
 
 def seed(db) -> None:

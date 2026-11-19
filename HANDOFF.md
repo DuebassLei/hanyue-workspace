@@ -212,9 +212,12 @@ notes（`GET /hot-topics/degraded` 以 `{"dim": "source", "reason": ...}` 输出
 - `ui/nav.js`：workspace 组 studio 之后加 `articles`；system 组移除 `image-styles`（风格库并入提示词库）。
 - `rbac_service.py:MENU_SEED`：workspace 组加 `("articles", "文章管理", "文章", "articles", "studio.use")`，system 组删 `image-styles` 条目。
 
-**需要 Lead 在菜单管理页补/删（已初始化 DB 不会自动删旧菜单）**：
-1. 在「工作区」分组下新增子菜单：key=`articles`、label=`文章管理`、short=`文章`、path=`/articles`、icon=`articles`、permission=`studio.use`、kind=`page`、visible=`true`、sort 紧跟 studio。
-2. 删除旧「风格库」菜单（key=`image-styles`）。新库 `create_all` + `_seed_menus` 已自动处理这两项；已有库需手工操作。
+**菜单迁移（已自动化，无需手工）**：
+- 原待办「已有库手工补 articles 菜单 / 删 image-styles 菜单」已自动化：
+  1. **补 articles**：`MENU_SEED` 已含该项，`_seed_menus` 每次启动自动补建并绑定全部角色（补建逻辑本就在）。
+  2. **删 image-styles**：因播种是「只增不减」，改用一次性迁移 `MIGRATION_PRUNE_LEGACY_MENUS = "2026-11.prune-legacy-menus"`（`rbac_service._run_migrations`），启动时自动删除废弃菜单及其角色绑定，标志位落 `app_settings.rbac.migrations` 只跑一次；管理员之后若重建同名菜单不会被再次误删。
+- 已对当前运行库（`127.0.0.1:5433/hanyue`）实际执行验证：articles 已建并绑定 4 个角色、image-styles 已清除。回归测试见 `test_legacy_menu_prune_and_articles_bootstrap`。
+- 新库无历史数据，此迁移为 no-op。
 
 ### 7.3 后端接口
 

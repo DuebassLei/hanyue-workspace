@@ -606,3 +606,91 @@ def test_models_read_split_migration_runs_only_once(client):
             )
         )
         db.commit()
+
+
+def test_legacy_menu_prune_and_articles_bootstrap(client):
+    """老库升级：删废弃的 image-styles 菜单 + 补 articles 菜单，且迁移只跑一次。
+
+    模拟已有库的状态（有 image-styles、无 articles、迁移标记未写），跑一次 seed：
+    - image-styles 被删、articles 被补上并绑定角色
+    - 管理员之后手工重建的 image-styles 不会被再次误删（只增不减）
+    """
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services import rbac_service
+
+    with SessionLocal() as db:
+        workspace = db.scalar(select(models.Menu).where(models.Menu.menu_key == "workspace"))
+        assert workspace is not None
+
+        # --- 伪造老库 ---
+        # 1) 移除 articles（若已被其它用例种下）
+        db.execute(delete(models.RoleMenu).where(
+            models.RoleMenu.menu_id.in_(
+                select(models.Menu.id).where(models.Menu.menu_key == "articles")
+            )
+        ))
+        db.execute(delete(models.Menu).where(models.Menu.menu_key == "articles"))
+        # 2) 重建废弃菜单 image-styles
+        legacy = db.scalar(select(models.Menu).where(models.Menu.menu_key == "image-styles"))
+        if legacy is None:
+            legacy = models.Menu(
+                parent_id=workspace.id,
+                menu_key="image-styles",
+                label="风格库",
+                short_label="风格",
+                icon="image-styles",
+                path=f"{workspace.path}/image-styles",
+                kind="page",
+                permission_code="image_styles.manage",
+                sort=999,
+            )
+            db.add(legacy)
+            db.flush()
+        # 给它绑一个角色，验证级联清理绑定
+        admin_role = db.scalar(select(models.Role).where(models.Role.role_key == "operator"))
+        db.execute(delete(models.RoleMenu).where(
+            models.RoleMenu.role_id == admin_role.id,
+            models.RoleMenu.menu_id == legacy.id,
+        ))
+        db.add(models.RoleMenu(role_id=admin_role.id, menu_id=legacy.id))
+        # 3) 抹掉菜单迁移标记，让本次 seed 认为这是一次老库升级
+        setting = db.get(models.AppSetting, rbac_service._MIGRATION_SETTING_KEY)
+        done = set((setting.value or {}).get("done", [])) if setting else set()
+        done.discard(rbac_service.MIGRATION_PRUNE_LEGACY_MENUS)
+        if setting is None:
+            setting = models.AppSetting(key=rbac_service._MIGRATION_SETTING_KEY, value={})
+            db.add(setting)
+        setting.value = {"done": sorted(done)}
+        db.commit()
+
+        # --- 第一次 seed：应删 image-styles、补 articles ---
+        rbac_service.seed(db)
+        db.commit()
+        assert db.scalar(select(models.Menu).where(models.Menu.menu_key == "image-styles")) is None
+        articles = db.scalar(select(models.Menu).where(models.Menu.menu_key == "articles"))
+        assert articles is not None
+        assert articles.parent_id == workspace.id
+        assert articles.path == f"{workspace.path}/articles"
+
+        # --- 管理员手工重建废弃菜单后再次 seed：不该被再次删除 ---
+        reborn = models.Menu(
+            parent_id=workspace.id,
+            menu_key="image-styles",
+            label="我的风格",
+            short_label="风格",
+            icon="image-styles",
+            path=f"{workspace.path}/image-styles",
+            kind="page",
+            permission_code="image_styles.manage",
+            sort=998,
+        )
+        db.add(reborn)
+        db.commit()
+        rbac_service.seed(db)
+        db.commit()
+        assert db.scalar(select(models.Menu).where(models.Menu.menu_key == "image-styles")) is not None
+
+        # 还原：删掉重建的菜单，不污染后续用例
+        db.delete(reborn)
+        db.commit()
