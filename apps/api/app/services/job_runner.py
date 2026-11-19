@@ -484,6 +484,17 @@ def _builtin_reference(number: str | None, model_code: str | None, room: int) ->
 
 def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
     payload = job.payload or {}
+    # 统一负向词/种子管道（地基契约 §7）：这里只读取并透传，不做业务拼装。
+    # 下游 generate_images 按供应商能力决定独立字段 / 文本兜底，并写回 merge_meta。
+    negative_prompt = payload.get("negativePrompt")
+    raw_seed = payload.get("seed")
+    merge_meta: dict = {}
+    try:
+        seed = int(raw_seed) if raw_seed is not None else None
+    except (TypeError, ValueError):
+        # payload 是边界数据：种子格式非法时忽略并如实标注，不让整次任务崩掉。
+        seed = None
+        merge_meta["seed_ignored"] = True
     prompt = payload.get("prompt") or ""
     # 贴图创作：风格句只在执行器里拼一次，模块层不再重复拼接。非贴纸任务无此键，行为零变化。
     sticker_style_id = payload.get("stickerStyleId")
@@ -544,6 +555,9 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             count=int(payload.get("count") or 1),
             model_id=model_id,
             reference_images=references or None,
+            negative_prompt=negative_prompt,
+            seed=seed,
+            merge_meta=merge_meta,
         )
     except image_provider.ImageProviderUnavailable as exc:
         # 供应商不支持 /images/edits（典型表现 404）时降级为纯文生图重试，
@@ -574,6 +588,9 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             count=int(payload.get("count") or 1),
             model_id=model_id,
             reference_images=None,
+            negative_prompt=negative_prompt,
+            seed=seed,
+            merge_meta=merge_meta,
         )
     asset_ids: list[str] = []
     for index, (raw, mime) in enumerate(images, start=1):
@@ -615,6 +632,12 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             if degraded_to_text
             else ""
         ),
+        # 统一负向词/种子管道：明示生效方式，避免「静默声称已生效」。
+        "negativePromptMerged": bool(merge_meta.get("negative_prompt_merged")),
+        "seedApplied": bool(merge_meta.get("seed_applied")),
+        "seedIgnored": bool(merge_meta.get("seed_ignored")),
+        # 分镜统一风格快照原样带入结果，供历史镜头追溯（不传则 None）。
+        "styleSnapshot": payload.get("styleSnapshot"),
     }
 
 
