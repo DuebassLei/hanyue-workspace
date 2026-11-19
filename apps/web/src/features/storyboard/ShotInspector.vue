@@ -30,6 +30,10 @@ let copyTimer
 const generationActive = computed(() => hasActiveGeneration(props.shot))
 const images = computed(() => shotImages(props.shot))
 const generatedPrompt = computed(() => props.shot?.finalPrompt || props.shot?.sketchPrompt || '')
+const activeStyleLabel = computed(() => {
+  const config = props.project?.styleConfig || {}
+  return config.styleName || (config.promptSuffix ? '自定义风格' : '')
+})
 const framePrompt = computed(() => draft.value.prompt || props.shot?.frameDescription || '')
 const assetOptions = computed(() => {
   const refs = props.project?.assets || {}
@@ -141,6 +145,7 @@ async function copy(kind) {
         <p class="field-hint">{{ imageModelHint }}</p>
       </div>
       <div v-if="error" class="inline-error">{{ error }}</div>
+      <p v-if="activeStyleLabel" class="field-hint">当前组级统一风格：{{ activeStyleLabel }}；新生成的镜头会套用此风格，已有镜头需重新生成才会变化。</p>
       <div v-if="generationActive" class="generation-status" role="status" aria-live="polite"><span class="generation-spinner" aria-hidden="true"></span><span>{{ props.shot.sketchStatus === 'queued' ? '草图排队中' : props.shot.finalStatus === 'queued' ? '正式图排队中' : props.shot.sketchStatus === 'generating' ? '草图绘制中' : '正式图绘制中' }}</span></div>
       <div class="generate-actions"><n-button type="primary" :loading="busy === 'sketch' || ['queued', 'generating'].includes(props.shot.sketchStatus)" :disabled="busy !== '' || generationActive || !imageModelOptions.length" @click="generate('sketch')">{{ props.shot.sketchStatus === 'queued' ? '草图排队中' : props.shot.sketchStatus === 'generating' ? '草图绘制中' : '生成草图' }}</n-button><n-button secondary :loading="busy === 'final' || ['queued', 'generating'].includes(props.shot.finalStatus)" :disabled="busy !== '' || generationActive || !props.shot.sketchAssetId || !imageModelOptions.length" @click="generate('final')">{{ props.shot.finalStatus === 'queued' ? '正式图排队中' : props.shot.finalStatus === 'generating' ? '正式图绘制中' : '生成正式候选' }}</n-button></div>
       <p class="field-hint">{{ props.shot.sketchStatus === 'failed' ? props.shot.sketchError : props.shot.finalStatus === 'failed' ? props.shot.finalError : '正式图会锁住草图构图，只提高完成度。' }}</p>

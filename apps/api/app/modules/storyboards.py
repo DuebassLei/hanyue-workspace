@@ -14,6 +14,7 @@ from ..core.config import get_settings
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.security import sign_asset_url
 from ..services.image_service import storage_path
+from ..services.style_presets import get_preset
 
 from ..core.rbac import require_permission
 
@@ -388,13 +389,52 @@ def _first_pictured(assets, refs: list[str], category: str) -> dict | None:
     return None
 
 
-def _storyboard_references(assets, shot, stage: str) -> list[tuple[str, dict | None]]:
-    """最多 4 张：在场角色图 ≤3，地点 ≤1，风格 ≤1。名额不够先丢风格再丢地点。
+def _style_context(style_config: dict | None) -> dict:
+    """把项目级 style_config 展开成入队用的统一风格上下文。
+
+    prompt_suffix / negative_prompt / reference_asset_id 优先用项目里存的快照值；
+    缺失时回退到统一风格注册表（按 style_id）。snapshot 把生效配置 + 展开信息
+    放在一起，供 payload.styleSnapshot 追溯当时用的风格。
+    """
+    config = style_config if isinstance(style_config, dict) else {}
+    style_id = str(config.get("style_id") or "").strip()
+    preset = get_preset(style_id) if style_id else None
+    suffix = str(config.get("prompt_suffix") or "").strip()
+    if not suffix and preset:
+        suffix = preset.prompt_suffix
+    negative = str(config.get("negative_prompt") or "").strip()
+    if not negative and preset:
+        negative = preset.negative_prompt
+    ref_id = config.get("reference_asset_id") or (preset.reference_asset_id if preset else None)
+    seed = config.get("seed")
+    snapshot = {
+        "styleId": style_id or None,
+        "styleName": preset.name if preset else (config.get("style_name") or None),
+        "promptSuffix": suffix,
+        "negativePrompt": negative,
+        "referenceAssetId": ref_id,
+        "seed": seed,
+    }
+    has_style = bool(style_id or suffix or negative or ref_id or seed is not None)
+    return {
+        "suffix": suffix, "negative": negative, "ref_id": ref_id, "seed": seed,
+        "snapshot": snapshot if has_style else None,
+    }
+
+
+def _storyboard_references(assets, shot, stage: str, style_config: dict | None = None) -> list[tuple[str, dict | None]]:
+    """最多 4 张：在场角色图 ≤3，地点 ≤1，风格 ≤1。名额不够先丢地点，风格最后丢。
 
     角色库条目带多张参考图时，按镜头景别/视角挑 1 张，绝不让一个人占满名额。
     正式图最后一张固定为已成功草图，因此角色+地点+风格先截到 3 张。
     草图阶段不带草图自己。请求体里的 reference_asset_ids 不并入。
+
+    项目级统一风格参考图（style_config.reference_asset_id）是常驻槽：先占位，
+    超额时优先牺牲地点、镜头里的风格资产，甚至多余角色，但尽量保留它。
     """
+    config = style_config if isinstance(style_config, dict) else {}
+    style_ref_id = config.get("reference_asset_id")
+    style_ref_name = str(config.get("style_name") or "统一风格")
     slots: list[tuple[str, dict | None]] = []
     for item in _present_characters(assets, shot):
         if len([row for row in slots if row[0] == "character"]) >= 3:
@@ -414,12 +454,36 @@ def _storyboard_references(assets, shot, stage: str) -> list[tuple[str, dict | N
     style = _first_pictured(assets, shot.asset_refs or [], "styles")
     if style:
         slots.append(("style", style))
+    # 项目级统一风格参考图：常驻槽，标记 pinned 以免在 trim 时被优先挤掉。
+    if style_ref_id:
+        slots.append(("style", {
+            "id": style_ref_id, "name": style_ref_name, "description": "",
+            "asset_id": style_ref_id, "_pinned": True,
+        }))
     cap = 3 if stage == "final" else 4
     while len(slots) > cap:
         kinds = [kind for kind, _ in slots]
-        drop = "style" if "style" in kinds else "location"
-        index = max(i for i, (kind, _) in enumerate(slots) if kind == drop)
-        slots.pop(index)
+        # 丢弃优先级：地点 → 角色 → 镜头风格资产 →（兜底）项目风格图。
+        # 「风格最后丢」：连多余角色都先让位，风格参考尽量保留。
+        if "location" in kinds:
+            drop_kind = "location"
+        elif "character" in kinds:
+            drop_kind = "character"
+        elif any(kind == "style" and not item.get("_pinned") for kind, item in slots):
+            drop_kind = "style"
+        elif "style" in kinds:
+            drop_kind = "style"
+        else:
+            break
+        candidates = [
+            i for i, (kind, item) in enumerate(slots)
+            if kind == drop_kind and not item.get("_pinned")
+        ]
+        if not candidates:
+            break
+        slots.pop(max(candidates))
+    # 清掉内部标记，避免泄漏进标签/快照。
+    slots = [(kind, {key: value for key, value in item.items() if key != "_pinned"}) for kind, item in slots]
     if stage == "final":
         slots.append(("sketch", None))
     return slots
@@ -517,6 +581,7 @@ def _project_out(db, project, *, scenes=True):
     return schemas.StoryboardProjectOut(
         id=project.id, workspace_id=project.workspace_id, title=project.title,
         deleted_at=project.deleted_at, summary=project.summary, assets=_resolved_assets(db, project), status=project.status,
+        style_config=project.style_config if isinstance(project.style_config, dict) else {},
         created_at=project.created_at, updated_at=project.updated_at, scenes=scene_out,
     )
 
@@ -564,6 +629,7 @@ def create_project(payload: schemas.StoryboardProjectCreate, user: CurrentUser, 
     row = models.StoryboardProject(
         owner_user_id=user.id, workspace_id=default_workspace(db, user).id,
         title=payload.title.strip(), summary=payload.summary, assets=stored,
+        style_config=payload.style_config or {},
     )
     db.add(row)
     db.commit()
@@ -795,7 +861,8 @@ def _queue_generation(db, user, shot, project, stage, payload):
     assets = _resolved_assets(db, project)
     _selected_assets(assets, shot.asset_refs or [])
     present = _present_characters(assets, shot)
-    slots = _storyboard_references(assets, shot, stage)
+    style = _style_context(project.style_config)
+    slots = _storyboard_references(assets, shot, stage, project.style_config)
     refs = [
         shot.sketch_asset_id if kind == "sketch" else _item_asset_id(item)
         for kind, item in slots
@@ -848,7 +915,10 @@ def _queue_generation(db, user, shot, project, stage, payload):
             "outfit, age and body. Do not redesign them. "
             + ", ".join(listed) + "."
         )
-    prompt = "\n".join(part for part in (subject, *labels, consistency) if part)
+    # 统一风格后缀置于 prompt 最前，作为整组镜头的画风锚点；其后依次是
+    # 画面主体、参考图标注、角色一致性句。风格来自项目 style_config，改风格后
+    # 新入队的镜头即应用新风格，历史镜头靠 payload 快照追溯旧风格。
+    prompt = "\n".join(part for part in (style["suffix"], subject, *labels, consistency) if part)
     # 生成时把实际用到的角色数据快照进 payload：之后改全局角色或删角色，
     # 历史镜头的「实际出图提示词」与当时用的参考图仍可追溯。
     pictured_assets = {
@@ -879,6 +949,11 @@ def _queue_generation(db, user, shot, project, stage, payload):
             "storyboardProjectId": project.id, "workspaceId": project.workspace_id,
             "generationStage": stage, "generationVersion": version,
             "characterSnapshot": character_snapshot,
+            # 统一风格：负向词/seed 由 job_runner 按供应商能力决定如何落地，
+            # styleSnapshot 原样透传进 job.result 供历史镜头追溯当时风格。
+            "negativePrompt": style["negative"] or None,
+            "seed": style["seed"],
+            "styleSnapshot": style["snapshot"],
         },
     )
     setattr(shot, f"{stage}_job_id", job_id)
