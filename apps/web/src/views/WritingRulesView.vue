@@ -134,7 +134,10 @@ function beforeUnload(event) {
   event.preventDefault()
   event.returnValue = ''
 }
-onMounted(() => window.addEventListener('beforeunload', beforeUnload))
+onMounted(() => {
+  loadSkills()
+  window.addEventListener('beforeunload', beforeUnload)
+})
 onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
 
 async function save() {
