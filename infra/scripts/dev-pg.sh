@@ -15,6 +15,7 @@
 #   ./scripts/dev-pg.sh url           只打印连接串
 #   ./scripts/dev-pg.sh bootstrap     up + 建表 + 创建首个账号
 #   ./scripts/dev-pg.sh init-sql      只重跑 postgres/init/01-init.sql（时区/扩展等）
+#   ./scripts/dev-pg.sh init-schema   用 postgres/schema.sql 建全部表/索引（纯 SQL，幂等）
 #   ./scripts/dev-pg.sh import-sqlite [文件]
 #                                     把旧 SQLite 数据搬进来（默认 apps/api/hanyue.db）
 #   ./scripts/dev-pg.sh write-env     把连接串写进 apps/api/.env 的 DATABASE_URL
@@ -359,6 +360,18 @@ cmd_init_sql() {
   run_init_sql
 }
 
+cmd_init_schema() {
+  need_bin
+  server_ready || die "连接不上 $HOST:$PORT，先 ./scripts/dev-pg.sh up"
+  local sql="$INFRA_DIR/postgres/schema.sql"
+  [ -f "$sql" ] || die "找不到 $sql —— 先在 apps/api 下运行：
+  .venv/Scripts/python.exe scripts/export_pg_schema.py -o ../../infra/postgres/schema.sql"
+  info "执行 postgres/schema.sql（从 SQLAlchemy 模型生成的完整建表脚本，幂等）"
+  psql_as "$PG_USER" "$PG_PASS" "$PG_DB" -q -f "$sql"
+  ok "建表完成（63 张表 + 索引；可用 ./scripts/dev-pg.sh status 核对）"
+  warn "schema.sql 只建表结构，不播种数据（角色/菜单/权限）。创建首个账号请用 bootstrap，或启动 API 由 lifespan 播种。"
+}
+
 cmd_bootstrap() {
   cmd_up
   need_python
@@ -427,6 +440,7 @@ main() {
     reset)         cmd_reset ;;
     url)           cmd_url ;;
     init-sql)      cmd_init_sql ;;
+    init-schema)   cmd_init_schema ;;
     bootstrap)     cmd_bootstrap ;;
     import-sqlite) cmd_import_sqlite "$@" ;;
     write-env)     cmd_write_env ;;

@@ -508,6 +508,21 @@ function Invoke-InitSqlOnly {
     Invoke-InitSql
 }
 
+function Invoke-InitSchema {
+    Initialize-PgBin
+    if (-not (Test-ServerReady)) { Fail "连接不上 $PgHost`:$Port，先 .\scripts\dev-pg.ps1 up" }
+    $sql = Join-Path $InfraDir 'postgres\schema.sql'
+    if (-not (Test-Path -LiteralPath $sql)) {
+        Fail "找不到 $sql —— 先在 apps\api 下运行：
+  .venv\Scripts\python.exe scripts\export_pg_schema.py -o ../../infra/postgres/schema.sql"
+    }
+    Write-Info '执行 postgres\schema.sql（从 SQLAlchemy 模型生成的完整建表脚本，幂等）'
+    $code = Invoke-PsqlInternal -AsUser $PgUser -Password $PgPass -Database $PgDb -PsqlArgs @('-q', '-f', $sql)
+    if ($code -ne 0) { Fail 'schema.sql 执行失败（见上面的 psql 报错）' }
+    Write-Ok '建表完成（63 张表 + 索引；可用 .\scripts\dev-pg.ps1 status 核对）'
+    Write-Warn2 'schema.sql 只建表结构，不播种数据（角色/菜单/权限）。创建首个账号请用 bootstrap，或启动 API 由 lifespan 播种。'
+}
+
 function Invoke-Bootstrap {
     Invoke-Up
     Initialize-Python
@@ -598,6 +613,7 @@ infra/scripts/dev-pg.ps1 —— 本机原生 PostgreSQL 管理（Windows PowerSh
   reset                删掉 infra\.pgdev 重建（二次确认，service 模式拒绝）
   url                  只打印连接串
   init-sql             只重跑 postgres\init\01-init.sql
+  init-schema          用 postgres\schema.sql 建全部表/索引（纯 SQL，幂等）
   bootstrap            up + 建表 + 创建首个账号
   import-sqlite [文件] 把旧 SQLite 数据搬进来（默认 apps\api\hanyue.db）
   write-env            把连接串写进 apps\api\.env 的 DATABASE_URL
@@ -626,6 +642,7 @@ switch ($Command.ToLower()) {
     'reset'         { Invoke-Reset }
     'url'           { Write-Host "DATABASE_URL=$DatabaseUrl" }
     'init-sql'      { Invoke-InitSqlOnly }
+    'init-schema'   { Invoke-InitSchema }
     'bootstrap'     { Invoke-Bootstrap }
     'import-sqlite' { Invoke-ImportSqlite }
     'write-env'     { Invoke-WriteEnv }

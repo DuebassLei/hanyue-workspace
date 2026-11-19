@@ -51,5 +51,8 @@ GRANT ALL PRIVILEGES ON DATABASE :"app_db" TO :"app_user";
 
 \echo '完成。应用连接串形如：'
 \echo '  postgresql+psycopg://<user>:<password>@127.0.0.1:5432/<db>'
-\echo '接着执行 infra/postgres/init/01-init.sql 可补齐时区与扩展设置（需连到该库）：'
-\echo '  psql -U <user> -d <db> -f init/01-init.sql'
+\echo '接着连到该库执行初始化 SQL（需连到该库）：'
+\echo '  psql -U <user> -d <db> -f init/01-init.sql          # 时区 / 语句超时 / pg_trgm'
+\echo '  psql -U <user> -d <db> -f schema.sql                # 完整建表（63 张表 + 索引，幂等）'
+\echo 'schema.sql 由 SQLAlchemy 模型生成，改模型后重新导出：'
+\echo '  cd apps/api && python scripts/export_pg_schema.py -o ../../infra/postgres/schema.sql'
