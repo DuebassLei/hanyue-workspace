@@ -1,0 +1,337 @@
+# 热榜采集源注册表（单一真相源）。
+#
+# 维护规则：
+# 1. 新增一个平台 = 这里加一条声明；采集主流程零改动。
+# 2. id 落库语义稳定，改名等于新平台；name 是展示名，也是 HOT_TOPICS_PLATFORMS 的过滤值。
+# 3. kind 决定 Adapter 模板：json→JsonAdapter，markdown/html→TextPatternAdapter，script→ScriptAdapter。
+#    adapter 写模板入口（模块:类）；parser 是该模板下的内置解析策略，对应 parsers._rows_*。
+# 4. 结构全新的 JSON 源：parser=direct 配 items_path/title_keys/hot_keys/url_keys 即可，0 行代码。
+#    实在特殊的写 ScriptAdapter 脚本（app/hot_sources/scripts/ 下），kind=script + adapter=模块:函数。
+# 5. 所有出站请求强制走 ssrf.safe_request（HTTPS/端口白名单/逐跳校验），requires_ssrf_safe 不可关闭。
+# 6. url_env 存在时其环境变量值覆盖 url；keyword_env 为空则该源跳过（不算失败）。
+# 7. allow_empty=true 表示「本来就可能没数据」，不标注 selector_may_changed。
+
+version: 1
+sources:
+  - id: toutiao
+    name: 今日头条
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: direct
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [social, general]
+    url: "https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc"
+    headers:
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    options:
+      items_path: [data]
+      title_keys: [Title, title]
+      hot_keys: [HotValue, hot_value]
+      url_keys: [Url, url]
+
+  - id: baidu
+    name: 百度
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: direct
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [search, general]
+    url: "https://top.baidu.com/api/board?platform=wise&tab=realtime"
+    headers:
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    options:
+      items_path: [data, cards, "0", content, "0", content]
+      title_keys: [word, query, title]
+      hot_keys: [hotScore, hot]
+      url_keys: [url, rawUrl]
+
+  - id: douyin
+    name: 抖音
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: direct
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [social, video]
+    url: "https://www.douyin.com/aweme/v1/web/hot/search/list/"
+    headers:
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    options:
+      items_path: [data, word_list]
+      title_keys: [word, sentence]
+      hot_keys: [hot_value, hot]
+      url_keys: [url, share_url]
+
+  - id: weibo
+    name: 微博
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: agg
+    enabled: true
+    timeout_seconds: 12
+    retry: 2
+    requires_ssrf_safe: true
+    tags: [social, general]
+    url: "https://60s.viki.moe/v2/weibo"
+
+  - id: zhihu
+    name: 知乎
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: agg
+    enabled: true
+    timeout_seconds: 12
+    retry: 2
+    requires_ssrf_safe: true
+    tags: [social, qa]
+    url: "https://60s.viki.moe/v2/zhihu"
+
+  - id: aihot_hot
+    name: AI·热点
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: aihot
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [ai, it]
+    url: "https://aihot.news/api/v1/hot-topics"
+    headers:
+      User-Agent: "aihot-api/2.0.0"
+    options:
+      mode: hot
+
+  - id: aihot_feed
+    name: AI·资讯
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: aihot
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [ai, it]
+    url: "https://aihot.news/api/v1/items?limit=50&window=24h"
+    headers:
+      User-Agent: "aihot-api/2.0.0"
+    options:
+      mode: feed
+
+  - id: aihot_agent_hot
+    name: AIHOT 热点与早报
+    kind: markdown
+    adapter: app.hot_sources.adapters:TextPatternAdapter
+    parser: aihot_agent
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [ai, it]
+    url: "https://aihot.news/api/v1/agent/hot"
+    headers:
+      User-Agent: "aihot-skill/2.0.0 (+https://aihot.news/aihot-skill/)"
+    options:
+      mode: hot
+
+  - id: aihot_agent_daily
+    name: AIHOT 日报
+    kind: markdown
+    adapter: app.hot_sources.adapters:TextPatternAdapter
+    parser: aihot_agent
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [ai, it]
+    url: "https://aihot.news/api/v1/agent/daily"
+    headers:
+      User-Agent: "aihot-skill/2.0.0 (+https://aihot.news/aihot-skill/)"
+    options:
+      mode: daily
+
+  - id: wechat_10w
+    name: 微信 10w+ 爆文池
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: wechat_10w
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [wechat, article]
+    url: "https://raw.githubusercontent.com/alchaincyf/wechat-article/main/articles.json"
+    url_env: HOT_TOPICS_WECHAT_10W_URL
+    headers:
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+  - id: wechat_search
+    name: 微信文章搜索
+    kind: html
+    adapter: app.hot_sources.adapters:TextPatternAdapter
+    parser: wechat_search
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [wechat, search]
+    url: "https://weixin.sogou.com/weixin?type=2&query={keyword}"
+    keyword_env: HOT_TOPICS_WECHAT_KEYWORD
+    headers:
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+  - id: openrank_today
+    name: 开源榜·每日飙升
+    kind: html
+    adapter: app.hot_sources.adapters:TextPatternAdapter
+    parser: openrank
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [opensource, it]
+    url: "https://kaiyuanbang.cn/zh-cn/rankings/today.html"
+
+  - id: openrank_weekly
+    name: 开源榜·每周飙升
+    kind: html
+    adapter: app.hot_sources.adapters:TextPatternAdapter
+    parser: openrank
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [opensource, it]
+    url: "https://kaiyuanbang.cn/zh-cn/rankings/weekly.html"
+
+  - id: openrank_stars
+    name: 开源榜·Star 总榜
+    kind: html
+    adapter: app.hot_sources.adapters:TextPatternAdapter
+    parser: openrank
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [opensource, it]
+    url: "https://kaiyuanbang.cn/zh-cn/rankings/stars.html"
+
+  - id: uapi_bilibili
+    name: B站
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: uapi
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [video, general]
+    url: "https://uapis.cn/api/v1/misc/hotboard?type=bilibili"
+    options:
+      board_type: bilibili
+
+  - id: uapi_tieba
+    name: 贴吧
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: uapi
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [social, forum]
+    url: "https://uapis.cn/api/v1/misc/hotboard?type=tieba"
+    options:
+      board_type: tieba
+
+  - id: uapi_36kr
+    name: 36氪
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: uapi
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [finance, it]
+    url: "https://uapis.cn/api/v1/misc/hotboard?type=36kr"
+    options:
+      board_type: 36kr
+
+  - id: uapi_huxiu
+    name: 虎嗅
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: uapi
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [finance, it]
+    url: "https://uapis.cn/api/v1/misc/hotboard?type=huxiu"
+    options:
+      board_type: huxiu
+
+  - id: uapi_ithome
+    name: IT之家
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: uapi
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [it]
+    url: "https://uapis.cn/api/v1/misc/hotboard?type=ithome"
+    options:
+      board_type: ithome
+
+  - id: uapi_coolapk
+    name: 酷安
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: uapi
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [it, app]
+    url: "https://uapis.cn/api/v1/misc/hotboard?type=coolapk"
+    options:
+      board_type: coolapk
+
+  - id: uapi_juejin
+    name: 掘金
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: uapi
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [it, dev]
+    url: "https://uapis.cn/api/v1/misc/hotboard?type=juejin"
+    options:
+      board_type: juejin
+
+  - id: uapi_sspai
+    name: 少数派
+    kind: json
+    adapter: app.hot_sources.adapters:JsonAdapter
+    parser: uapi
+    enabled: true
+    timeout_seconds: 12
+    retry: 1
+    requires_ssrf_safe: true
+    tags: [it, app]
+    url: "https://uapis.cn/api/v1/misc/hotboard?type=sspai"
+    options:
+      board_type: sspai

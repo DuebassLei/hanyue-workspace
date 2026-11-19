@@ -17,40 +17,62 @@
 ## 2. 链路
 
 ```
-7 路采集 → 逐条归一/去重 → 同一事件合并（聚簇）→ 100 分评分 → 列表/详情 → 一键成稿
-hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster   content_items
+22 路采集（catalog 注册 / 三类 Adapter）→ 逐条归一/去重 → 同一事件合并（聚簇）→ 100 分评分 → 列表/详情 → 一键成稿
+app.hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster   content_items
 ```
 
 一次 `POST /hot-topics/refresh` 完成前三步并落库；后续读取只查库，不再访问外网。
 
-### 2.1 采集（`hot_sources.py`）
+### 2.1 采集（`app/hot_sources/`）
 
-| 平台 | 方式 | 原始链接 |
+**平台清单的单一真相源是 `apps/api/app/hot_sources/catalog.yaml`**，下表只是便于阅读的镜像；
+新增平台改 catalog，不改这张表、不改采集主流程。
+
+| 平台 | 方式（Adapter·parser） | 原始链接 |
 |---|---|---|
-| 今日头条 | 榜单 JSON 直取 | 有 |
-| 百度 | 榜单 JSON 直取 | 有 |
-| 抖音 | 热搜 JSON 直取 | 有 |
-| 微博 | 60s 聚合 | 无（留空，不用搜索页冒充） |
-| 知乎 | 60s 聚合 | 无 |
-| AI·热点 | AIHOT JSON（多来源报道数当热度） | 有 |
-| AI·资讯 | AIHOT JSON（24h 资讯流） | 有 |
-| AIHOT 热点与早报 | AIHOT agent Markdown（编辑过的 Top 榜，信源数当热度） | 有 |
-| AIHOT 日报 | AIHOT agent Markdown（分类早报） | 有 |
-| 微信 10w+ 爆文池 | 公开爆文快照 JSON | 有 |
-| 微信文章搜索 | 搜狗微信搜索结果页（需配置关键词） | 有（搜索结果页） |
+| 今日头条 | JsonAdapter·direct | 有 |
+| 百度 | JsonAdapter·direct | 有 |
+| 抖音 | JsonAdapter·direct | 有 |
+| 微博 | JsonAdapter·agg（60s） | 无（留空，不用搜索页冒充） |
+| 知乎 | JsonAdapter·agg（60s） | 无 |
+| AI·热点 | JsonAdapter·aihot（多来源报道数当热度） | 有 |
+| AI·资讯 | JsonAdapter·aihot（24h 资讯流） | 有 |
+| AIHOT 热点与早报 | TextPatternAdapter·aihot_agent（编辑过的 Top 榜） | 有 |
+| AIHOT 日报 | TextPatternAdapter·aihot_agent（分类早报） | 有 |
+| 微信 10w+ 爆文池 | JsonAdapter·wechat_10w（公开快照） | 有 |
+| 微信文章搜索 | TextPatternAdapter·wechat_search（需配置关键词） | 有（搜索结果页） |
+| 开源榜·每日飙升 | TextPatternAdapter·openrank | 有 |
+| 开源榜·每周飙升 | TextPatternAdapter·openrank | 有 |
+| 开源榜·Star 总榜 | TextPatternAdapter·openrank | 有 |
+| B站 | JsonAdapter·uapi | 有 |
+| 贴吧 | JsonAdapter·uapi | 有 |
+| 36氪 | JsonAdapter·uapi | 有 |
+| 虎嗅 | JsonAdapter·uapi | 有 |
+| IT之家 | JsonAdapter·uapi | 有 |
+| 酷安 | JsonAdapter·uapi | 有 |
+| 掘金 | JsonAdapter·uapi | 有 |
+| 少数派 | JsonAdapter·uapi | 有 |
 
 约束：
 
-- 所有出站请求走 `core/ssrf.safe_request`（仅 HTTPS、端口白名单、不跟随重定向、IP 固定）。3xx 按失败处理，避免把重定向页当 JSON 解析成空榜单。
-- 单源失败只进 `notes`，其余源照常返回；全部源都失败才抛 `all_sources_failed`（502，`retryable=true`），不返回「0 个事件」的假成功。
+- 所有出站请求经 `CollectContext.safe_get` → `core/ssrf.safe_request`（仅 HTTPS、端口白名单、逐跳 IP 固定校验、不手搓 client）。3xx 按失败处理，避免把重定向页当 JSON 解析成空榜单。
+- 单源失败返回 `CollectResult(ok=false, error_code=...)` 只进 `notes`，其余源照常返回；全部源都失败才抛 `all_sources_failed`（502，`retryable=true`），不返回「0 个事件」的假成功。
+- 解析到 0 行标注 `selector_may_changed`（页面结构可能改版），与「平台本来就没数据」区分；这些 notes 会进入 `GET /hot-topics/degraded`（`dim=source`）。
 - 搜索页 URL（`/s?word=`、`/search/` 等）按「拿不到原文」处理，留空。例外是「微信文章搜索」：搜狗没有原文直链，结果页链接是唯一入口，原样保留。
+
+**数据契约**：采集器只产出 `HotRawItem{platform, rank, title, hot, url, captured_at, extra}`
+与批次结果 `CollectResult{platform, ok, items, notes, error_code, fetched_at}`，
+不做去重/合并/评分/标题归一化。`ctx.safe_get` / `ctx.config` / `ctx.now()` 是它拿到的全部能力。
+三类内置模板：`JsonAdapter`（直取/聚合/AIHOT/UAPI）、`TextPatternAdapter`（Markdown/HTML 正则）、
+`ScriptAdapter`（受控进程内脚本）。新增平台 = catalog 加一行（必要时加一个脚本函数），
+主流程零改动；error_code 清单见 `HANDOFF.md`。
 
 环境变量：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HOT_TOPICS_PLATFORMS` | 空（全部） | 逗号分隔，只跑指定平台，如 `微博,知乎` |
-| `HOT_TOPICS_TIMEOUT` | `12` | 单次请求超时（秒，最小 3） |
+| `HOT_TOPICS_PLATFORMS` | 空（全部） | 逗号分隔，只跑指定平台（平台名对齐 catalog 的 `name`），如 `微博,知乎` |
+| `HOT_TOPICS_TIMEOUT` | `12` | 单次请求超时（秒，最小 3）；catalog 中该源的 `timeout_seconds` 可覆盖 |
 | `HOT_TOPICS_REFRESH_COOLDOWN` | `15` | 刷新冷却（秒），0 表示关闭 |
 | `HOT_TOPICS_WECHAT_10W_URL` | 内置公开快照地址 | 微信 10w+ 爆文池的 JSON 地址，快照失效时替换 |
 | `HOT_TOPICS_WECHAT_KEYWORD` | 空（跳过该源） | 微信文章搜索的关键词；不配就不搜，不会替用户决定搜什么 |
@@ -147,12 +169,13 @@ hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster   co
 
 ## 6. 测试
 
-`apps/api/tests/test_hot_topics.py`（14 项）：
+`apps/api/tests/test_hot_topics.py`（21 项）+ `apps/api/tests/test_hot_sources.py`（16 项）：
 
 - 纯函数：标题归一、同事件合并与反义/实体否决、确定性评分（同一 `captured_at` 结果一致）、风险词逐条累计、聚簇分组。
 - 路由：重复刷新幂等、列表筛选、详情、状态流转、成稿幂等与跳转依据、概要、数据不足、全源失败 502、源清单。
+- 采集层（新增）：契约字段与 `to_row`、`safe_get` 错误映射、catalog 22 平台与 env 过滤、三类 Adapter 的解析/降级/0 行标注、编排的单源降级与全源失败、notes 进 degraded、`/dashboard.hotHighlights`。
 
-测试用 `monkeypatch` 替换 `hot_sources.collect`，**不访问外网**；`now_stamp` 固定为常量，保证评分可复现。
+测试一律用 `monkeypatch` 替换采集入口（注入 `request_fn` / `collect`），**不访问外网**；`now_stamp` 固定为常量，保证评分可复现。涉及落库的用例用独立 `date` 且沿用同一 `captured_at`，避免污染其他测试对「当天采样轮数」的断言。
 
 ## 7. 与参考实现（DSH 工作台）的对应
 
@@ -164,3 +187,11 @@ hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster   co
 | `lib/client.template.js` 的 `HotTopicRadar` | `HotTopicsView.vue` + `HotClusterCard.vue` + `HotScoreBars.vue` |
 
 算法（阈值、权重、否决顺序、代表标题选择）按参考实现移植，未重新发明；差异只有三处：SSRF 硬约束、落库幂等、直接成稿。
+
+## 8. 首页热榜
+
+`GET /dashboard` 额外返回 `hotHighlights`：`{day, capturedAt, clusters, topics[]}`，
+其中 `topics` 是当日按分数排序的 Top 5 簇（标题 / 分数 / 档位 / 平台数），
+复用 `list_clusters(sort=score)` + `summary()`，不引入第二套查询口径。
+`OverviewView.vue` 的「今日热点」卡片展示这 5 条，点击进 `/hot-topics`；
+库里一条簇都没有时展示空态，不影响首页其它区块。
