@@ -70,7 +70,8 @@ def _fetch_json(url: str, headers: dict[str, str], retries: int = 1):
 
 
 def _wechat_10w_url() -> str:
-    return os.getenv("HOT_TOPICS_WECHAT_10W_URL", WECHAT_10W_DEFAULT).strip()
+    # 空串（例如 compose 的 ${VAR:-}）也要回落到默认源，否则微信源会被静默禁用。
+    return (os.getenv("HOT_TOPICS_WECHAT_10W_URL") or WECHAT_10W_DEFAULT).strip()
 
 
 def _wechat_search_keyword() -> str:

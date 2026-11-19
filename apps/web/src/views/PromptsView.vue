@@ -728,7 +728,7 @@ onBeforeUnmount(() => {
   margin: 0 auto;
 }
 .is-error {
-  color: var(--color-error, #e88080);
+  color: var(--color-danger);
 }
 @media (max-width: 767px) {
   .prompt-search,

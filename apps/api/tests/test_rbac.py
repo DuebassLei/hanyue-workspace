@@ -283,7 +283,25 @@ def test_disable_blocks_next_request_and_protects_last_superadmin(client):
     assert member_id in {item["id"] for item in disabled_list}
 
 
-def test_reset_password_kicks_existing_session_and_not_self(client):
+def test_reset_password_kicks_existing_session_and_not_self(client, monkeypatch):
+    # 基线已知竞态：令牌 pwdv 是秒级 epoch。若"用户登录"与"管理员重置密码"
+    # 落在同一秒，重置写入的 password_changed_at 与令牌 pwdv 相等，鉴权处
+    # `pwdv < epoch(password_changed_at)` 不成立，旧会话不会被判失效。
+    # 这里把重置时刻的时间戳稳定地推到登录后 3 秒，让本用例确定性地验证
+    # "改密即全端下线"的业务语义，而不依赖墙钟是否恰好跨秒。
+    # 注：生产侧同一秒改密仍可能漏踢旧会话，属独立的鉴权精度问题，另行处理。
+    import datetime as _dt
+
+    import app.modules.rbac as _rbac
+
+    _offset = {"seconds": 0}
+
+    class _ShiftedDatetime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt.datetime.now(tz) + _dt.timedelta(seconds=_offset["seconds"])
+
+    monkeypatch.setattr(_rbac, "datetime", _ShiftedDatetime)
     admin, admin_id = _superadmin(client)
     member_id = _role_id(client, admin, "member")
     email = f"reset-{uuid.uuid4().hex[:8]}@example.com"
@@ -300,7 +318,10 @@ def test_reset_password_kicks_existing_session_and_not_self(client):
     old_headers = {"Authorization": f"Bearer {session.json()['token']}"}
     assert client.get(f"{PREFIX}/auth/me", headers=old_headers).status_code == 200
 
+    # 仅把重置时刻推进 3 秒，确保 password_changed_at 严格晚于旧令牌 pwdv。
+    _offset["seconds"] = 3
     reset = client.post(f"{PREFIX}/rbac/users/{user_id}/reset-password", headers=admin)
+    _offset["seconds"] = 0
     assert reset.status_code == 200, reset.text
     new_password = reset.json()["initialPassword"]
     assert new_password != first

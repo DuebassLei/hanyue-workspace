@@ -254,15 +254,19 @@ def test_lock_base_style_reads_unified_prompt_template(client):
     assert locked.json()["baseStyleName"] == "水彩基础"
     assert locked.json()["baseStylePrompt"] == "水彩，柔光，画面避免出现：文字"
 
-    # 旧 image_styles 记录不再是可锁定的风格来源
-    legacy = _style(client, headers, name="旧风格", prompt="旧提示词")
-    rejected = client.patch(
+    # 兼容壳创建的风格（purpose=base）会同步落入统一的 prompt_templates，
+    # 因此也是合法的、可锁定的基础风格来源——名称/提示词同样取 title/content 映射。
+    compat = _style(client, headers, name="兼容壳风格", prompt="柔光，画面避免出现：杂色")
+    compat_locked = client.patch(
         f"{PREFIX}/content/{item['id']}/image-style",
-        json={"styleId": legacy["id"]},
+        json={"styleId": compat["id"]},
         headers=headers,
     )
-    assert rejected.status_code == 404
-    assert rejected.json()["code"] == "style_not_found"
+    assert compat_locked.status_code == 200, compat_locked.text
+    assert compat_locked.json()["baseStyleId"] == compat["id"]
+    assert compat_locked.json()["baseStyleName"] == "兼容壳风格"
+    # 兼容壳把"画面避免出现："拆到负向字段，快照的正向文本不含该句。
+    assert "画面避免出现" not in compat_locked.json()["baseStylePrompt"]
 
 
 def test_blank_name_and_prompt_are_400(client):

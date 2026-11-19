@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query, status
 from pydantic import Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .. import models, schemas
 from ..core.deps import ApiError, CurrentUser, DbSession, not_found
@@ -184,5 +184,13 @@ def delete_prompt(prompt_id: str, user: CurrentUser, db: DbSession) -> None:
     prompt = db.get(models.PromptTemplate, prompt_id)
     if not prompt:
         raise not_found("提示词")
+    # 删除基础风格时，把锁定它的稿件快照标记为"源已失效"（快照文本仍保留）。
+    # 与历史 image_styles 删除语义一致，避免稿件侧静默引用已不存在的风格。
+    if prompt.prompt_type == "base":
+        db.execute(
+            update(models.ContentItem)
+            .where(models.ContentItem.base_style_id == prompt_id)
+            .values(base_style_deleted=True)
+        )
     db.delete(prompt)
     db.commit()
