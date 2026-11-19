@@ -27,7 +27,8 @@ services:
       - "127.0.0.1:${DEV_PG_PORT:-5433}:5432"
     volumes:
       - pgdata-dev:/var/lib/postgresql/data
-      # 只在数据卷为空时执行；改脚本后要 reset 才会重跑（见 dev-db.sh reset）
+      # 官方 entrypoint 只在数据卷为空时执行（首次 initdb 用）；
+      # 之后的脚本变更由下方 db-init 服务按内容哈希自动重跑，不必 reset。
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test:
@@ -37,6 +38,25 @@ services:
       retries: 20
       start_period: 10s
     restart: unless-stopped
+
+  # ── 初始化执行器：脚本变更后 up 时自动重跑 SQL ─────────────────
+  # 与生产编排同一套机制：postgres/ 下 init/*.sql + schema.sql 拼接做 sha256，
+  # 存进 _hanyue_init_state 对比，变了就按序重跑（脚本均幂等），没变直接退出。
+  db-init:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      POSTGRES_USER: ${DEV_POSTGRES_USER:-hanyue}
+      POSTGRES_PASSWORD: ${DEV_POSTGRES_PASSWORD:-hanyue_dev_pwd}
+      POSTGRES_DB: ${DEV_POSTGRES_DB:-hanyue}
+    volumes:
+      - ./postgres:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/auto-init.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
 
   redis:
     image: redis:7-alpine

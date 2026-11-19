@@ -109,6 +109,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # 初始化执行器失败（SQL 报错）时 api 不启动，避免带病运行
+      db-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
       interval: 10s
@@ -136,6 +139,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import os,redis,sys; c=redis.Redis.from_url(os.environ['REDIS_URL']); sys.exit(0 if c.get('hanyue:worker:heartbeat') else 1)"]
       interval: 10s
@@ -164,6 +169,29 @@ services:
     restart: unless-stopped
     logging: *default-logging
 
+  # ── 初始化执行器：脚本变更后 up 时自动重跑 SQL ─────────────────
+  # 官方镜像的 /docker-entrypoint-initdb.d 只在数据卷为空时执行一次，
+  # 之后改脚本不会生效。db-init 用内容哈希解决：把 postgres/ 下的
+  # init/*.sql 与 schema.sql 拼接做 sha256 存进库内 _hanyue_init_state，
+  # 每次启动对比，变了就按序重跑（脚本均幂等），没变直接退出。
+  # 失败时 api/worker 不会启动：docker compose logs db-init 看具体报错。
+  db-init:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-hanyue}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-hanyue}
+    volumes:
+      - ./postgres:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/auto-init.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+    logging: *default-logging
+
   # ── 数据库 ─────────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
@@ -175,6 +203,8 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # 建表/库级设置不在本服务挂 initdb.d：首次 initdb 只跑一次，改脚本不生效。
+    # 初始化统一由 db-init 服务按内容哈希自动重跑（见下）。
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hanyue} -d ${POSTGRES_DB:-hanyue}"]
       interval: 5s

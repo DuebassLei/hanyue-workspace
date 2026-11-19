@@ -104,14 +104,26 @@ $env:PG_MODE='service'; .\scripts\dev-pg.ps1 up
 供 DBA 审阅、无 DDL 权限环境预建、或新库一次性初始化。两条建表路径互补：
 
 - `bootstrap`（或启动 API）走 `init_db()`：建表 + 补列补索引 + 播种数据，适合日常开发；
-- `init-schema` 走纯 SQL：只建表结构，不播种数据，适合需要评审 DDL 的场景。
+- `init-schema` 走纯 SQL：建表结构 + 播种**引导超管账号**，适合需要评审 DDL 的场景。
 
-脚本幂等（`CREATE TABLE/INDEX IF NOT EXISTS`），空库直接执行、已有库重跑只补缺失对象，
-不会修改已有列定义（老库补列仍由 `init_db()` 负责）。直接用 psql 执行：
+脚本幂等（`CREATE TABLE/INDEX IF NOT EXISTS` + 种子段 `ON CONFLICT DO NOTHING`），空库直接执行、
+已有库重跑只补缺失对象、绝不覆盖已有数据（老库补列仍由 `init_db()` 负责）。直接用 psql 执行：
 
 ```bash
 psql -U <user> -d <db> -v ON_ERROR_STOP=1 -f infra/postgres/schema.sql
 ```
+
+**引导超管账号**：脚本末尾会幂等创建内置超管角色 `superadmin`、账号
+`1130122701@qq.com`（显示名「钥见AI」）并绑定超管角色。初始密码是仓库里的
+**公开固定值**（见 `export_pg_schema.py` 的 `ADMIN_PASSWORD`），仅作首次登录引导——
+**生产环境登录后必须立即改密**：
+
+```bash
+cd apps/api && python scripts/create_user.py reset-password --email 1130122701@qq.com
+```
+
+种子段不会覆盖已有账号：管理员后来改过的密码、显示名、角色绑定在重跑时全部保留。
+应用启动的 `seed()` 与该种子完全兼容（只增不减，可补齐其余 RBAC 数据）。
 
 **模型变更后必须重新生成**，否则 CI 的 `--check` 会失败：
 

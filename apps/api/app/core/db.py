@@ -106,6 +106,14 @@ _WIDENED_COLUMNS: list[tuple[str, str, str]] = [
     ("hot_items", "url", "TEXT"),
 ]
 
+# 需要放开 NOT NULL 的已存在列：(表名, 列名)。模型把列改为可空后，create_all 与
+# 补列迁移都不会动旧表的约束，必须在这里显式放开，否则写入全局行（owner 为 null）
+# 会在启动播种时 IntegrityError。
+_RELAXED_NOT_NULL: list[tuple[str, str]] = [
+    # 提示词合并（地基契约 §7）：提示词库从按 owner 隔离改为全局资源，新记录恒为 null
+    ("prompt_templates", "owner_user_id"),
+]
+
 # keyset 分页与队列恢复都按时间列做 seek，缺索引会退化成全表排序。
 # create_all 不会给已存在的表补索引，因此这里用 IF NOT EXISTS 幂等创建。
 _INDEXES: list[tuple[str, str]] = [
@@ -165,8 +173,48 @@ def _dedupe_skill_entries(conn) -> None:
     )
 
 
+def _sqlite_drop_not_null(conn, table_name: str, column: str) -> None:
+    """SQLite 没有 ALTER COLUMN DROP NOT NULL，按官方建议重建表放开约束。
+
+    前提：本应用的 SQLite 连接未开 PRAGMA foreign_keys，且没有其他表外键引用
+    目标表，事务内 drop+rename 不会破坏引用。补列迁移先于本函数执行，旧表列已
+    与模型对齐；复制仍按列名交集，容忍个别差异。重建顺带补齐模型上的 CHECK
+    约束与索引（DROP TABLE 会带走旧索引）。
+    """
+    from sqlalchemy import MetaData
+    from sqlalchemy.schema import CreateIndex, CreateTable
+
+    from .. import models
+
+    info = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+    target = next((row for row in info if row[1] == column), None)
+    if target is None or not target[3]:  # 列不存在或已可空，幂等跳过
+        return
+    table = models.Base.metadata.tables[table_name]
+    tmp_name = f"{table_name}_nullable_rebuild"
+    tmp_meta = MetaData()
+    # FK 编译要能解析到被引用表：先把它们复制进临时元数据（只编译目标表，不会建它们）
+    for fk in table.foreign_key_constraints:
+        for element in fk.elements:
+            referred = element.column.table
+            if referred.name not in tmp_meta.tables:
+                referred.to_metadata(tmp_meta)
+    tmp = table.to_metadata(tmp_meta, name=tmp_name)
+    conn.execute(text(str(CreateTable(tmp).compile(dialect=conn.dialect))))
+    old_columns = {row[1] for row in info}
+    col_list = ", ".join(c.name for c in table.columns if c.name in old_columns)
+    conn.execute(
+        text(f"INSERT INTO {tmp_name} ({col_list}) SELECT {col_list} FROM {table_name}")
+    )
+    conn.execute(text(f"DROP TABLE {table_name}"))
+    conn.execute(text(f"ALTER TABLE {tmp_name} RENAME TO {table_name}"))
+    for index in table.indexes:
+        ddl = str(CreateIndex(index).compile(dialect=conn.dialect))
+        conn.execute(text(ddl.replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1)))
+
+
 def _apply_additive_migrations() -> None:
-    """只做加列 / 加索引 / 必要去重，幂等可重复执行。"""
+    """只做加列 / 加宽 / 放开 NOT NULL / 加索引 / 必要去重，幂等可重复执行。"""
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     pg = engine.dialect.name == "postgresql"
@@ -195,6 +243,24 @@ def _apply_additive_migrations() -> None:
             if row is None or (row[0] == "text" and row[1] is None):
                 continue
             conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE {new_type}"))
+        for table, column in _RELAXED_NOT_NULL:
+            if table not in existing_tables:
+                continue
+            if pg:
+                row = conn.execute(
+                    text(
+                        "SELECT is_nullable FROM information_schema.columns "
+                        "WHERE table_name = :t AND column_name = :c"
+                    ),
+                    {"t": table, "c": column},
+                ).first()
+                if row is None or row[0] == "YES":
+                    continue
+                conn.execute(
+                    text(f"ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL")
+                )
+            else:
+                _sqlite_drop_not_null(conn, table, column)
         for name, target in _INDEXES:
             table = target.split(" ", 1)[0]
             if table not in existing_tables:

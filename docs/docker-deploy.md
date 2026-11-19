@@ -29,7 +29,8 @@
 | `infra/docker-compose.yml` | 五服务编排：web / api / worker / redis / db，含健康检查、启动顺序、日志轮转 |
 | `infra/docker-compose.lowmem.yml` | 小内存档（2 核 2G）：PG/Redis 参数收紧 + 容器内存上限，< 3 GB 内存时自动叠加（见 2.3） |
 | `infra/docker-compose.dev.yml` | 本地开发库：只起 PG + Redis，独立项目名/卷/端口（5433、6380），不碰生产卷 |
-| `infra/postgres/init/01-init.sql` | PG 默认初始化脚本：库级时区、超时、`pg_trgm`（容器首次 initdb 时自动执行） |
+| `infra/postgres/init/01-init.sql` | PG 默认初始化脚本：库级时区、超时、`pg_trgm`（首次 initdb 执行；之后由 db-init 按哈希自动重跑） |
+| `infra/postgres/schema.sql` | 由 SQLAlchemy 模型导出的完整建表脚本（`export_pg_schema.py` 生成）；db-init 每次启动检测变更并自动重跑 |
 | `infra/postgres/create-role-and-db.sql` | 手工安装 PG（非 Docker）时的建库建用户脚本，幂等 |
 | `infra/scripts/dev-db.sh` | 本地库管理（Docker）：up / down / reset / psql / status / bootstrap / import-sqlite |
 | `infra/scripts/dev-pg.sh` | 本地库管理（**不用容器**）：同样的子命令，支持自建集群与复用系统已装 PG |
@@ -379,9 +380,11 @@ git -C .. pull                       # 或者用 CI 把代码同步到服务器
 | 仅 nginx 配置 | `docker compose exec web nginx -t && docker compose exec web nginx -s reload` |
 | 仅 `.env` 变量 | `./scripts/deploy.sh restart api worker` |
 
-**数据库表结构**：应用启动时会 `create_all` + 补列迁移（`core/db.py::_apply_additive_migrations`），
-只加表/加列/加索引，不做删除与改类型。需要回滚时，容器镜像回退即可，但已加的列会留在库里
-（幂等，不影响旧代码运行）。涉及破坏性变更前先 `./scripts/deploy.sh backup`。
+**数据库表结构**：每次 `up` 时 `db-init` 服务会把 `infra/postgres/` 下的 SQL（`init/*.sql` +
+`schema.sql`）做内容哈希与库内记录比对，有变更就自动按序重跑（脚本均幂等，失败则 api/worker
+不启动，`docker compose logs db-init` 看报错）；应用启动时另有 `create_all` + 补列迁移
+（`core/db.py::_apply_additive_migrations`），只加表/加列/加索引，不做删除与改类型。需要回滚时，
+容器镜像回退即可，但已加的列会留在库里（幂等，不影响旧代码运行）。涉及破坏性变更前先 `./scripts/deploy.sh backup`。
 
 ### 5.1 镜像打包（含离线分发）
 

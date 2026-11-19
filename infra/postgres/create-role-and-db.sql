@@ -54,5 +54,7 @@ GRANT ALL PRIVILEGES ON DATABASE :"app_db" TO :"app_user";
 \echo '接着连到该库执行初始化 SQL（需连到该库）：'
 \echo '  psql -U <user> -d <db> -f init/01-init.sql          # 时区 / 语句超时 / pg_trgm'
 \echo '  psql -U <user> -d <db> -f schema.sql                # 完整建表（63 张表 + 索引，幂等）'
+\echo '    schema.sql 末尾会播种引导超管账号（1130122701@qq.com，初始密码为公开固定值）'
+\echo '    首次登录后必须立即改密：cd apps/api && python scripts/create_user.py reset-password --email 1130122701@qq.com'
 \echo 'schema.sql 由 SQLAlchemy 模型生成，改模型后重新导出：'
 \echo '  cd apps/api && python scripts/export_pg_schema.py -o ../../infra/postgres/schema.sql'

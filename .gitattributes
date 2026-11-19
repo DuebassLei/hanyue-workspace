@@ -1,0 +1,4 @@
+# shell 脚本会被容器内 /bin/sh 直接解析，CRLF 会导致
+#   /bin/sh^M: bad interpreter
+# 因此强制 LF（仓库 core.autocrlf=true 时尤其必要）
+*.sh text eol=lf

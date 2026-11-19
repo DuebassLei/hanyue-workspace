@@ -103,8 +103,9 @@ need_python() {
 
 cmd_up() {
   need_docker
-  compose up -d
-  wait_ready
+  # --wait 会等 db-init（一次性容器）跑完且退出码为 0：脚本有变更时它会
+  # 自动重跑初始化 SQL，失败则这里直接报错，而不是静默留下半初始化的库
+  compose up -d --wait
   print_urls
 }
 
@@ -137,14 +138,13 @@ cmd_reset() {
   read -r answer
   [ "$answer" = "yes" ] || die "已取消"
   compose down --volumes --remove-orphans
-  ok "已删除数据卷；下次 up 会重新执行 postgres/init/01-init.sql"
+  ok "已删除数据卷；下次 up 会重新执行 postgres/init/ 下的脚本（脚本变更平时由 db-init 自动重跑，无需 reset）"
 }
 
 cmd_bootstrap() {
   need_docker
   need_python
-  compose up -d
-  wait_ready
+  compose up -d --wait
 
   info "建表（create_all + 补列迁移）"
   DATABASE_URL="$DATABASE_URL" "$PY" "$REPO_DIR/apps/api/scripts/create_user.py" list >/dev/null \
@@ -168,8 +168,7 @@ cmd_import_sqlite() {
   local source="${1:-$REPO_DIR/apps/api/hanyue.db}"
   [ -f "$source" ] || die "找不到 SQLite 文件：$source"
   warn "把 $source 的数据导入本地开发库 ${PG_DB}（目标已有数据的表默认跳过）"
-  compose up -d
-  wait_ready
+  compose up -d --wait
   DATABASE_URL="$DATABASE_URL" "$PY" "$REPO_DIR/infra/scripts/migrate_sqlite_to_pg.py" \
     --sqlite "$source"
 }

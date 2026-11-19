@@ -180,7 +180,9 @@ dump_failure_context() {
   printf '\n' >&2
   warn "════════════ 启动失败诊断 ════════════"
   "${COMPOSE[@]}" ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}' >&2 2>/dev/null || true
-  for svc in db redis api worker web; do
+  # db-init 排最前：它失败会以「dependency failed to start」卡住 api/worker，
+  # 而 compose 的报错不含原因，真实报错只在这里的容器日志里
+  for svc in db-init db redis api worker web; do
     id="$("${COMPOSE[@]}" ps -aq "$svc" 2>/dev/null | head -n1 || true)"
     [ -n "$id" ] || continue
     state="$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null || echo unknown)"

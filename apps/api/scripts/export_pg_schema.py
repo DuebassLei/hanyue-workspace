@@ -13,8 +13,12 @@
   - 补充索引（db.py 的 _INDEXES）与两个特殊唯一索引 -> 直接 import db.py 的清单复用，
     因为这些索引不在 metadata 中（当初是纯 SQL 创建的），不带上会导致生成的库与应用不一致。
 
-生成物是**幂等**的（CREATE TABLE/INDEX IF NOT EXISTS），可在空库直接执行，也可在已有库
-重跑（不会改已有表结构；老库补列仍由应用 init_db 负责）。
+生成物是**幂等**的（CREATE TABLE/INDEX IF NOT EXISTS + ON CONFLICT DO NOTHING），可在空库直接执行，
+也可在已有库重跑（不会改已有表结构；老库补列仍由应用 init_db 负责）。
+
+除表结构外，生成物末尾还包含一段**引导超管账号**种子（角色 superadmin + 用户
+ADMIN_EMAIL + 角色绑定），让纯 SQL 初始化的库开箱即可登录。初始密码是仓库里的
+固定值，仅作引导——首次登录后必须立即改密。
 
 用法（在 apps/api 目录下）：
 
@@ -59,8 +63,9 @@ HEADER = """\
 -- CI 校验一致性（模型改了但忘了重新生成会失败）：
 --   cd apps/api && python scripts/export_pg_schema.py -o ../../infra/postgres/schema.sql --check
 --
--- 适用：全新数据库一次性建表。幂等（IF NOT EXISTS），已有库重跑只补缺失对象，
---       不会修改已有表的列定义——老库补列仍由应用启动时的 init_db() 负责。
+-- 适用：全新数据库一次性建表 + 播种引导超管账号。幂等（IF NOT EXISTS / ON CONFLICT
+--       DO NOTHING），已有库重跑只补缺失对象、绝不覆盖已有数据——老库补列仍由应用
+--       启动时的 init_db() 负责。
 -- 说明：本脚本按「当前模型的理想全新库」建表，个别列会比渐进迁移的老库更严格
 --       （如新列是 NOT NULL，而老库经 ALTER TABLE ADD COLUMN 补列时为可空）——这是
 --       正确且预期的差异，不影响功能；表/列/索引的集合与老库完全一致。
@@ -147,12 +152,104 @@ def build_schema() -> str:
         "ON users (lower(email)) WHERE email IS NOT NULL;\n"
     )
 
+    # 5) 引导超管账号（幂等种子，不覆盖已有数据）——与建表同一事务提交
+    lines.append(build_admin_seed())
     lines.append("COMMIT;")
     lines.append("")
-    lines.append(
-        "-- 建表完成。接着可用 scripts/create_user.py 创建首个账号，或启动 API 由 lifespan 播种 RBAC 数据。"
+    return "\n".join(lines)
+
+
+# ── 引导超管账号 ──────────────────────────────────────────────────────
+# 应用的 RBAC 数据（角色/权限/菜单）由启动时的 seed() 播种，但「首个超管账号」
+# 此前只能靠 scripts/create_user.py 手工建——纯 SQL 初始化的库（DBA 预建、
+# 无 DDL 权限环境）没有账号就登不进去。这里把引导超管并入 schema.sql：
+#
+#   - 邮箱/显示名/初始密码见下方常量，**初始密码是公开仓库里的固定值**，
+#     仅作首次登录引导；生产环境登录后必须立即改密（或用 create_user.py reset-password）。
+#   - 全部 INSERT 用 ON CONFLICT DO NOTHING：已有库重跑绝不会覆盖管理员
+#     后来改过的密码、显示名或角色绑定。
+#   - scrypt 哈希用固定盐在生成期算出（产物确定性是 --check 的前提）。
+#     固定盐仅降低这**一个引导口令**的哈希强度，改密后走正常随机盐路径。
+
+ADMIN_EMAIL = "1130122701@qq.com"
+ADMIN_DISPLAY_NAME = "钥见AI"
+ADMIN_PASSWORD = "Ztesoft_1234"
+ADMIN_SUBJECT = f"password:{ADMIN_EMAIL}"
+# 固定 id（32 位字符串）：让 SQL 与应用两侧对同一引导实体达成共识，便于审计定位
+ADMIN_USER_ID = "bootstrap_admin00000000000000000"  # 15 + 17 = 32
+ADMIN_ROLE_ID = "bootstrap_superadmin000000000000"  # 20 + 12 = 32
+
+
+def _admin_password_hash() -> str:
+    """用固定盐复现 core/security.hash_password 的 scrypt 格式，保证生成物确定性。"""
+    from app.core.security import (  # noqa: PLC0415 - 生成期局部导入，保持模块加载轻量
+        _PWD_DKLEN,
+        _PWD_N,
+        _PWD_P,
+        _PWD_R,
+        _PWD_SCHEME,
+        _b64,
+        _scrypt,
     )
-    lines.append("")
+
+    salt = b"hanyue-admin-boot"  # 恰好 16 字节固定盐
+    digest = _scrypt(
+        ADMIN_PASSWORD.encode(), salt, _PWD_N, _PWD_R, _PWD_P, _PWD_DKLEN
+    )
+    return f"{_PWD_SCHEME}${_PWD_N}${_PWD_R}${_PWD_P}${_b64(salt)}${_b64(digest)}"
+
+
+def build_admin_seed() -> str:
+    hash_value = _admin_password_hash()
+    lines = [
+        "",
+        "-- ---------- 引导超管账号（幂等种子） ----------",
+        "-- 初始密码为公开固定值，首次登录后必须立即修改！改密命令：",
+        "--   cd apps/api && python scripts/create_user.py reset-password "
+        f"--email {ADMIN_EMAIL}",
+        "",
+        "-- 内置超管角色（与 rbac_service.ROLE_META 一致；应用启动播种可兼容补齐其余字段）",
+        "INSERT INTO roles (id, role_key, name, description, is_superadmin, is_system, sort, created_at, updated_at)",
+        "VALUES (",
+        f"    '{ADMIN_ROLE_ID}',",
+        "    'superadmin',",
+        "    '超级管理员',",
+        "    '拥有全部权限，不受菜单与权限点限制',",
+        "    TRUE,",
+        "    TRUE,",
+        "    0,",
+        "    now(),",
+        "    now()",
+        ")",
+        "ON CONFLICT (role_key) DO NOTHING;",
+        "",
+        "-- 超管账号",
+        "INSERT INTO users (id, auth_subject, display_name, timezone, email, password_hash, password_changed_at, failed_login_attempts, locked_until, is_active, created_at, updated_at)",
+        "VALUES (",
+        f"    '{ADMIN_USER_ID}',",
+        f"    '{ADMIN_SUBJECT}',",
+        f"    '{ADMIN_DISPLAY_NAME}',",
+        "    'Asia/Shanghai',",
+        f"    '{ADMIN_EMAIL}',",
+        f"    '{hash_value}',",
+        "    now(),",
+        "    0,",
+        "    NULL,",
+        "    TRUE,",
+        "    now(),",
+        "    now()",
+        ")",
+        "ON CONFLICT (auth_subject) DO NOTHING;",
+        "",
+        "-- 绑定超管角色（user_roles 主键冲突即跳过）",
+        "INSERT INTO user_roles (user_id, role_id)",
+        "SELECT u.id, r.id FROM users u, roles r",
+        f"WHERE u.auth_subject = '{ADMIN_SUBJECT}' AND r.role_key = 'superadmin'",
+        "ON CONFLICT DO NOTHING;",
+        "",
+        "-- 全部完成。用上面的邮箱与初始密码登录后请立即改密。",
+        "",
+    ]
     return "\n".join(lines)
 
 
