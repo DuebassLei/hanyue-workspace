@@ -34,6 +34,17 @@ MAX_BYTES = 20 * 1024 * 1024
 # 一律当成「不支持」会把可修复的请求误判成永久降级。
 EDIT_UNSUPPORTED_STATUS = frozenset({404, 405, 501})
 
+# 供应商能力键（写在 ModelCatalogEntry.options 上）。保守探测：缺省一律视为不支持。
+# OpenAI 兼容 /images/generations 网关真正支持独立 negative_prompt/seed 的很少，
+# 默认走「负向词拼进 prompt 尾部」的兜底更安全（D2：明示，不静默声称生效）。
+CAPABILITY_NEGATIVE_PROMPT = "supportsNegativePrompt"
+CAPABILITY_SEED = "supportsSeed"
+
+
+def _option_is_true(entry, key: str) -> bool:
+    """只有 options 里显式为 True 才算支持；缺失/None/False 全部按不支持处理。"""
+    return (entry.options or {}).get(key) is True
+
 
 class ImageProviderUnavailable(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
@@ -97,6 +108,9 @@ def list_providers(db, owner_user_id: str) -> list[dict]:
                 "modelCode": env["modelCode"],
                 "label": f"环境变量 · {env['modelCode']}",
                 "source": "env",
+                # 环境变量供应商无从探测，保守按不支持处理，走兜底拼接。
+                CAPABILITY_NEGATIVE_PROMPT: False,
+                CAPABILITY_SEED: False,
             }
         )
     stmt = select(models.ModelCatalogEntry).where(models.ModelCatalogEntry.enabled.is_(True))
@@ -114,6 +128,8 @@ def list_providers(db, owner_user_id: str) -> list[dict]:
                 "modelCode": entry.model_code,
                 # None 表示尚未探测；前端据此决定参考图提示文案
                 "supportsEdits": (entry.options or {}).get("supportsEdits"),
+                CAPABILITY_NEGATIVE_PROMPT: _option_is_true(entry, CAPABILITY_NEGATIVE_PROMPT),
+                CAPABILITY_SEED: _option_is_true(entry, CAPABILITY_SEED),
                 "label": f"{connection.display_name} · {entry.display_name or entry.model_code}",
                 "source": "connection",
             }
@@ -137,12 +153,20 @@ def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) 
                         "baseUrl": connection.base_url.rstrip("/"),
                         "apiKey": key,
                         "modelCode": entry.model_code,
+                        CAPABILITY_NEGATIVE_PROMPT: _option_is_true(entry, CAPABILITY_NEGATIVE_PROMPT),
+                        CAPABILITY_SEED: _option_is_true(entry, CAPABILITY_SEED),
                     }
         # 明确指定了供应商却不可用时不静默回退，避免「切了没生效」的错觉
         return None
     env = _env_provider()
     if env:
-        return {"baseUrl": env["baseUrl"], "apiKey": env["apiKey"], "modelCode": env["modelCode"]}
+        return {
+            "baseUrl": env["baseUrl"],
+            "apiKey": env["apiKey"],
+            "modelCode": env["modelCode"],
+            CAPABILITY_NEGATIVE_PROMPT: False,
+            CAPABILITY_SEED: False,
+        }
 
     stmt = select(models.ModelCatalogEntry).where(
         models.ModelCatalogEntry.enabled.is_(True)
@@ -159,6 +183,8 @@ def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) 
                 "baseUrl": connection.base_url.rstrip("/"),
                 "apiKey": key,
                 "modelCode": entry.model_code,
+                CAPABILITY_NEGATIVE_PROMPT: _option_is_true(entry, CAPABILITY_NEGATIVE_PROMPT),
+                CAPABILITY_SEED: _option_is_true(entry, CAPABILITY_SEED),
             }
     return None
 
@@ -211,9 +237,42 @@ def _request_batch(
     size: str,
     batch: int,
     reference_images: list[tuple[bytes, str, str]] | None,
+    negative_prompt: str | None = None,
+    seed: int | None = None,
+    merge_meta: dict | None = None,
 ):
-    """一次请求。多数兼容接口只接受 n=1，调用方按张重试。"""
+    """一次请求。多数兼容接口只接受 n=1，调用方按张重试。
+
+    负向词/种子按能力探测决定走独立字段还是文本兜底；兜底结果写进 merge_meta，
+    由调用方透传到 job.result，绝不静默声称参数已生效。
+    """
     headers = {"Authorization": f"Bearer {provider['apiKey']}", "Accept": "application/json"}
+    effective_prompt = prompt
+    negative_field: str | None = None
+    if negative_prompt and negative_prompt.strip():
+        if provider.get(CAPABILITY_NEGATIVE_PROMPT):
+            negative_field = negative_prompt.strip()
+        else:
+            # 供应商无独立负向字段：按约定拼进正向尾部，并明确标注为文本兜底。
+            effective_prompt = f"{prompt}, avoid: {negative_prompt.strip()}"
+            if merge_meta is not None:
+                merge_meta["negative_prompt_merged"] = True
+    seed_field: int | None = None
+    if seed is not None:
+        if provider.get(CAPABILITY_SEED):
+            seed_field = seed
+            if merge_meta is not None:
+                merge_meta["seed_applied"] = True
+        elif merge_meta is not None:
+            merge_meta["seed_ignored"] = True
+    extra_json = {}
+    extra_form = {}
+    if negative_field is not None:
+        extra_json["negative_prompt"] = negative_field
+        extra_form["negative_prompt"] = negative_field
+    if seed_field is not None:
+        extra_json["seed"] = seed_field
+        extra_form["seed"] = str(seed_field)
     if reference_images:
         endpoint = f"{provider['baseUrl']}/images/edits"
         files = [
@@ -222,10 +281,11 @@ def _request_batch(
         ]
         form_body = {
             "model": provider["modelCode"],
-            "prompt": prompt,
+            "prompt": effective_prompt,
             "n": str(batch),
             "size": size,
             "response_format": "b64_json",
+            **extra_form,
         }
         json_body = None
     else:
@@ -234,10 +294,11 @@ def _request_batch(
         form_body = None
         json_body = {
             "model": provider["modelCode"],
-            "prompt": prompt,
+            "prompt": effective_prompt,
             "n": batch,
             "size": size,
             "response_format": "b64_json",
+            **extra_json,
         }
     try:
         response = ssrf.safe_request(
@@ -263,6 +324,9 @@ def generate_images(
     count: int = 1,
     model_id: str | None = None,
     reference_images: list[tuple[bytes, str, str]] | None = None,
+    negative_prompt: str | None = None,
+    seed: int | None = None,
+    merge_meta: dict | None = None,
 ) -> list[tuple[bytes, str]]:
     """文生图走 /images/generations；带参考图时改走 /images/edits（multipart）。
 
@@ -270,6 +334,10 @@ def generate_images(
 
     数量大于 1 时按张请求：gpt-image / 多数兼容网关只接受 n=1，
     一次传 n=4 会直接 400。单张失败不影响已经拿到的图；一张都没有才抛错。
+
+    negative_prompt/seed：供应商按 options 能力键探测；负向词不被支持时拼进
+    prompt 尾部（`, avoid: ...`），seed 不被支持时忽略。两者都会写进 merge_meta，
+    供调用方如实告知用户（不传新参数时行为与改动前完全一致）。
     """
     provider = resolve_image_provider(db, owner_user_id, model_id)
     if not provider:
@@ -293,6 +361,9 @@ def generate_images(
             size=size,
             batch=1,
             reference_images=reference_images,
+            negative_prompt=negative_prompt,
+            seed=seed,
+            merge_meta=merge_meta,
         )
         if response.status_code in (401, 403):
             raise ImageProviderUnavailable("unauthorized", "图像供应商拒绝了凭据")

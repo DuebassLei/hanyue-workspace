@@ -616,16 +616,37 @@ class CardTemplate(Base, TimestampMixin):
 
 
 class PromptTemplate(Base, TimestampMixin):
-    """提示词库：用户维护的生图提示词模板，按 owner 隔离。"""
+    """提示词库：统一为全局资源（owner_user_id 可空，新记录为 null）。
+
+    提示词类型区分普通/封面/配图/基础风格等；正反向两段提示词分列存储。
+    """
 
     __tablename__ = "prompt_templates"
+    __table_args__ = (
+        CheckConstraint(
+            "prompt_type IN ('normal','cover','illustration','base','comic_panel','reference')",
+            name="ck_prompt_templates_type",
+        ),
+        CheckConstraint(
+            "source IN ('manual','ai','factory')",
+            name="ck_prompt_templates_source",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    owner_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(120))
     category: Mapped[str] = mapped_column(String(32), default="通用")
     content: Mapped[str] = mapped_column(Text)
     tags: Mapped[list] = mapped_column(JSON, default=list)
+    # 统一数据模型（地基契约 §7）；server_default 保证老库补列后已有行也读到合法值。
+    prompt_type: Mapped[str] = mapped_column(String(16), default="normal", server_default="normal")
+    negative_content: Mapped[str] = mapped_column(Text, default="", server_default="")
+    summary: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    preview_asset_ids: Mapped[list] = mapped_column(JSON, default=list)
+    source: Mapped[str] = mapped_column(String(16), default="manual", server_default="manual")
 
 
 class HanddrawStyle(Base, TimestampMixin):
@@ -857,6 +878,8 @@ class StoryboardProject(Base, TimestampMixin):
     summary: Mapped[str] = mapped_column(Text, default="")
     assets: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    # 组级统一出图风格快照：{style_id, prompt_suffix, reference_asset_id, seed, negative_prompt}
+    style_config: Mapped[dict] = mapped_column(JSON, default=dict)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 

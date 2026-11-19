@@ -362,6 +362,10 @@ class ImageGenerationIn(CamelModel):
     reference_asset_ids: list[str] = Field(default_factory=list, max_length=4)
     # 内置手绘风格编号（FA-001 或旧三位 001）：需要参考图的风格由任务执行器自动附加
     builtin_reference_style_number: str | None = None
+    # 负向提示词：供应商支持时独立字段透传，否则由服务端拼进 prompt 并在结果标注
+    negative_prompt: str | None = None
+    # 固定随机种子：仅供应商明确支持时透传，否则不生效（结果里标注）
+    seed: int | None = None
 
 
 class ImageInterrogateIn(CamelModel):
@@ -758,6 +762,13 @@ class PromptTemplateIn(CamelModel):
     category: str = Field(default="通用", max_length=32)
     content: str = Field(min_length=1)
     tags: list[str] = Field(default_factory=list, max_length=12)
+    prompt_type: str = Field(default="normal", max_length=16)
+    negative_content: str = Field(default="")
+    summary: str = Field(default="", max_length=120)
+    sort_order: int = 0
+    enabled: bool = True
+    preview_asset_ids: list[str] = Field(default_factory=list)
+    source: str = Field(default="manual", max_length=16)
 
 
 class PromptTemplatePatch(CamelModel):
@@ -765,6 +776,13 @@ class PromptTemplatePatch(CamelModel):
     category: str | None = Field(default=None, max_length=32)
     content: str | None = Field(default=None, min_length=1)
     tags: list[str] | None = Field(default=None, max_length=12)
+    prompt_type: str | None = Field(default=None, max_length=16)
+    negative_content: str | None = None
+    summary: str | None = Field(default=None, max_length=120)
+    sort_order: int | None = None
+    enabled: bool | None = None
+    preview_asset_ids: list[str] | None = None
+    source: str | None = Field(default=None, max_length=16)
 
 
 class PromptTemplateOut(CamelModel):
@@ -773,6 +791,13 @@ class PromptTemplateOut(CamelModel):
     category: str
     content: str
     tags: list[str]
+    prompt_type: str = "normal"
+    negative_content: str = ""
+    summary: str = ""
+    sort_order: int = 0
+    enabled: bool = True
+    preview_asset_ids: list[str] = Field(default_factory=list)
+    source: str = "manual"
     created_at: datetime
     updated_at: datetime
 
@@ -1126,12 +1151,14 @@ class StoryboardProjectCreate(CamelModel):
     title: str = Field(default="未命名分镜", min_length=1, max_length=200)
     summary: str = Field(default="", max_length=4000)
     assets: StoryboardAssets = Field(default_factory=StoryboardAssets)
+    style_config: dict | None = None
 
 
 class StoryboardProjectPatch(CamelModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     summary: str | None = Field(default=None, max_length=4000)
     assets: StoryboardAssets | None = None
+    style_config: dict | None = None
 
 
 class StoryboardSceneCreate(CamelModel):
@@ -1233,6 +1260,7 @@ class StoryboardProjectOut(CamelModel):
     deleted_at: datetime | None = None
     assets: StoryboardAssets
     status: str
+    style_config: dict | None = None
     created_at: datetime
     updated_at: datetime
     scenes: list[StoryboardSceneOut] = Field(default_factory=list)
