@@ -23,17 +23,50 @@ export const NAV_GROUPS = [
     key: 'workspace',
     label: '工作区',
     items: [
+      // 跨类型入口留在顶级：创作空间是编辑枢纽，提示词库被文章/图片共用
       { name: 'studio', label: '创作空间', short: '创作', permission: 'studio.use' },
-      { name: 'articles', label: '文章管理', short: '文章', permission: 'studio.use' },
-      { name: 'cards', label: '图文卡片', short: '卡片', permission: 'cards.use' },
-      { name: 'images', label: '图片生成', short: '图片', permission: 'images.use' },
-      { name: 'stickers', label: '贴图创作', short: '贴图', permission: 'stickers.use' },
-      { name: 'storyboards', label: '漫画分镜', short: '分镜', permission: 'storyboards.use' },
-      { name: 'videos', label: '视频创作', short: '视频', permission: 'videos.use' },
-      { name: 'characters', label: '角色库', short: '角色', permission: 'characters.use' },
-      { name: 'novels', label: '小说创作', short: '小说', permission: 'novels.use' },
       { name: 'prompts', label: '提示词库', short: '提示词', permission: 'prompts.use', aliases: ['handdraw'] },
-      { name: 'assets', label: '素材图库', short: '图库', permission: 'assets.use' },
+      {
+        name: 'group-articles',
+        label: '文章',
+        short: '文章',
+        icon: 'articles',
+        children: [
+          { name: 'articles', label: '文章管理', short: '文章', permission: 'studio.use' },
+          { name: 'cards', label: '图文卡片', short: '卡片', permission: 'cards.use' },
+        ],
+      },
+      {
+        name: 'group-images',
+        label: '图片',
+        short: '图片',
+        icon: 'images',
+        children: [
+          { name: 'images', label: '图片生成', short: '图片', permission: 'images.use' },
+          { name: 'stickers', label: '贴图创作', short: '贴图', permission: 'stickers.use' },
+          { name: 'assets', label: '素材图库', short: '图库', permission: 'assets.use' },
+        ],
+      },
+      {
+        name: 'group-videos',
+        label: '视频',
+        short: '视频',
+        icon: 'videos',
+        children: [
+          { name: 'videos', label: '视频创作', short: '视频', permission: 'videos.use' },
+          { name: 'storyboards', label: '漫画分镜', short: '分镜', permission: 'storyboards.use' },
+        ],
+      },
+      {
+        name: 'group-novels',
+        label: '小说',
+        short: '小说',
+        icon: 'novels',
+        children: [
+          { name: 'novels', label: '小说创作', short: '小说', permission: 'novels.use' },
+          { name: 'characters', label: '角色库', short: '角色', permission: 'characters.use' },
+        ],
+      },
     ],
   },
   {
@@ -66,9 +99,34 @@ export const NAV_GROUPS = [
   },
 ]
 
-export const NAV_ITEMS = NAV_GROUPS.flatMap((group) =>
-  group.items.map((item) => ({ ...item, group: group.label, groupKey: group.key })),
-)
+/**
+ * 把「分组 → 分类 → 页面」摊平成带所属分组与祖先链的页面列表。
+ * 服务端菜单树（`/rbac/me`）与静态兜底表形状一致，同一个函数处理两者。
+ */
+export function navEntries(groups) {
+  const rows = []
+  for (const group of groups) {
+    const walk = (items, ancestors) => {
+      for (const item of items || []) {
+        const path = [...ancestors, item.name]
+        if (item.children?.length) {
+          walk(item.children, path)
+        } else {
+          rows.push({
+            ...item,
+            group: group.label,
+            groupKey: group.key,
+            ancestors: path.slice(0, -1),
+          })
+        }
+      }
+    }
+    walk(group.items, [group.key])
+  }
+  return rows
+}
+
+export const NAV_ITEMS = navEntries(NAV_GROUPS)
 
 export function findNav(routeName) {
   return (
@@ -76,17 +134,33 @@ export function findNav(routeName) {
   )
 }
 
-/** 两级：分组 / 页面。手绘是提示词库的子页，多一级。 */
-export function breadcrumbsFor(routeName, pageTitle, groups = NAV_GROUPS) {
-  const items = groups.flatMap((group) =>
-    group.items.map((item) => ({ ...item, group: group.label, groupKey: group.key })),
-  )
-  const item =
-    items.find((entry) => entry.name === routeName || entry.aliases?.includes(routeName)) || null
-  if (!item) return [{ label: pageTitle || '工作台' }]
-  const crumbs = [{ label: item.group }, { label: item.label, name: item.name }]
-  if (routeName && routeName !== item.name) {
-    crumbs.push({ label: pageTitle || routeName })
+function findTrail(items, routeName) {
+  for (const item of items || []) {
+    if (item.children?.length) {
+      const nested = findTrail(item.children, routeName)
+      if (nested) return [item, ...nested]
+    } else if (item.name === routeName || item.aliases?.includes(routeName)) {
+      return [item]
+    }
   }
-  return crumbs
+  return null
+}
+
+/** 面包屑跟随菜单层级：工作区 / 文章 / 文章管理。 */
+export function breadcrumbsFor(routeName, pageTitle, groups = NAV_GROUPS) {
+  for (const group of groups) {
+    const trail = findTrail(group.items, routeName)
+    if (!trail) continue
+    const crumbs = [{ label: group.label }]
+    trail.forEach((entry, index) => {
+      const isLeaf = index === trail.length - 1
+      crumbs.push({ label: entry.label, ...(isLeaf ? { name: entry.name } : {}) })
+    })
+    const leaf = trail[trail.length - 1]
+    if (routeName && routeName !== leaf.name) {
+      crumbs.push({ label: pageTitle || routeName })
+    }
+    return crumbs
+  }
+  return [{ label: pageTitle || '工作台' }]
 }

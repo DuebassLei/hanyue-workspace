@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from sqlalchemy import delete, select
 
 from .. import models
@@ -27,75 +29,116 @@ from ..core.rbac import (
     Access,
 )
 
-# 菜单种子：(key, 名称, 简称, 图标键, 权限点, 子菜单)
-# page 类型的 key 必须与前端 router.js 的路由 name 一致，否则点击无反应。
-MENU_SEED: tuple[tuple[str, str, str, str, str | None, tuple], ...] = (
-    (
+@dataclass(frozen=True)
+class MenuSeed:
+    """菜单种子节点。group 可以再套一层 group（如「工作区 → 文章 → 文章管理」）。"""
+
+    key: str
+    label: str
+    short: str = ""
+    icon: str = ""
+    permission: str | None = None
+    kind: str = "page"
+    children: tuple["MenuSeed", ...] = field(default_factory=tuple)
+
+
+def _page(key: str, label: str, short: str, icon: str, permission: str | None) -> MenuSeed:
+    return MenuSeed(key, label, short, icon, permission, "page")
+
+
+def _group(key: str, label: str, icon: str, children: tuple[MenuSeed, ...]) -> MenuSeed:
+    # 分组是纯容器：不挂权限点，可见性由子项推导
+    return MenuSeed(key, label, label, icon, None, "group", children)
+
+
+# 菜单种子。page 的 key 必须与前端 router.js 的路由 name 一致，否则点击无反应。
+# 层级最多三层：顶级分组 → 分类分组 → 页面。
+MENU_SEED: tuple[MenuSeed, ...] = (
+    _group(
         "create",
         "创作",
-        "",
         "create",
-        None,
         (
-            ("overview", "创作总览", "总览", "overview", "overview.view"),
-            ("hot-topics", "热点选题", "热点", "hot-topics", "hot_topics.view"),
-            ("calendar", "内容日历", "日历", "calendar", "calendar.view"),
+            _page("overview", "创作总览", "总览", "overview", "overview.view"),
+            _page("hot-topics", "热点选题", "热点", "hot-topics", "hot_topics.view"),
+            _page("calendar", "内容日历", "日历", "calendar", "calendar.view"),
         ),
     ),
-    (
+    _group(
         "workspace",
         "工作区",
-        "",
         "workspace",
-        None,
         (
-            ("studio", "创作空间", "创作", "studio", "studio.use"),
-            ("articles", "文章管理", "文章", "articles", "studio.use"),
-            ("cards", "图文卡片", "卡片", "cards", "cards.use"),
-            ("images", "图片生成", "图片", "images", "images.use"),
-            ("stickers", "贴图创作", "贴图", "stickers", "stickers.use"),
-            ("storyboards", "漫画分镜", "分镜", "storyboards", "storyboards.use"),
-            ("videos", "视频创作", "视频", "videos", "videos.use"),
-            ("characters", "角色库", "角色", "characters", "characters.use"),
-            ("novels", "小说创作", "小说", "novels", "novels.use"),
-            ("prompts", "提示词库", "提示词", "prompts", "prompts.use"),
-            ("assets", "素材图库", "图库", "assets", "assets.use"),
+            # 跨类型的入口留在顶级：创作空间是编辑枢纽，提示词库被文章/图片共用
+            _page("studio", "创作空间", "创作", "studio", "studio.use"),
+            _page("prompts", "提示词库", "提示词", "prompts", "prompts.use"),
+            _group(
+                "group-articles",
+                "文章",
+                "articles",
+                (
+                    _page("articles", "文章管理", "文章", "articles", "studio.use"),
+                    _page("cards", "图文卡片", "卡片", "cards", "cards.use"),
+                ),
+            ),
+            _group(
+                "group-images",
+                "图片",
+                "images",
+                (
+                    _page("images", "图片生成", "图片", "images", "images.use"),
+                    _page("stickers", "贴图创作", "贴图", "stickers", "stickers.use"),
+                    _page("assets", "素材图库", "图库", "assets", "assets.use"),
+                ),
+            ),
+            _group(
+                "group-videos",
+                "视频",
+                "videos",
+                (
+                    _page("videos", "视频创作", "视频", "videos", "videos.use"),
+                    _page("storyboards", "漫画分镜", "分镜", "storyboards", "storyboards.use"),
+                ),
+            ),
+            _group(
+                "group-novels",
+                "小说",
+                "novels",
+                (
+                    _page("novels", "小说创作", "小说", "novels", "novels.use"),
+                    _page("characters", "角色库", "角色", "characters", "characters.use"),
+                ),
+            ),
         ),
     ),
-    (
+    _group(
         "ops",
         "运营",
-        "",
         "ops",
-        None,
         (
-            ("publishing", "发布管理", "发布", "publishing", "publishing.view"),
-            ("wechat-layout", "微信排版", "排版", "wechat-layout", "wechat_layout.use"),
-            ("schedules", "定时任务", "定时", "schedules", "schedules.use"),
+            _page("publishing", "发布管理", "发布", "publishing", "publishing.view"),
+            _page("wechat-layout", "微信排版", "排版", "wechat-layout", "wechat_layout.use"),
+            _page("schedules", "定时任务", "定时", "schedules", "schedules.use"),
         ),
     ),
-    (
+    _group(
         "rbac",
         "权限",
-        "",
         "system",
-        None,
         (
-            ("users", "用户管理", "用户", "characters", "rbac.user.manage"),
-            ("roles", "角色管理", "角色", "settings", "rbac.role.manage"),
-            ("menus", "菜单管理", "菜单", "logs", "rbac.menu.manage"),
+            _page("users", "用户管理", "用户", "characters", "rbac.user.manage"),
+            _page("roles", "角色管理", "角色", "settings", "rbac.role.manage"),
+            _page("menus", "菜单管理", "菜单", "logs", "rbac.menu.manage"),
         ),
     ),
-    (
+    _group(
         "system",
         "系统",
-        "",
         "system",
-        None,
         (
-            ("models", "模型管理", "模型", "models", "models.view"),
-            ("logs", "系统日志", "日志", "logs", "logs.view"),
-            ("settings", "设置", "我的", "settings", "settings.view"),
+            _page("models", "模型管理", "模型", "models", "models.view"),
+            _page("logs", "系统日志", "日志", "logs", "logs.view"),
+            _page("settings", "设置", "我的", "settings", "settings.view"),
         ),
     ),
 )
@@ -154,47 +197,37 @@ def _seed_roles(db) -> list[str]:
 
 
 def _seed_menus(db) -> list[str]:
-    """按种子建菜单，返回本次新建的 menu.id（用于给角色补默认绑定）。"""
+    """按种子建菜单（最多三层），返回本次新建的 menu.id（用于给角色补默认绑定）。"""
     created: list[str] = []
-    for group_key, group_label, group_short, icon, permission, children in MENU_SEED:
-        group = db.scalar(select(models.Menu).where(models.Menu.menu_key == group_key))
-        if group is None:
-            group = models.Menu(
-                menu_key=group_key,
-                label=group_label,
-                short_label=group_short,
-                icon=icon,
-                path=f"/{group_key}",
-                kind="group",
-                permission_code=permission,
-                sort=_next_sort(db, None),
-            )
-            db.add(group)
-            db.flush()
-            created.append(group.id)
-        for index, (key, label, short, item_icon, item_permission) in enumerate(children):
-            existing = db.scalar(select(models.Menu).where(models.Menu.menu_key == key))
-            if existing is not None:
-                _rename_menu_permission(existing, item_permission)
-                if key == "users" and existing.label == "用户授权":
-                    existing.label = label
-                    existing.short_label = short
-                continue
-            menu = models.Menu(
-                parent_id=group.id,
-                menu_key=key,
-                label=label,
-                short_label=short,
-                icon=item_icon,
-                path=f"{group.path}/{key}",
-                kind="page",
-                permission_code=item_permission,
-                sort=(index + 1) * 10,
-            )
-            db.add(menu)
-            db.flush()
-            created.append(menu.id)
+    for node in MENU_SEED:
+        _seed_menu_node(db, node, None, _next_sort(db, None), created)
     return created
+
+
+def _seed_menu_node(db, node: MenuSeed, parent: models.Menu | None, sort: int, created: list[str]) -> None:
+    menu = db.scalar(select(models.Menu).where(models.Menu.menu_key == node.key))
+    if menu is None:
+        menu = models.Menu(
+            parent_id=parent.id if parent else None,
+            menu_key=node.key,
+            label=node.label,
+            short_label=node.short,
+            icon=node.icon,
+            path=f"{parent.path}/{node.key}" if parent else f"/{node.key}",
+            kind=node.kind,
+            permission_code=node.permission,
+            sort=sort,
+        )
+        db.add(menu)
+        db.flush()
+        created.append(menu.id)
+    elif node.permission is not None:
+        _rename_menu_permission(menu, node.permission)
+        if node.key == "users" and menu.label == "用户授权":
+            menu.label = node.label
+            menu.short_label = node.short
+    for index, child in enumerate(node.children):
+        _seed_menu_node(db, child, menu, (index + 1) * 10, created)
 
 
 def _rename_menu_permission(menu: models.Menu, seeded_permission: str | None) -> None:
@@ -352,6 +385,57 @@ MIGRATION_MODEL_READ_SPLIT = "2026-11.models-read-split"
 MIGRATION_PRUNE_LEGACY_MENUS = "2026-11.prune-legacy-menus"
 _DEPRECATED_MENU_KEYS = ("image-styles",)
 
+# 2026-11：工作区菜单太挤（11 项平铺），拆成「文章 / 图片 / 视频 / 小说」四个分类。
+# 老库里页面直接挂在 workspace 下，播种只增不减、不会搬动它们，故用一次性迁移重挂载。
+# 只调整归属和分类顺序：页面自身的排序、隐藏状态和管理员的角色绑定一律保留。
+MIGRATION_WORKSPACE_GROUPS = "2026-11.workspace-groups"
+_WORKSPACE_SUBGROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("group-articles", ("articles", "cards")),
+    ("group-images", ("images", "stickers", "assets")),
+    ("group-videos", ("videos", "storyboards")),
+    ("group-novels", ("novels", "characters")),
+)
+
+
+def _migrate_workspace_groups(db) -> None:
+    workspace = db.scalar(select(models.Menu).where(models.Menu.menu_key == "workspace"))
+    if workspace is None:
+        return
+
+    children = list(
+        db.scalars(select(models.Menu).where(models.Menu.parent_id == workspace.id)).all()
+    )
+    by_key = {menu.menu_key: menu for menu in children}
+    # 分类排在仍留在顶级的页面（创作空间、提示词库）之后，避免把它们挤到分组下面。
+    base = max((menu.sort for menu in children if menu.kind != "group"), default=0)
+
+    for index, (group_key, member_keys) in enumerate(_WORKSPACE_SUBGROUPS, start=1):
+        group = by_key.get(group_key)
+        if group is None:
+            # 正常不会发生（播种先跑）；兜底建一个，避免迁移后页面无处可挂。
+            group = models.Menu(
+                parent_id=workspace.id,
+                menu_key=group_key,
+                label=group_key,
+                kind="group",
+                path=f"{workspace.path}/{group_key}",
+                sort=base + index * 10,
+            )
+            db.add(group)
+            db.flush()
+        group.parent_id = workspace.id
+        group.kind = "group"
+        group.permission_code = None
+        group.sort = base + index * 10
+        for key in member_keys:
+            page = db.scalar(select(models.Menu).where(models.Menu.menu_key == key))
+            if page is None:
+                continue
+            # 只搬还挂在 workspace 下的：管理员已经手工挪过的不覆盖
+            if page.parent_id == workspace.id:
+                page.parent_id = group.id
+    db.flush()
+
 
 def _run_migrations(db) -> None:
     setting = db.get(models.AppSetting, _MIGRATION_SETTING_KEY)
@@ -381,6 +465,12 @@ def _run_migrations(db) -> None:
             db.execute(delete(models.RoleMenu).where(models.RoleMenu.menu_id == menu.id))
             db.delete(menu)
         done.add(MIGRATION_PRUNE_LEGACY_MENUS)
+        changed = True
+
+    # 迁移 3：工作区二级分类（文章 / 图片 / 视频 / 小说）
+    if MIGRATION_WORKSPACE_GROUPS not in done:
+        _migrate_workspace_groups(db)
+        done.add(MIGRATION_WORKSPACE_GROUPS)
         changed = True
 
     if changed:
@@ -436,33 +526,59 @@ def _menu_allowed(menu: models.Menu, access: Access, bound: set[str]) -> bool:
 
 
 def user_menu_tree(db, access: Access) -> list[dict]:
-    """前端侧栏用的菜单树：只含可见项，空分组自动剔除。"""
+    """前端侧栏用的菜单树（最多三层）：只含可见项，空分组自动剔除。
+
+    分类分组是纯容器：不要求角色绑定、也没有权限点，只要下面还有可见页面就显示。
+    这样新增角色或调整子项权限时，不会出现「叶子可见、父级没绑 → 整块消失」。
+    """
     bound, _ = menu_visibility(db, access)
     menus = db.scalars(
         select(models.Menu).where(models.Menu.visible.is_(True)).order_by(models.Menu.sort)
     ).all()
-    allowed = [menu for menu in menus if _menu_allowed(menu, access, bound)]
 
     by_parent: dict[str | None, list[models.Menu]] = {}
-    for menu in allowed:
+    for menu in menus:
         by_parent.setdefault(menu.parent_id, []).append(menu)
+
+    def build_items(parent_id: str | None) -> list[dict]:
+        items: list[dict] = []
+        for child in by_parent.get(parent_id, []):
+            if child.kind == "group":
+                nested = build_items(child.id)
+                if not nested:
+                    continue
+                items.append(
+                    {
+                        "name": child.menu_key,
+                        "label": child.label,
+                        "short": child.short_label,
+                        "icon": child.icon,
+                        "path": child.path,
+                        "permission": None,
+                        "children": nested,
+                    }
+                )
+            elif _menu_allowed(child, access, bound):
+                items.append(
+                    {
+                        "name": child.menu_key,
+                        "label": child.label,
+                        "short": child.short_label,
+                        "icon": child.icon,
+                        "path": child.path,
+                        "permission": child.permission_code,
+                        "children": [],
+                    }
+                )
+        return items
 
     tree: list[dict] = []
     for group in by_parent.get(None, []):
-        children = by_parent.get(group.id, [])
-        if group.kind == "group" and not children:
+        if not _menu_allowed(group, access, bound):
             continue
-        items = [
-            {
-                "name": child.menu_key,
-                "label": child.label,
-                "short": child.short_label,
-                "icon": child.icon,
-                "path": child.path,
-                "permission": child.permission_code,
-            }
-            for child in children
-        ]
+        items = build_items(group.id)
+        if group.kind == "group" and not items:
+            continue
         tree.append(
             {
                 "key": group.menu_key,

@@ -54,6 +54,19 @@ def _role_id(client, headers, role_key: str) -> str:
     return next(item["id"] for item in res.json() if item["roleKey"] == role_key)
 
 
+def _nav_names(menus) -> set[str]:
+    """菜单树最多三层：把所有层级的叶子页面名收成一个集合。"""
+    names: set[str] = set()
+    stack = [item for group in menus for item in group["items"]]
+    while stack:
+        item = stack.pop()
+        if item.get("children"):
+            stack.extend(item["children"])
+        else:
+            names.add(item["name"])
+    return names
+
+
 # ---------------- 基础投影 ----------------
 
 
@@ -88,7 +101,7 @@ def test_superadmin_sees_every_menu(client):
     groups = {group["key"] for group in body["menus"]}
     assert {"create", "workspace", "ops", "rbac", "system"} <= groups
 
-    names = {item["name"] for group in body["menus"] for item in group["items"]}
+    names = _nav_names(body["menus"])
     assert {"roles", "menus", "users", "models", "logs"} <= names
 
 
@@ -125,7 +138,7 @@ def test_permission_change_takes_effect_without_relogin(client):
     assert "calendar.view" in after["permissions"]
     assert "studio.use" not in after["permissions"]
     # 菜单跟着权限走：没有 studio.use 就不该出现创作空间
-    names = {item["name"] for group in after["menus"] for item in group["items"]}
+    names = _nav_names(after["menus"])
     assert "studio" not in names
     assert "calendar" in names
 
@@ -158,7 +171,7 @@ def test_menu_binding_hides_even_with_permission(client):
     _set_roles(member_id, [role_key])
 
     body = client.get(f"{PREFIX}/rbac/me", headers=member_headers).json()
-    names = {item["name"] for group in body["menus"] for item in group["items"]}
+    names = _nav_names(body["menus"])
     groups = {group["key"] for group in body["menus"]}
     assert "overview" in names
     assert "studio" not in names  # 有权限但未绑定
@@ -669,9 +682,13 @@ def test_legacy_menu_prune_and_articles_bootstrap(client):
         db.commit()
         assert db.scalar(select(models.Menu).where(models.Menu.menu_key == "image-styles")) is None
         articles = db.scalar(select(models.Menu).where(models.Menu.menu_key == "articles"))
+        articles_group = db.scalar(
+            select(models.Menu).where(models.Menu.menu_key == "group-articles")
+        )
         assert articles is not None
-        assert articles.parent_id == workspace.id
-        assert articles.path == f"{workspace.path}/articles"
+        assert articles_group is not None
+        assert articles.parent_id == articles_group.id
+        assert articles.path == f"{articles_group.path}/articles"
 
         # --- 管理员手工重建废弃菜单后再次 seed：不该被再次删除 ---
         reborn = models.Menu(
@@ -694,3 +711,98 @@ def test_legacy_menu_prune_and_articles_bootstrap(client):
         # 还原：删掉重建的菜单，不污染后续用例
         db.delete(reborn)
         db.commit()
+
+
+def test_workspace_menu_split_into_four_groups(client):
+    """工作区下按文章 / 图片 / 视频 / 小说分四组，跨类型入口留在顶级。"""
+    headers, _ = _superadmin(client)
+    body = client.get(f"{PREFIX}/rbac/me", headers=headers).json()
+    workspace = next(group for group in body["menus"] if group["key"] == "workspace")
+
+    assert [item["name"] for item in workspace["items"]] == [
+        "studio",
+        "prompts",
+        "group-articles",
+        "group-images",
+        "group-videos",
+        "group-novels",
+    ]
+    groups = {item["name"]: item for item in workspace["items"] if item.get("children")}
+    assert [child["name"] for child in groups["group-articles"]["children"]] == [
+        "articles",
+        "cards",
+    ]
+    assert [child["name"] for child in groups["group-images"]["children"]] == [
+        "images",
+        "stickers",
+        "assets",
+    ]
+    assert [child["name"] for child in groups["group-videos"]["children"]] == [
+        "videos",
+        "storyboards",
+    ]
+    assert [child["name"] for child in groups["group-novels"]["children"]] == [
+        "novels",
+        "characters",
+    ]
+
+
+def test_workspace_groups_migration_reparents_legacy_menus(client):
+    """老库升级：页面原本直接挂工作区，迁移把它们重挂到四个分类下。"""
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services import rbac_service
+
+    layout = {
+        "group-articles": ("articles", "cards"),
+        "group-images": ("images", "stickers", "assets"),
+        "group-videos": ("videos", "storyboards"),
+        "group-novels": ("novels", "characters"),
+    }
+
+    with SessionLocal() as db:
+        workspace = db.scalar(select(models.Menu).where(models.Menu.menu_key == "workspace"))
+        assert workspace is not None
+        group_ids = list(
+            db.scalars(
+                select(models.Menu.id).where(models.Menu.menu_key.in_(tuple(layout)))
+            ).all()
+        )
+
+        # --- 伪造升级前的老库：没有分类节点，页面直接挂在 workspace 下 ---
+        for members in layout.values():
+            for key in members:
+                page = db.scalar(select(models.Menu).where(models.Menu.menu_key == key))
+                page.parent_id = workspace.id
+        db.flush()
+        db.execute(delete(models.RoleMenu).where(models.RoleMenu.menu_id.in_(group_ids)))
+        db.execute(delete(models.Menu).where(models.Menu.id.in_(group_ids)))
+
+        setting = db.get(models.AppSetting, rbac_service._MIGRATION_SETTING_KEY)
+        done = set((setting.value or {}).get("done", [])) if setting else set()
+        done.discard(rbac_service.MIGRATION_WORKSPACE_GROUPS)
+        if setting is None:
+            setting = models.AppSetting(key=rbac_service._MIGRATION_SETTING_KEY, value={})
+            db.add(setting)
+        setting.value = {"done": sorted(done)}
+        db.commit()
+
+        # --- seed：补建分类节点并重挂页面 ---
+        rbac_service.seed(db)
+        db.commit()
+
+        for group_key, members in layout.items():
+            group = db.scalar(select(models.Menu).where(models.Menu.menu_key == group_key))
+            assert group is not None
+            assert group.parent_id == workspace.id
+            for key in members:
+                page = db.scalar(select(models.Menu).where(models.Menu.menu_key == key))
+                assert page.parent_id == group.id
+
+        # 创作空间、提示词库仍留在顶级，且排在四个分类之前
+        top = db.scalars(
+            select(models.Menu)
+            .where(models.Menu.parent_id == workspace.id)
+            .order_by(models.Menu.sort)
+        ).all()
+        assert [menu.menu_key for menu in top[:2]] == ["studio", "prompts"]

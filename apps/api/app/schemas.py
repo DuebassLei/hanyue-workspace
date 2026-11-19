@@ -1509,6 +1509,30 @@ class SchedulePreviewIn(CamelModel):
     count: int = Field(default=3, ge=1, le=10)
 
 
+class ScriptScheduleCreateIn(CamelModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    draft_code: str = Field(default="", max_length=262144)
+    timeout_seconds: int = Field(default=60, ge=5, le=300)
+    enabled: bool = True
+
+
+class ScriptScheduleUpdateIn(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    draft_code: str | None = Field(default=None, max_length=262144)
+    timeout_seconds: int | None = Field(default=None, ge=5, le=300)
+    enabled: bool | None = None
+
+
+class ScriptSchedulePublishIn(CamelModel):
+    draft_code: str | None = Field(default=None, max_length=262144)
+
+
+class ScriptScheduleRunIn(CamelModel):
+    params: dict = Field(default_factory=dict)
+
+
 # ---------- RBAC ----------
 
 
@@ -1537,7 +1561,10 @@ class MenuNodeOut(CamelModel):
 
 
 class NavItemOut(CamelModel):
-    """侧栏项。`name` 就是前端路由名，`permission` 供按钮/页面二次校验。"""
+    """侧栏项。`name` 就是前端路由名，`permission` 供按钮/页面二次校验。
+
+    带 `children` 的是分类分组（纯容器，无路由）：侧栏据此多渲染一层折叠。
+    """
 
     name: str
     label: str
@@ -1545,6 +1572,7 @@ class NavItemOut(CamelModel):
     icon: str = ""
     path: str = ""
     permission: str | None = None
+    children: list["NavItemOut"] = Field(default_factory=list)
 
 
 class NavGroupOut(CamelModel):

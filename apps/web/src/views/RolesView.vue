@@ -52,16 +52,18 @@ const permissionGroups = computed(() => {
   return [...groups.entries()].map(([module, items]) => ({ module, items }))
 })
 
+function flattenMenuItems(nodes, depth = 0) {
+  return (nodes || []).flatMap((node) => [
+    { id: node.id, label: node.label, permission: node.permission, visible: node.visible, isGroup: node.kind === 'group', depth },
+    ...flattenMenuItems(node.children, depth + 1),
+  ])
+}
+
 const menuGroups = computed(() =>
   menus.value.map((group) => ({
     id: group.id,
     label: group.label,
-    items: (group.children || []).map((child) => ({
-      id: child.id,
-      label: child.label,
-      permission: child.permission,
-      visible: child.visible,
-    })),
+    items: flattenMenuItems(group.children, 1),
   })),
 )
 
@@ -103,15 +105,20 @@ function toggleMenu(menuId, checked) {
   draft.value.menuIds = [...set]
 }
 
+function collectMenuIds(node, ids = new Set()) {
+  ids.add(node.id)
+  for (const child of node.children || []) collectMenuIds(child, ids)
+  return ids
+}
+
 /** 勾选子项时自动补上它所属的分组，否则侧栏会因为这个分组没绑定而整块消失 */
 function toggleGroupItem(groupId, checked) {
-  const group = menuGroups.value.find((item) => item.id === groupId)
+  const group = menus.value.find((item) => item.id === groupId)
   const ids = new Set(draft.value.menuIds)
   if (checked) {
     ids.add(groupId)
   } else {
-    ids.delete(groupId)
-    group?.items.forEach((item) => ids.delete(item.id))
+    for (const id of collectMenuIds(group || { id: groupId })) ids.delete(id)
   }
   draft.value.menuIds = [...ids]
 }
@@ -290,9 +297,13 @@ onMounted(load)
                     v-for="item in group.items"
                     :key="item.id"
                     :checked="isBound(item.id)"
-                    @update:checked="(checked) => toggleMenu(item.id, checked)"
+                    :style="{ marginLeft: `${(item.depth - 1) * 18}px` }"
+                    @update:checked="(checked) =>
+                      item.isGroup ? toggleGroupItem(item.id, checked) : toggleMenu(item.id, checked)"
+                    "
                   >
-                    {{ item.label }}
+                    <strong v-if="item.isGroup">{{ item.label }}</strong>
+                    <template v-else>{{ item.label }}</template>
                     <n-tag v-if="!item.visible" size="small" type="info">已隐藏</n-tag>
                   </n-checkbox>
                 </div>

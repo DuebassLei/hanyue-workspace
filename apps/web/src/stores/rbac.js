@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { api } from '../api/client'
+import { navEntries } from '../ui/nav'
 
 /**
  * 权限与菜单。
@@ -22,15 +23,8 @@ export const useRbacStore = defineStore('rbac', {
     _refreshTimer: null,
   }),
   getters: {
-    /** 侧栏项（带分组信息），命令面板与面包屑共用 */
-    navItems: (state) =>
-      state.menus.flatMap((group) =>
-        group.items.map((item) => ({
-          ...item,
-          group: group.label,
-          groupKey: group.key,
-        })),
-      ),
+    /** 侧栏叶子项（带分组与祖先链），命令面板与面包屑共用 */
+    navItems: (state) => navEntries(state.menus),
     /** 第一个可访问页面：无权限时不至于停在空白页 */
     firstNavName() {
       return this.navItems[0]?.name || null

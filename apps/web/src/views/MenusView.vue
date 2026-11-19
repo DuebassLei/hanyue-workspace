@@ -57,20 +57,23 @@ const permissionOptions = computed(() =>
   })),
 )
 
-const groupOptions = computed(() =>
-  tree.value.map((group) => ({ label: group.label, value: group.id })),
-)
+const groupOptions = computed(() => {
+  const options = []
+  for (const group of tree.value) {
+    options.push({ label: group.label, value: group.id })
+    // 分类分组（如「工作区 → 文章」）也可以作为页面的父级
+    for (const child of group.children || []) {
+      if (child.kind === 'group') options.push({ label: `　└ ${child.label}`, value: child.id })
+    }
+  }
+  return options
+})
 
 /** 树摊平成带缩进的行，比嵌套 DOM 更好控制行内操作 */
 const rows = computed(() => {
-  const output = []
-  for (const group of tree.value) {
-    output.push({ ...group, depth: 0 })
-    for (const child of group.children || []) {
-      output.push({ ...child, depth: 1, parentLabel: group.label })
-    }
-  }
-  return output
+  const flatten = (nodes, depth = 0) =>
+    nodes.flatMap((node) => [{ ...node, depth }, ...flatten(node.children || [], depth + 1)])
+  return flatten(tree.value)
 })
 
 async function load() {
@@ -193,7 +196,7 @@ onMounted(load)
           <span>操作</span>
         </div>
         <div v-for="row in rows" :key="row.id" class="table-row" :class="{ child: row.depth > 0 }">
-          <span class="cell-name">
+          <span class="cell-name" :style="{ paddingLeft: `${row.depth * 18}px` }">
             <span v-if="row.depth > 0" class="indent">└</span>
             <strong v-if="row.kind === 'group'">{{ row.label }}</strong>
             <span v-else>{{ row.label }}</span>
@@ -237,8 +240,7 @@ onMounted(load)
           v-model:value="form.parentId"
           :options="groupOptions"
           clearable
-          placeholder="留空即顶级分组"
-          :disabled="form.kind === 'group'"
+          placeholder="留空即顶级分组（分组最多两级）"
         />
         <label>类型</label>
         <n-select

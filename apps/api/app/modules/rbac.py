@@ -273,8 +273,8 @@ def create_menu(
         raise conflict("menu_key_exists", f"菜单标识 {payload.key} 已存在")
     parent = _require_parent(db, payload.parent_id)
     _validate_menu_permission(db, payload.permission)
-    if payload.kind == "group" and parent is not None:
-        raise ApiError("invalid_menu", "分组只能建在顶级", 400)
+    if payload.kind == "group" and parent is not None and parent.parent_id is not None:
+        raise ApiError("invalid_menu", "分组最多两级，分类下不能再建分组", 400)
     if payload.kind != "group" and parent is None:
         raise ApiError("invalid_menu", "页面菜单必须挂在某个分组下", 400)
 
@@ -325,6 +325,8 @@ def update_menu(
         if new_parent_id and _is_descendant(db, menu.id, new_parent_id):
             raise ApiError("invalid_menu", "不能把菜单移动到自己的子级下", 400)
         parent = _require_parent(db, new_parent_id)
+        if menu.kind == "group" and parent is not None and parent.parent_id is not None:
+            raise ApiError("invalid_menu", "分组最多两级，分类下不能再建分组", 400)
         menu.parent_id = parent.id if parent else None
         data.pop("parent_id", None)
 

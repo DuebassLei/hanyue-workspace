@@ -22,7 +22,7 @@ import { useSessionStore } from './stores/session'
 import { useRbacStore } from './stores/rbac'
 import { accentKey, bindShellAppearance, fontKey, setAccent, setFontSize, useNaiveTheme } from './ui/theme'
 import { syncFeedbackTheme } from './ui/feedback'
-import { NAV_GROUPS, breadcrumbsFor, findNav } from './ui/nav'
+import { NAV_GROUPS, breadcrumbsFor, findNav, navEntries } from './ui/nav'
 import { usePageTabs } from './ui/shell'
 import PageTabs from './features/shell/PageTabs.vue'
 import CommandPalette from './features/shell/CommandPalette.vue'
@@ -38,10 +38,11 @@ const router = useRouter()
 const session = useSessionStore()
 const rbac = useRbacStore()
 const COLLAPSE_KEY = 'hanyue-sider-collapsed'
-const OPEN_KEY = 'hanyue-menu-open'
 
 const collapsed = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
-const expandedKeys = ref(readOpenKeys())
+// 展开态只在本次会话内记忆：首次进入只展开当前页面所在的分类，
+// 其余收起（工作区下有四个分类，全展开和原来的平铺没区别）。
+const expandedKeys = ref([])
 const { theme, themeOverrides, isDark } = useNaiveTheme(session)
 bindShellAppearance(isDark)
 const {
@@ -57,27 +58,9 @@ const accountOpen = ref(false)
 const isFullscreen = ref(false)
 const canFullscreen = typeof document !== 'undefined' && document.documentElement.requestFullscreen
 
-function readOpenKeys() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(OPEN_KEY) || 'null')
-    if (Array.isArray(saved)) return saved
-  } catch {
-    /* 坏数据就当没存过 */
-  }
-  return NAV_GROUPS.map((group) => group.key)
-}
-
 watch(collapsed, (value) => {
   localStorage.setItem(COLLAPSE_KEY, value ? '1' : '0')
 })
-
-watch(
-  expandedKeys,
-  (value) => {
-    localStorage.setItem(OPEN_KEY, JSON.stringify(value))
-  },
-  { deep: true },
-)
 
 watch(
   () => session.theme,
@@ -249,26 +232,47 @@ const itemIcons = {
 // 保证后端不可达也能看到骨架，而不是空白侧栏。
 const navGroups = computed(() => (rbac.menus.length ? rbac.menus : NAV_GROUPS))
 
+/** 叶子页面项（带祖先链），选中态、移动端底栏和展开定位共用 */
+const navPages = computed(() => navEntries(navGroups.value))
+
+function itemIcon(item) {
+  return itemIcons[item.name] || itemIcons[item.icon] || itemIcons.overview
+}
+
+function toMenuOption(item) {
+  const option = { label: item.label, key: item.name, icon: itemIcon(item) }
+  if (item.children?.length) option.children = item.children.map(toMenuOption)
+  return option
+}
+
 const menuOptions = computed(() =>
   navGroups.value.map((group) => ({
     label: group.label,
     key: group.key,
-    icon: groupIcons[group.key],
-    children: group.items.map((item) => ({
-      label: item.label,
-      key: item.name,
-      icon: itemIcons[item.name] || itemIcons.overview,
-    })),
+    icon: groupIcons[group.key] || itemIcon(group),
+    children: (group.items || []).map(toMenuOption),
   })),
 )
 
-const mobileNav = computed(() => navGroups.value.flatMap((group) => group.items))
+const mobileNav = computed(() => navPages.value)
 
 const activeKey = computed(() => {
-  const items = navGroups.value.flatMap((group) => group.items)
-  const hit = items.find((item) => item.name === route.name || item.aliases?.includes(route.name))
+  const hit = navPages.value.find(
+    (item) => item.name === route.name || item.aliases?.includes(route.name),
+  )
   return hit?.name || null
 })
+
+/** 只补开当前页面的祖先分类，不关掉用户手动展开的其它分组。 */
+function expandCurrentPath() {
+  const hit = navPages.value.find(
+    (item) => item.name === route.name || item.aliases?.includes(route.name),
+  )
+  if (!hit?.ancestors?.length) return
+  expandedKeys.value = [...new Set([...expandedKeys.value, ...hit.ancestors])]
+}
+
+watch([() => route.name, navPages], expandCurrentPath, { immediate: true })
 
 const crumbs = computed(() => breadcrumbsFor(route.name, route.meta.title, navGroups.value))
 
@@ -326,8 +330,6 @@ watch(
       return
     }
     await rbac.load()
-    const saved = localStorage.getItem(OPEN_KEY)
-    if (!saved) expandedKeys.value = navGroups.value.map((group) => group.key)
   },
 )
 
