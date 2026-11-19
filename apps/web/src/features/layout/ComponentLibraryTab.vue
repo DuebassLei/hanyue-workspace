@@ -1,14 +1,17 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { NButton, NEmpty, NInput } from 'naive-ui'
 import { api } from '../../api/client'
 import { toast } from '../../ui/feedback'
 import { useLayoutComponents } from '../../composables/useLayoutComponents'
+import PhonePreview from './PhonePreview.vue'
 
 /**
  * 小组件库：组件清单来自后端注册表（GET /wechat-mp/components），
  * 新增围栏类型后端落一条注册表记录即可在此出现。
- * 每个组件的示例正文用当前选中主题实时渲染（服务端同一渲染函数）。
+ * 每个组件的示例正文用当前选中主题实时渲染（服务端同一渲染函数），
+ * 并且必须套真机宽度的手机壳：样张宽度一旦跟随卡片弹性变化，
+ * 窄列组件在库里看着正常、推出去到手机上就塌，等于没有预览。
  */
 const props = defineProps({
   store: { type: Object, required: true },
@@ -20,7 +23,26 @@ const searchQuery = ref('')
 const htmlMap = ref({})
 const busy = ref(false)
 const copyId = ref('')
+const grid = ref(null)
 let renderToken = 0
+
+/** PhonePreview mini 的占位宽度：375px 屏幕 + 6px 中框 */
+const SHELL_WIDTH = 375 + 6 * 2
+/** 卡片左右 padding 各 16px（见 .component-card） */
+const CARD_PADDING = 32
+/** 样张壳内正文的可见上限：现有组件样张自然高度 128~492px，留一倍余量，超出才滚动 */
+const SAMPLE_MAX_SCREEN = 640
+const previewScale = ref(0.8)
+
+/** 缩放而不是裁切：壳内永远是 375px 真机宽度，卡片再窄也只缩小倍率 */
+function updatePreviewScale() {
+  const card = grid.value?.querySelector('.component-card')
+  if (!card) return
+  const inner = card.clientWidth - CARD_PADDING
+  if (inner > 0) previewScale.value = Math.min(1, Math.max(0.6, inner / SHELL_WIDTH))
+}
+
+let scaleObserver = null
 
 const themeOptions = computed(() =>
   props.store.visiblePresets.value
@@ -72,12 +94,6 @@ function jumpToCategory(category) {
   setTimeout(() => target.classList.remove('component-card-flash'), 1200)
 }
 
-/** 与 PhonePreview 白底包裹层同一内联样式，保证脱离手机壳后字号/行高一致 */
-function wrappedSample(html) {
-  if (!html) return ''
-  return `<div style="padding:14px 16px;background:#ffffff;color:#333;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;">${html}</div>`
-}
-
 async function renderAll() {
   const token = ++renderToken
   if (!themeId.value) return
@@ -101,6 +117,8 @@ async function renderAll() {
 }
 
 watch(themeId, renderAll)
+// 搜索/过滤会改变列数，列数变则卡片宽变，缩放倍率要跟着重算
+watch(() => orderedItems.value.length, () => nextTick(updatePreviewScale))
 
 onMounted(async () => {
   try {
@@ -112,7 +130,15 @@ onMounted(async () => {
     themeId.value = props.store.themes.value.defaultThemeId || props.store.visiblePresets.value[0]?.id || ''
   }
   renderAll()
+  await nextTick()
+  updatePreviewScale()
+  if (grid.value && typeof ResizeObserver !== 'undefined') {
+    scaleObserver = new ResizeObserver(updatePreviewScale)
+    scaleObserver.observe(grid.value)
+  }
 })
+
+onBeforeUnmount(() => scaleObserver?.disconnect())
 
 async function copySnippet(item) {
   try {
@@ -175,7 +201,7 @@ async function copySnippet(item) {
     <n-empty v-if="!components.length && !busy" description="组件清单加载失败，稍后重试" />
     <n-empty v-else-if="components.length && !filteredComponents.length" description="没有匹配的小组件" />
 
-    <div class="component-grid">
+    <div ref="grid" class="component-grid">
       <article
         v-for="item in orderedItems"
         :id="`component-card-${item.id}`"
@@ -192,11 +218,18 @@ async function copySnippet(item) {
           </n-button>
         </header>
         <p class="component-desc">{{ item.description }}</p>
-        <!-- 组件库不套手机壳：正文按微信字号直接渲染，超长时卡内滚动 -->
-        <div v-if="busy && !htmlMap[item.id]" class="component-sample component-sample-busy">
-          排版渲染中…
+        <!-- 375px 真机宽度的 mini 手机壳：库里看到的宽度就是推出去后手机上的宽度。
+             壳高取内容自然高度（上限 SAMPLE_MAX_SCREEN），宁可卡片高低不齐，
+             也不能裁掉组件底部——裁掉的那部分正是用户看不见的显示问题。 -->
+        <div class="component-sample">
+          <PhonePreview
+            :html="htmlMap[item.id]"
+            :busy="busy || !htmlMap[item.id]"
+            variant="mini"
+            :scale="previewScale"
+            :height="SAMPLE_MAX_SCREEN"
+          />
         </div>
-        <div v-else class="component-sample" v-html="wrappedSample(htmlMap[item.id])" />
       </article>
     </div>
   </div>
@@ -289,7 +322,8 @@ async function copySnippet(item) {
 }
 .component-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  /* min() 让 320px 窄屏不会因为固定最小轨道宽而撑出整页横向滚动 */
+  grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
   gap: var(--space-4);
   scroll-margin-top: 16px;
 }
@@ -342,33 +376,13 @@ async function copySnippet(item) {
   font-size: 12px;
   color: var(--color-text-secondary);
 }
-/* 正文样张：白底即微信正文底色，超长卡内滚动 */
+/* 样张：壳内永远是 375px 真机宽度，卡片不够宽时整体缩放而不是改排版 */
 .component-sample {
   margin-top: 4px;
-  max-height: 300px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  border-radius: var(--radius-md);
-  box-shadow: inset 0 0 0 1px var(--color-border);
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--color-text-muted) 45%, transparent) transparent;
-}
-.component-sample::-webkit-scrollbar {
-  width: 4px;
-}
-.component-sample::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--color-text-muted) 45%, transparent);
-  border-radius: 4px;
-}
-.component-sample :deep(img) {
-  max-width: 100%;
-}
-.component-sample-busy {
-  display: grid;
-  place-items: center;
-  min-height: 96px;
-  color: var(--color-text-muted);
-  font-size: 13px;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  overflow: hidden;
 }
 @media (max-width: 720px) {
   .component-discovery {

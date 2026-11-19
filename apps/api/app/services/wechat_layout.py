@@ -134,15 +134,15 @@ LAYOUT_COMPONENTS: tuple[dict, ...] = (
     {
         "id": "support",
         "label": "支持一下",
-        "description": "文末三列互动卡：点赞、转发、推荐。围栏名后写 `标题 / 副标题`，每行 `动作 | 说明`",
+        "description": "文末互动卡：主色圆图标在左，动作名与说明各占一行，长句也不会拆成孤字。围栏名后写 `标题 / 副标题`，每行 `动作 | 说明`",
         "category": "互动",
-        "snippet": "\n\n:::support 喜欢就支持一下吧 / 你的每一次互动，都是我持续创作的动力\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友\n推荐 | 推荐给身边的人\n:::\n",
+        "snippet": "\n\n:::support 喜欢就支持一下吧 / 你的每一次互动，都是我持续创作的动力\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::\n",
         "sampleBody": ":::support 喜欢就支持一下吧 / 你的每一次互动，都是我持续创作的动力\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::",
     },
     {
         "id": "cheer",
         "label": "暖心支持卡",
-        "description": "手绘暖色支持卡：爱心标题 / 胶囊副标题 / 气泡 + 三色互动卡；围栏名后写 `标题 / 副标题 / 气泡`，每行 `动作 | 说明`，可选 `插图 | {{image1}}`",
+        "description": "手绘暖色支持卡：爱心徽章主视觉 + 主标/胶囊副标 + 三色互动行 + 落款气泡。围栏名后写 `标题 / 副标题 / 气泡`（副标题建议 18 字内，胶囊不换行），每行 `动作 | 说明`，可选 `插图 | {{image1}}`",
         "category": "互动",
         "snippet": "\n\n:::cheer 喜欢就支持一下吧！ / 你的每一次互动，都是我持续创作的动力～ / 有你真好！\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::\n",
         "sampleBody": ":::cheer 喜欢就支持一下吧！ / 你的每一次互动，都是我持续创作的动力～ / 有你真好！\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::",
@@ -776,13 +776,22 @@ _LENGTH_KEYS = {
 }
 
 
+#: line-height 的裸数字在 CSS 里是**倍数**（26 配 13px 字号 = 338px 行高，字会被推出圆圈），
+#: 而徽章/圆圈要的是 px。主题 tokens 的行高上限是 2.2，所以大于这个阈值的数字只可能是 px 值。
+#: 写成 "58px" 字符串的调用点一直正常，这条规则只兜住漏写单位的数字。
+_LINE_HEIGHT_PX_ABOVE = 4
+
+
 def _style(pairs: dict) -> str:
     items: list[str] = []
     for key, value in pairs.items():
         if value is None or value == "":
             continue
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and key in _LENGTH_KEYS:
-            value = f"{value}px"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if key == "line-height" and value > _LINE_HEIGHT_PX_ABOVE:
+                value = f"{value}px"
+            elif key in _LENGTH_KEYS:
+                value = f"{value}px"
         items.append(f"{key}:{value}")
     return ";".join(items)
 
@@ -1393,8 +1402,9 @@ def _render_compare(block: Block, tokens: dict, warnings: list[dict]) -> str:
     rows = "".join(
         _section(
             {"display": "flex", "margin": "0 0 8px"},
-            f'<span style="{_style({"flex": 1, "padding": "12px 14px", "background": "#F4F5F7", "border-radius": 12, "font-size": 14, "line-height": 1.6, "color": tokens["textColor"], "margin-right": 10})}">{_cell(cols[0], tokens, warnings)}</span>'
-            f'<span style="{_style({"flex": 1, "padding": "12px 14px", "background": tokens["primarySoft"], "border-radius": 12, "font-size": 14, "line-height": 1.6, "color": tokens["textColor"]})}">{_cell(cols[1], tokens, warnings)}</span>',
+            # 左右两列各占一半：320px 屏每格内容宽度只有 119px，内边距再宽一点 8 字就要拆行
+            f'<span style="{_style({"flex": 1, "padding": "12px 10px", "background": "#F4F5F7", "border-radius": 12, "font-size": 14, "line-height": 1.6, "color": tokens["textColor"], "margin-right": 10})}">{_cell(cols[0], tokens, warnings)}</span>'
+            f'<span style="{_style({"flex": 1, "padding": "12px 10px", "background": tokens["primarySoft"], "border-radius": 12, "font-size": 14, "line-height": 1.6, "color": tokens["textColor"]})}">{_cell(cols[1], tokens, warnings)}</span>',
         )
         for cols in block.rows
     )
@@ -1430,40 +1440,48 @@ def _support_glyph(label: str) -> str:
 
 
 def _render_support(block: Block, tokens: dict, warnings: list[dict]) -> str:
-    """文末互动卡。微信不能放插画，图标用主色圆里的一个字代替。"""
+    """文末互动卡：图标在左，动作名与说明各占一行。
+
+    为什么不是三列：375px 正文里三列每列只有 82px 内容宽度，一句中文说明必然被拆成
+    孤字行（320px 更严重）。行式布局把说明的可用宽度提到 216px（320px 屏）~271px（375px 屏），
+    作者写多长都不会掉字。图标仍是主色实心圆里的一个字——微信不能放插画。
+    """
     heads = [part.strip() for part in block.meta.split("/", 1)] if block.meta else []
     title = heads[0] if heads else ""
     subtitle = heads[1] if len(heads) > 1 else ""
     head = ""
     if title:
         head += (
-            f'<strong style="{_style({"display": "block", "font-size": 18, "font-weight": 700, "line-height": 1.4, "letter-spacing": 0.5, "color": tokens["textColor"]})}">{escape_text(title)}</strong>'
+            f'<strong style="{_style({"display": "block", "font-size": 18, "font-weight": 700, "line-height": 1.4, "letter-spacing": 0.5, "color": tokens["textColor"], "text-align": "center"})}">{escape_text(title)}</strong>'
             f'<span style="{_style({"display": "block", "width": 36, "height": 3, "background": tokens["primaryColor"], "margin": "8px auto 0", "border-radius": 2})}"></span>'
         )
     if subtitle:
+        # 副标题用整行居中而不是胶囊底：胶囊是 inline-block，长句在窄屏会被撑成两块底色
         head += (
-            f'<span style="{_style({"display": "inline-block", "margin": "12px 0 0", "padding": "4px 12px", "background": tokens["primarySoft"], "border-radius": 999, "font-size": 13, "line-height": 1.6, "color": tokens["mutedColor"]})}">{escape_text(subtitle)}</span>'
+            f'<span style="{_style({"display": "block", "margin": "10px 0 0", "font-size": 13, "line-height": 1.7, "color": tokens["mutedColor"], "text-align": "center"})}">{escape_text(subtitle)}</span>'
         )
-    cards = "".join(
-        f'<span style="{_style({"display": "inline-block", "width": "31%", "vertical-align": "top", "margin": "0 1% 0", "padding": "12px 6px 10px", "background": tokens["quoteBg"], "border-radius": 12, "text-align": "center"})}">'
-        f'<span style="{_style({"display": "block", "width": 32, "height": 32, "line-height": 32, "margin": "0 auto 8px", "border-radius": 999, "background": tokens["primarySoft"], "color": tokens["primaryColor"], "font-size": 14, "font-weight": 700, "text-align": "center"})}">{escape_text(_support_glyph(cols[0]))}</span>'
-        f'<strong style="{_style({"display": "inline-block", "padding": "2px 10px", "background": tokens["primaryColor"], "border-radius": 999, "color": "#FFFFFF", "font-size": 12, "font-weight": 600, "line-height": 1.6})}">{_cell(cols[0], tokens, warnings)}</strong>'
-        f'<span style="{_style({"display": "block", "margin": "6px 0 0", "font-size": 12, "line-height": 1.5, "color": tokens["mutedColor"]})}">{_cell(cols[1], tokens, warnings)}</span>'
-        f"</span>"
+    rows = "".join(
+        _section(
+            {"display": "flex", "align-items": "flex-start", "margin": "0 0 12px"},
+            f'<span style="{_style({"flex": "0 0 32px", "width": 32, "height": 32, "line-height": 32, "border-radius": 999, "background": tokens["primaryColor"], "color": "#FFFFFF", "font-size": 14, "font-weight": 700, "text-align": "center", "margin-right": 12})}">{escape_text(_support_glyph(cols[0]))}</span>'
+            f'<span style="{_style({"flex": "1", "min-width": "0"})}">'
+            f'<strong style="{_style({"display": "block", "font-size": 15, "font-weight": 600, "line-height": 1.5, "color": tokens["textColor"]})}">{_cell(cols[0], tokens, warnings)}</strong>'
+            f'<span style="{_style({"display": "block", "margin": "1px 0 0", "font-size": 13, "line-height": 1.6, "color": tokens["mutedColor"]})}">{_cell(cols[1], tokens, warnings)}</span>'
+            f"</span>",
+        )
         for cols in block.rows
     )
     body = (
-        f'<span style="{_style({"display": "block", "margin": "16px 0 0", "text-align": "center"})}">{cards}</span>'
-        if cards
+        f'<span style="{_style({"display": "block", "margin": "16px 0 0"})}">{rows}</span>'
+        if rows
         else ""
     )
     return _section(
         {
             "margin": "2em 0 1em",
-            "padding": "20px 8px 16px",
+            "padding": "20px 16px 8px",
             "background": tokens["primarySoft"],
             "border-radius": 16,
-            "text-align": "center",
         },
         head + body,
     )
@@ -1549,15 +1567,19 @@ def _render_cheer(
             continue
         circle, tag, ink = _CHEER_COLORS[index % len(_CHEER_COLORS)]
         cards.append(
-            f'<span style="{_style({"display": "inline-block", "box-sizing": "border-box", "width": "31%", "vertical-align": "top", "margin": "0 1%", "padding": "15px 4px 13px", "background": "#FFFCF8", "border": "1px solid #F7E6D9", "border-radius": 16, "text-align": "center"})}">'
-            f'<span style="{_style({"display": "block", "width": 56, "height": 56, "line-height": "56px", "margin": "0 auto 10px", "border-radius": 999, "background": circle, "font-size": 28, "text-align": "center"})}">{escape_text(_cheer_glyph(cols[0]))}</span>'
-            f'<strong style="{_style({"display": "block", "font-size": 13, "font-weight": 700, "letter-spacing": 0.5, "line-height": 1.5, "color": ink})}">{_cell(cols[0], tokens, warnings)}</strong>'
-            f'<span style="{_style({"display": "block", "margin": "5px 2px 0", "font-size": 11, "line-height": 1.6, "color": "#8C735F"})}">{_cell(cols[1], tokens, warnings)}</span>'
-            f"</span>"
+            _section(
+                {"display": "flex", "align-items": "flex-start", "margin": "0 0 10px"},
+                f'<span style="{_style({"flex": "0 0 44px", "width": 44, "height": 44, "line-height": "44px", "border-radius": 999, "background": circle, "border": f"1px solid {tag}", "font-size": 22, "text-align": "center", "margin-right": 12})}">{escape_text(_cheer_glyph(cols[0]))}</span>'
+                f'<span style="{_style({"flex": "1", "min-width": "0"})}">'
+                f'<strong style="{_style({"display": "block", "font-size": 14.5, "font-weight": 700, "letter-spacing": 0.5, "line-height": 1.5, "color": ink})}">{_cell(cols[0], tokens, warnings)}</strong>'
+                f'<span style="{_style({"display": "block", "margin": "1px 0 0", "font-size": 12.5, "line-height": 1.6, "color": "#8C735F"})}">{_cell(cols[1], tokens, warnings)}</span>'
+                f"</span>",
+            )
         )
 
     body = (
-        f'<span style="{_style({"display": "block", "margin": "18px 0 0", "font-size": 0, "text-align": "center"})}">{"".join(cards)}</span>'
+        # 外层卡片是居中排版（徽章/主标/副标/落款），互动行必须显式左对齐
+        f'<span style="{_style({"display": "block", "margin": "18px 0 0", "text-align": "left"})}">{"".join(cards)}</span>'
         if cards
         else ""
     )

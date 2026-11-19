@@ -6,12 +6,15 @@
 - 各区块（标题/引用/列表/分割线/代码/卡片/关注/署名/图注）都能渲染；
 - 未知区块与未闭合区块不丢内容，给出可执行告警；
 - 主题 CRUD（预设不可改删）与渲染预览端点；
-- 推送时主题快照落库，任务按快照渲染（改主题不影响历史任务）。
+- 推送时主题快照落库，任务按快照渲染（改主题不影响历史任务）；
+- 移动端 375px 显示回归：内联样式的 line-height 单位、百分比多列卡片不分行。
 """
 
 from __future__ import annotations
 
 import io
+import re
+from html.parser import HTMLParser
 
 import pytest
 
@@ -431,6 +434,180 @@ def test_mini_support_renders_three_icons():
     # 不写标题也应零告警
     plain = wechat_layout.render_document(":::mini-support\n点赞\n:::", None, [])
     assert plain["warnings"] == [], plain["warnings"]
+
+
+# ---------- 移动端（375px）显示回归 ----------
+# 组件库的样张宽度不等于真机宽度，历史上两类问题只在手机上暴露：
+# line-height 漏写单位（数字被当倍数，圆圈里的字掉出圆圈）、
+# 百分比卡片没算内边距（三列撑成 2+1）。这里守住整类，而不是守住这两个实例。
+
+_LINE_HEIGHT_IN_HTML = re.compile(r"line-height:(\d+(?:\.\d+)?)(?!px)[;\"]")
+
+
+def _style_props(style: str) -> dict:
+    return dict(pair.split(":", 1) for pair in style.split(";") if ":" in pair)
+
+
+def _horizontal_percent(props: dict) -> float:
+    """卡片左右两侧占容器的百分比（margin 简写里的 % 值）。"""
+    total = 0.0
+    for key in ("margin", "margin-left", "margin-right"):
+        value = props.get(key, "")
+        parts = value.split()
+        if key == "margin":
+            parts = parts[1:3] if len(parts) >= 3 else parts[:2]  # 上下 / 左右
+        for part in parts:
+            if part.endswith("%"):
+                total += abs(float(part.rstrip("%")))
+    return total
+
+
+def test_style_appends_px_only_to_absolute_line_heights():
+    from app.services import wechat_layout
+
+    # 圆圈/徽章：数字是 px，必须补单位，否则 26 会变成字号的 26 倍
+    assert wechat_layout._style({"line-height": 26}) == "line-height:26px"
+    assert wechat_layout._style({"line-height": 32}) == "line-height:32px"
+    # 正文行高：数字是倍数，原样输出
+    assert wechat_layout._style({"line-height": 1.8}) == "line-height:1.8"
+    assert wechat_layout._style({"line-height": 1}) == "line-height:1"
+    # 已写单位的字符串不重复加工
+    assert wechat_layout._style({"line-height": "58px"}) == "line-height:58px"
+    assert wechat_layout._style({"font-size": 14}) == "font-size:14px"
+
+
+def test_no_component_renders_an_absurd_line_height():
+    from app.services import wechat_layout
+
+    for item in wechat_layout.LAYOUT_COMPONENTS:
+        html = wechat_layout.render_document(item["sampleBody"], None, [])["html"]
+        for value in _LINE_HEIGHT_IN_HTML.findall(html):
+            assert float(value) <= 4, f"{item['id']} 的 line-height:{value} 漏了单位"
+
+
+def test_percentage_card_columns_fit_one_row_at_375():
+    """inline-block 百分比卡片：左右占宽之和 ≤100%，且带横向内边距时必须 border-box。
+
+    31% + 12px 内边距在 375px 正文里是 112.8px，三张 338px > 容器 325px，第三列会掉到第二行。
+    """
+    from app.services import wechat_layout
+
+    for item in wechat_layout.LAYOUT_COMPONENTS:
+        html = wechat_layout.render_document(item["sampleBody"], None, [])["html"]
+        cards = [
+            _style_props(match.group(1))
+            for match in re.finditer(r'<span style="([^"]*)"', html)
+            if _style_props(match.group(1)).get("display") == "inline-block"
+            and _style_props(match.group(1)).get("width", "").endswith("%")
+        ]
+        for props in cards:
+            has_box = bool(props.get("padding", "").strip()) or bool(
+                props.get("border", "").strip()
+            )
+            if has_box:
+                assert props.get("box-sizing") == "border-box", (
+                    f"{item['id']} 的百分比卡片有内边距却没写 box-sizing，窄屏会撑成多行"
+                )
+        # 同一行的等宽卡片合计不能超过容器宽度
+        rows: dict[tuple, list] = {}
+        for props in cards:
+            rows.setdefault((props["width"], _horizontal_percent(props)), []).append(props)
+        for (width, margins), group in rows.items():
+            total = (float(width.rstrip("%")) + margins) * len(group)
+            assert total <= 100, f"{item['id']} 的 {len(group)} 列卡片占 {total:.0f}% > 100%，375px 下分行"
+
+
+def test_steps_and_support_glyph_circles_keep_their_digit_visible():
+    from app.services import wechat_layout
+
+    steps = wechat_layout.render_document(":::steps\n第一步 | 说明\n:::", None, [])["html"]
+    support = wechat_layout.render_document(":::support\n点赞 | 说明\n:::", None, [])["html"]
+    # 圆圈高度 = 行高 = 字号 × 1，数字才落在圆心；行高 338px/448px 会把字推出圆圈
+    assert "line-height:26px" in steps
+    assert "line-height:32px" in support
+
+
+class _StyleNodeCollector(HTMLParser):
+    """按样式条件收集元素及其纯文本，用于「窄列里放了什么」这类结构断言。"""
+
+    def __init__(self, predicate):
+        super().__init__()
+        self.predicate = predicate
+        self.stack: list = []
+        self.matches: list[tuple[dict, str]] = []
+
+    def handle_starttag(self, tag, attrs):
+        props = _style_props(dict(attrs).get("style", ""))
+        self.stack.append([props, [], self.predicate(props)])
+
+    def handle_startendtag(self, tag, attrs):
+        props = _style_props(dict(attrs).get("style", ""))
+        if self.predicate(props):
+            self.matches.append((props, ""))
+
+    def handle_data(self, data):
+        if self.stack:
+            self.stack[-1][1].append(data)
+
+    def handle_endtag(self, tag):
+        if not self.stack:
+            return
+        props, parts, is_match = self.stack.pop()
+        text = "".join(parts).strip()
+        if is_match:
+            self.matches.append((props, text))
+        if self.stack:
+            self.stack[-1][1].append(text)
+
+
+def _narrow_columns(html: str) -> list[tuple[dict, str]]:
+    """宽度 ≤40% 的 inline-block 列——375px 下每列内容只有几十 px，是孤字行的温床。"""
+
+    def is_narrow(props: dict) -> bool:
+        width = props.get("width", "")
+        return (
+            props.get("display") == "inline-block"
+            and width.endswith("%")
+            and float(width.rstrip("%")) <= 40
+        )
+
+    collector = _StyleNodeCollector(is_narrow)
+    collector.feed(html)
+    return collector.matches
+
+
+def test_narrow_columns_hold_only_short_labels():
+    """窄列只允许放图标 + 动作名级别的短标签；句子必须走整行。
+
+    这是 support/cheer 从三列改成行式的原因：31% 宽度的列在 375px 正文里只有 82px，
+    一句 14 字的中文说明必然拆成 3 行并留下单字孤行。
+    """
+    from app.services import wechat_layout
+
+    for item in wechat_layout.LAYOUT_COMPONENTS:
+        html = wechat_layout.render_document(item["sampleBody"], None, [])["html"]
+        for props, text in _narrow_columns(html):
+            assert len(text) <= 4, (
+                f"{item['id']} 在 {props['width']} 的窄列里放了 {len(text)} 字「{text}」，"
+                f"375px 下会拆出孤字行；请改成一整行的行式布局"
+            )
+
+
+def test_interaction_cards_render_action_rows_not_columns():
+    """support / cheer 的互动区是「图标在左 + 动作名/说明各一行」，不再用百分比多列。"""
+    from app.services import wechat_layout
+
+    for fence, desc in (("support", "喜欢就点个赞吧，感谢你的支持"), ("cheer", "分享给更多朋友，让美好一起传递")):
+        html = wechat_layout.render_document(
+            f":::{fence} 标题 / 副标题\n点赞 | {desc}\n转发 | {desc}\n:::", None, []
+        )["html"]
+        assert "width:31%" not in html, f"{fence} 又用回百分比多列了"
+        assert _narrow_columns(html) == [], f"{fence} 的说明被放进了窄列"
+        # 说明所在文本列要占满剩余宽度
+        assert re.search(r"flex:1;min-width:0", html) or re.search(r"min-width:0", html), (
+            f"{fence} 的文字列缺少 flex:1 + min-width:0，长句会撑破行"
+        )
+        assert desc in html.replace("&nbsp;", " ")
 
 
 def test_theme_schema_covers_known_keys():
