@@ -442,7 +442,7 @@ def _run_agent_with_article_json(client, monkeypatch, subject: str, skill_key: s
     assert run["status"] == "succeeded", run
 
     with SessionLocal() as db:
-        # create_outline 与 generate_article 都会建稿，按本轮 tool.result 的 versionId 精确取值
+        # 大纲不落稿（WIP 新语义）：只有 generate_article 建稿，按 tool.result 的 versionId 精确取值
         events = client.get(f"/api/v1/agent/runs/{run['id']}/events", headers=headers).json()
         results = {
             e["payload"]["toolId"]: e["payload"]["result"]
@@ -454,8 +454,8 @@ def _run_agent_with_article_json(client, monkeypatch, subject: str, skill_key: s
         assert version.content_item_id == article["contentItemId"]
         outline = results.get("create_outline")
         if outline:
-            outline_body = db.get(models.ContentVersion, outline["versionId"]).body
-            assert "coverPrompt" in outline_body, "非文章工具不做 JSON 解析"
+            assert "versionId" not in outline, "大纲只是中间产物，不应落稿件版本"
+            assert outline.get("outline"), "大纲文本应随 tool.result 返回，供成文步骤注入"
         entry = db.scalar(
             select(models.SkillRegistryEntry).where(
                 models.SkillRegistryEntry.skill_key == skill_key,
@@ -484,7 +484,10 @@ def test_agent_generate_article_passes_skill_system_prompt(client, monkeypatch):
     )
     tone = entry.manifest["tone"]
     assert markdown
-    for call in calls:
+    # 大纲步骤用的是大纲系统提示词（无语气段），只验文章任务的 system_prompt
+    article_calls = [c for c in calls if c.get("task_type") == "article"]
+    assert article_calls, calls
+    for call in article_calls:
         assert call["system_prompt"] and tone in call["system_prompt"], call
 
 

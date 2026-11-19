@@ -10,17 +10,28 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
-from . import agent_policy, ai_article, ai_gateway, article_workflow
+from . import agent_policy, ai_article, ai_gateway, article_workflow, prompt_rules, writing_rules
 from .agent_policy import ToolNotAllowed
 
 # 只读写作检查工具：都作用在稿件版本上，不调用模型
 _WRITING_CHECK_TOOLS = frozenset({"review_article", "check_ai_tone", "extract_facts", "plan_images"})
 
+# 写稿类工具：会产生 tool.result / AgentToolCall，供后续步骤定位稿件版本
+WRITE_TOOLS = frozenset({"create_outline", "generate_article", "prepare_platform_variant"})
+
 APPROVAL_TTL_SECONDS = 15 * 60
+
+OUTLINE_SYSTEM_PROMPT = (
+    "你是资深公众号主笔。只输出文章大纲本身：用 Markdown 列表给出标题建议与 3-6 个章节要点，"
+    "每节一句话说明写什么。不要输出 JSON、不要解释、不要写正文。"
+)
+
+# 大纲注入正文 prompt 的引导语（T2 起读 prompt_rules 的 agent.outline_inject，缺失回退此常量）
+OUTLINE_INJECT_TEXT = "参考大纲（结构可微调，不要照抄标题）："
 
 
 def _utcnow() -> datetime:
@@ -87,15 +98,17 @@ class WorkflowConflict(Exception):
         super().__init__("、".join(keys))
 
 
-def _workflow_steps(entry: models.SkillRegistryEntry) -> list:
-    manifest = entry.manifest if isinstance(entry.manifest, dict) else {}
-    steps = manifest.get("workflow") or []
+def _workflow_steps(entry: models.SkillRegistryEntry, manifest: dict | None = None) -> list:
+    """workflow 步骤清单；manifest 传入时用合成结果，否则退回条目 manifest。"""
+    source = manifest if manifest is not None else (entry.manifest if isinstance(entry.manifest, dict) else {})
+    steps = source.get("workflow") or []
     return steps if isinstance(steps, list) else []
 
 
 def resolve_workflow_skill(db: Session, run: models.AgentRun) -> models.SkillRegistryEntry | None:
     """一次 run 最多一个带非空 workflow 的 Skill。
 
+    workflow 以规则表合成后的生效 manifest 为准（个人副本覆盖全局）。
     零个：返回 None，调用方走 LLM / 关键词规划。
     多于一个：抛 WorkflowConflict，由 start_run 把整次 run 标失败。
     """
@@ -105,17 +118,19 @@ def resolve_workflow_skill(db: Session, run: models.AgentRun) -> models.SkillReg
         entry = db.get(models.SkillRegistryEntry, skill_id)
         if not entry or entry.trust_status != "trusted":
             continue
-        if _workflow_steps(entry):
+        if _workflow_steps(entry, writing_rules.effective_manifest(db, entry, getattr(run, "owner_user_id", None))):
             found.append(entry)
     if len(found) > 1:
         raise WorkflowConflict([entry.skill_key for entry in found])
     return found[0] if found else None
 
 
-def steps_from_workflow(entry: models.SkillRegistryEntry, goal: str) -> list[dict]:
-    """按 manifest.workflow 的顺序生成步骤；参数以服务端默认值为底，清单里的静态参数覆盖。"""
+def steps_from_workflow(
+    entry: models.SkillRegistryEntry, goal: str, manifest: dict | None = None
+) -> list[dict]:
+    """按生效 workflow 的顺序生成步骤；参数以服务端默认值为底，清单里的静态参数覆盖。"""
     steps: list[dict] = []
-    for raw in _workflow_steps(entry):
+    for raw in _workflow_steps(entry, manifest):
         if not isinstance(raw, dict):
             continue
         tool = raw.get("tool")
@@ -357,21 +372,49 @@ async def _execute_tool(db: Session, run: models.AgentRun, tool_id: str, args: d
         ).all()
         return {"count": len(rows), "items": [{"id": r.id, "title": r.title} for r in rows]}
 
-    if tool_id in {"create_outline", "generate_article", "prepare_platform_variant"}:
+    if tool_id == "create_outline":
+        # 大纲只是中间产物：不落稿件库，由 start_run 注入后续成文步骤
+        prompt = str(args.get("prompt") or run.goal or "写一篇短文章")
+        generated = await ai_gateway.generate_text(
+            db,
+            owner_user_id=run.owner_user_id,
+            task_type="outline",
+            prompt=prompt,
+            constraints={"targetLength": 400},
+            system_prompt=prompt_rules.get_prompt_rule(db, "agent.outline_system", default=OUTLINE_SYSTEM_PROMPT),
+        )
+        raw_text = generated["text"]
+        if not raw_text:
+            raise AgentRuntimeError(
+                f"模型未返回内容（{generated.get('errorCode') or 'empty_response'}），请检查模型连接"
+            )
+        return {"outline": raw_text.strip(), "chars": len(raw_text), "modelCode": generated["modelCode"]}
+
+    if tool_id in {"generate_article", "prepare_platform_variant"}:
         task_type = {
-            "create_outline": "outline",
             "generate_article": "article",
             "prepare_platform_variant": "platform_variant",
         }[tool_id]
         prompt = str(args.get("prompt") or run.goal or "写一篇短文章")
+        outline = str(args.get("outline") or "").strip()
+        if outline:
+            inject = prompt_rules.get_prompt_rule(db, "agent.outline_inject", default=OUTLINE_INJECT_TEXT)
+            prompt = f"{prompt}\n\n{inject}\n{outline[:2000]}"
         skill = _resolve_run_skill(db, run)
-        system_prompt = ai_article.build_system_prompt(skill)
+        # 规则表为准：个人副本按类型覆盖全局（T2 换源，条目 manifest 只剩元数据兜底）
+        manifest = writing_rules.effective_manifest(db, skill, getattr(run, "owner_user_id", None))
+        target = manifest.get("targetLength")
+        if not isinstance(target, int) or isinstance(target, bool) or target <= 0:
+            target = 900
+        system_prompt = ai_article.build_system_prompt(
+            skill, db=db, owner_user_id=getattr(run, "owner_user_id", None)
+        )
         generated = await ai_gateway.generate_text(
             db,
             owner_user_id=run.owner_user_id,
             task_type=task_type,
             prompt=prompt,
-            constraints={"targetLength": 400 if task_type == "outline" else 900},
+            constraints={"targetLength": target},
             system_prompt=system_prompt,
         )
         raw_text = generated["text"]
@@ -380,9 +423,11 @@ async def _execute_tool(db: Session, run: models.AgentRun, tool_id: str, args: d
                 f"模型未返回内容（{generated.get('errorCode') or 'empty_response'}），请检查模型连接"
             )
         title, body, summary = prompt[:80], raw_text, f"Agent 工具 {tool_id} 生成（未按契约解析）"
+        contract_ok = False
         if tool_id == "generate_article":
             # 与普通成文路径一致：按 JSON 契约只把 markdown 落库；未按契约输出时保留原文容错
             draft = ai_article.parse_llm_output(raw_text)
+            contract_ok = draft.ok
             if draft.ok:
                 title = draft.title or prompt[:80]
                 body = draft.markdown
@@ -391,18 +436,32 @@ async def _execute_tool(db: Session, run: models.AgentRun, tool_id: str, args: d
                 parsed_title, parsed_body = ai_article.article_from_raw_output(raw_text)
                 title = parsed_title or prompt[:80]
                 body = parsed_body or raw_text
-        item = models.ContentItem(
-            workspace_id=run.workspace_id,
-            owner_user_id=run.owner_user_id,
-            title=title,
-            type="article",
-            status="draft",
-        )
-        db.add(item)
-        db.flush()
+        # 修复轮（Task 2）传 contentItemId：在同一篇稿件上追加版本，不再新建
+        item = None
+        requested_item_id = args.get("contentItemId")
+        if isinstance(requested_item_id, str) and requested_item_id:
+            candidate = db.get(models.ContentItem, requested_item_id)
+            if candidate and candidate.workspace_id == run.workspace_id:
+                item = candidate
+        if item is None:
+            item = models.ContentItem(
+                workspace_id=run.workspace_id,
+                owner_user_id=run.owner_user_id,
+                title=title,
+                type="article",
+                status="draft",
+            )
+            db.add(item)
+            db.flush()
+        next_no = (db.scalar(
+            select(func.max(models.ContentVersion.version_no)).where(
+                models.ContentVersion.content_item_id == item.id
+            )
+        ) or 0) + 1
         version = models.ContentVersion(
             content_item_id=item.id,
-            version_no=1,
+            version_no=next_no,
+            parent_version_id=item.current_version_id,
             source_type="agent",
             model_id=generated["modelCode"],
             title=title,
@@ -422,6 +481,7 @@ async def _execute_tool(db: Session, run: models.AgentRun, tool_id: str, args: d
             "versionId": version.id,
             "chars": len(body),
             "modelCode": generated["modelCode"],
+            "contractOk": contract_ok,
         }
 
     if tool_id == "create_publish_preview":
@@ -575,7 +635,7 @@ def _run_writing_check(db: Session, run: models.AgentRun, tool_id: str, args: di
 
     if tool_id == "review_article":
         skill = _resolve_run_skill(db, run)
-        manifest = skill.manifest if skill and isinstance(skill.manifest, dict) else {}
+        manifest = writing_rules.effective_manifest(db, skill, getattr(run, "owner_user_id", None))
         draft = {"title": version.title or "", "markdown": markdown, "summary": version.summary or ""}
         result = article_workflow.review_article(draft, manifest.get("reviewRules") or [])
         return {**result, "versionId": version.id}
@@ -594,7 +654,7 @@ def _run_writing_check(db: Session, run: models.AgentRun, tool_id: str, args: di
         inline_prompts = list(draft.inline_prompts)
         cover_prompt = draft.cover_prompt or None
     skill = _resolve_run_skill(db, run)
-    policy = skill.manifest.get("imagePolicy") if skill and isinstance(skill.manifest, dict) else None
+    policy = writing_rules.effective_manifest(db, skill, getattr(run, "owner_user_id", None)).get("imagePolicy")
     plan = article_workflow.plan_images(markdown, inline_prompts, cover_prompt, policy)
     return {**plan, "versionId": version.id}
 
@@ -629,7 +689,8 @@ async def start_run(db: Session, run: models.AgentRun) -> None:
 
     if flow_skill is not None:
         try:
-            steps = steps_from_workflow(flow_skill, run.goal)
+            flow_manifest = writing_rules.effective_manifest(db, flow_skill, run.owner_user_id)
+            steps = steps_from_workflow(flow_skill, run.goal, manifest=flow_manifest)
             assert_workflow_authorized(steps, allowed_tools)
         except AgentRuntimeError as exc:
             run.status = "failed"
@@ -648,14 +709,25 @@ async def start_run(db: Session, run: models.AgentRun) -> None:
         {"steps": [s["tool"] for s in steps], "planner": planner, "note": planner_note},
     )
 
+    context: dict[str, dict] = {}
     for step in steps:
         if agent_policy.budget_exceeded(run.rounds_used, run.budget_limit or {}):
             run.status = "stopped_budget"
             emit(db, run, "run.stopped", {"reason": "budget_exceeded"})
             return
+        if step["tool"] == "generate_article" and "outline" not in step["args"]:
+            outline = (context.get("create_outline") or {}).get("outline")
+            if outline:
+                step["args"]["outline"] = outline
         run.rounds_used += 1
         try:
-            outcome = await execute_step(db, run, step, allowed_tools)
+            if step["tool"] in WRITE_TOOLS:
+                outcome = await execute_step(db, run, step, allowed_tools)
+            else:
+                outcome = {
+                    "status": "succeeded",
+                    "result": await _execute_tool(db, run, step["tool"], step.get("args") or {}),
+                }
         except AgentRuntimeError as exc:
             run.status = "failed"
             run.error_code = "tool_failed"
@@ -663,6 +735,8 @@ async def start_run(db: Session, run: models.AgentRun) -> None:
             return
         if outcome["status"] == "awaiting_approval":
             return
+        if isinstance(outcome.get("result"), dict):
+            context[step["tool"]] = outcome["result"]
 
     run.status = "succeeded"
     run.completed_at = _utcnow()

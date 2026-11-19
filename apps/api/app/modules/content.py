@@ -10,7 +10,7 @@ from .. import models, schemas
 from ..core import pagination
 from ..models import utcnow
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
-from ..services import article_workflow
+from ..services import article_workflow, writing_rules
 
 router = APIRouter(tags=["content"])
 
@@ -408,7 +408,8 @@ def get_writing_flow(
     markdown = version.body if version else ""
     title = version.title if version else item.title
     summary = version.summary if version else ""
-    manifest = entry.manifest or {}
+    # 生效 manifest：规则表合成（个人副本覆盖全局），条目 manifest 只剩元数据兜底
+    manifest = writing_rules.effective_manifest(db, entry, user.id)
     checks = {
         "review_article": article_workflow.review_article(
             {"title": title or "", "markdown": markdown or "", "summary": summary or ""},

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 
 from .. import models
-from . import ai_gateway, skill_registry, wechat_layout
+from . import ai_gateway, prompt_rules, skill_registry, wechat_layout, writing_rules
 
 # 内置默认风格（当 skill 未提供 manifest 时的兜底）
 ARTICLE_OUTPUT_CONTRACT = (
@@ -122,10 +122,18 @@ def resolve_skill_style(skill: models.SkillRegistryEntry | None) -> tuple[str, s
     """从 skill.manifest 解析写作风格配置，返回 (prompt_template, tone, style_rules, theme_id)。
 
     skill 为 None 或 manifest 缺字段时，回退到内置默认风格。
+    运行期请改用 build_system_prompt(..., db=...)：它会先经规则表合成 manifest 再解析。
     """
     manifest = (skill.manifest or {}) if skill else {}
     if not isinstance(manifest, dict):
         manifest = {}
+    return _style_from_manifest(manifest, skill)
+
+
+def _style_from_manifest(
+    manifest: dict, skill: models.SkillRegistryEntry | None = None
+) -> tuple[str, str, list[str], str]:
+    """manifest（已合成）→ 风格四元组；缺字段回退到代码兜底常量（R5）。"""
     prompt_template = str(manifest.get("promptTemplate") or skill_registry.DEFAULT_ARTICLE_PROMPT)
     tone = str(manifest.get("tone") or skill_registry.DEFAULT_TONE)
     rules = manifest.get("styleRules")
@@ -136,15 +144,30 @@ def resolve_skill_style(skill: models.SkillRegistryEntry | None) -> tuple[str, s
     return prompt_template, tone, style_rules, theme_id
 
 
-def build_system_prompt(skill: models.SkillRegistryEntry | None) -> str:
+def build_system_prompt(
+    skill: models.SkillRegistryEntry | None,
+    *,
+    db=None,
+    owner_user_id: str | None = None,
+) -> str:
     """构建受保护的文章输出契约，并附加 Skill 写作风格与流程约束。
+
+    db 传入时（生产路径）：manifest 经规则表合成（个人副本按类型覆盖全局），
+    输出契约读 prompt_rules 的 `article.output_contract`（缺失回退代码常量）；
+    db 为 None 时（纯单测）：沿用条目 manifest 与常量，行为与旧版完全一致。
 
     factPolicy / imagePolicy 只在这份 manifest 自己写了时才追加。
     没有 workflow 的文风 Skill 不注入这两段。
     """
-    prompt_template, tone, style_rules, _ = resolve_skill_style(skill)
+    manifest = writing_rules.effective_manifest(db, skill, owner_user_id)
+    prompt_template, tone, style_rules, _ = _style_from_manifest(manifest, skill)
+    contract = (
+        prompt_rules.get_prompt_rule(db, "article.output_contract", default=ARTICLE_OUTPUT_CONTRACT)
+        if db is not None
+        else ARTICLE_OUTPUT_CONTRACT
+    )
     style_prompt = prompt_template.replace("{tone}", tone).strip()
-    parts = [ARTICLE_OUTPUT_CONTRACT]
+    parts = [contract]
     style_requirements = f"语气：{tone}"
     if style_prompt:
         style_requirements += f"\n{style_prompt}"
@@ -153,7 +176,6 @@ def build_system_prompt(skill: models.SkillRegistryEntry | None) -> str:
     if style_rules:
         rules_text = "\n".join(f"- {r}" for r in style_rules)
         parts.append(f"必须遵守以下风格规则（不得改变以上输出契约）：\n{rules_text}")
-    manifest = (skill.manifest or {}) if skill and isinstance(getattr(skill, "manifest", None), dict) else {}
     fact_text = _fact_policy_text(manifest.get("factPolicy"))
     if fact_text:
         parts.append(fact_text)

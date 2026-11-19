@@ -248,6 +248,49 @@ def test_system_prompt_includes_fact_and_image_policy_only_when_present():
     assert "克制" in bare
 
 
+def test_build_system_prompt_reads_rule_rows_over_manifest(client):
+    """T2 换源：全局规则行是规则的权威源，改行即改 prompt，条目 manifest 不再说了算。"""
+    from sqlalchemy import select
+
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services import ai_article, prompt_rules
+
+    with SessionLocal() as db:
+        entry = db.scalar(
+            select(models.SkillRegistryEntry).where(
+                models.SkillRegistryEntry.skill_key == "style-tech-article",
+                models.SkillRegistryEntry.owner_user_id.is_(None),
+            )
+        )
+        base = ai_article.build_system_prompt(entry, db=db, owner_user_id=None)
+        assert "禁冒号破折号感叹号" in base, "全局 style_rule 行应进入 system prompt"
+
+        row = db.scalars(
+            select(models.SkillWritingRule).where(
+                models.SkillWritingRule.skill_key == "style-tech-article",
+                models.SkillWritingRule.owner_user_id.is_(None),
+                models.SkillWritingRule.rule_type == "tone",
+            )
+        ).one()
+        original = dict(row.payload)
+        row.payload = {"text": "管理员改过的语气"}
+        row.source = "user"
+        db.commit()
+        prompt_rules.invalidate_cache()
+
+        changed = ai_article.build_system_prompt(entry, db=db, owner_user_id=None)
+        assert "管理员改过的语气" in changed
+        assert original["text"] not in changed, "tone 以规则行为准，不再读条目 manifest 残留"
+
+        row.payload = original
+        row.source = "factory"
+        db.commit()
+        prompt_rules.invalidate_cache()
+        restored = ai_article.build_system_prompt(entry, db=db, owner_user_id=None)
+        assert original["text"] in restored
+
+
 def test_two_workflow_skills_fail_the_run():
     from app import models
 
@@ -257,6 +300,15 @@ def test_two_workflow_skills_fail_the_run():
 
         def get(self, model, key):
             return self.rows.get(key)
+
+        def scalars(self, stmt):
+            """规则表查询在单测里没有库可查：返回空行集，compose 走 manifest 残留兜底。"""
+
+            class _Result:
+                def all(self):
+                    return []
+
+            return _Result()
 
     flow_a = models.SkillRegistryEntry(
         skill_key="article-drafting",

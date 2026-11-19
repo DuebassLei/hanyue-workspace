@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from .. import models, schemas
 from ..core import pagination, ssrf
-from ..services import ai_article, ai_gateway, provider_probe
+from ..services import ai_article, ai_gateway, prompt_rules, provider_probe
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.security import decrypt_secret, encrypt_secret, mask_secret
 from ..services import ai_gateway
@@ -497,13 +497,18 @@ async def text_generation(
         else None
     )
     system_prompt = (
-        ai_article.build_system_prompt(selected_skill)
+        ai_article.build_system_prompt(selected_skill, db=db, owner_user_id=user.id)
         if payload.task_type in style_tasks
         else None
     )
 
     skill_key = getattr(selected_skill, "skill_key", None)
     skill_version = getattr(selected_skill, "version", None)
+
+    # 复盘用：这次生成实际读了哪些提示词规则行（key + 行版本 + 更新时间）
+    summary_rule_keys = ["gateway.system_rules"] + (
+        ["article.output_contract"] if payload.task_type in style_tasks else []
+    )
 
     generation = models.AiGeneration(
         owner_user_id=user.id,
@@ -516,6 +521,7 @@ async def text_generation(
             "prompt": payload.prompt[:200],
             "constraints": payload.constraints,
             "promptTemplateVersion": ai_gateway.PROMPT_TEMPLATE_VERSION,
+            "promptRules": prompt_rules.describe_rules(db, summary_rule_keys),
             "skillKey": skill_key,
             "skillVersion": skill_version,
             "requestedModelId": selection["requestedModelId"],

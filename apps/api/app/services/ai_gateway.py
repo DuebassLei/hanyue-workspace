@@ -19,6 +19,7 @@ from sqlalchemy import select
 from .. import models
 from ..core import ssrf
 from ..core.security import decrypt_secret
+from . import prompt_rules
 
 TEXT_CAPABILITIES = {"text.generate", "text.stream"}
 
@@ -44,7 +45,17 @@ SYSTEM_RULES = (
 )
 # 提示词模板版本（设计 §6.5）：每次修改 SYSTEM_RULES / build_prompt 必须同步升级，
 # 生成记录会带上版本号，便于复盘时区分不同模板下的产出。
-PROMPT_TEMPLATE_VERSION = "2026-11-06.v1"
+# 2026-11-20.v2：SYSTEM_RULES 换源规则表（gateway.system_rules），内容默认不变。
+PROMPT_TEMPLATE_VERSION = "2026-11-20.v2"
+
+_GATEWAY_SYSTEM_RULES_KEY = "gateway.system_rules"
+
+
+def default_system_rules(db=None) -> str:
+    """系统级规则读规则表；行缺失/停用或无会话（纯单测）回退代码常量。"""
+    if db is None:
+        return SYSTEM_RULES
+    return prompt_rules.get_prompt_rule(db, _GATEWAY_SYSTEM_RULES_KEY, default=SYSTEM_RULES)
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +115,12 @@ async def stream_text(
 ) -> AsyncIterator[dict]:
     """产出统一事件：delta / usage / done / error（started 由调用方带 generationId 发送）。
 
-    system_prompt 不为空时覆盖内置 SYSTEM_RULES，用于 Skill 自定义写作风格。
+    system_prompt 不为空时覆盖内置系统规则（Skill 自定义写作风格），否则读规则表 gateway.system_rules。
     """
     started = time.perf_counter()
     full_prompt = build_prompt(task_type, prompt, constraints)
+    # system_prompt（Skill 自定义风格）优先；为空时读规则表 gateway.system_rules，行缺失回退常量
+    system_content = (system_prompt or "").strip() or default_system_rules(db)
     api_key = decrypt_secret(connection.credential_ciphertext) if connection else ""
     provider = connection.provider_type if connection else "none"
 
@@ -130,7 +143,7 @@ async def stream_text(
             api_key=api_key,
             model=model_code,
             prompt=full_prompt,
-            system_prompt=system_prompt,
+            system_prompt=system_content,
         ):
             yield {
                 "event": "generation.delta",
@@ -189,7 +202,7 @@ async def _stream_openai_compatible(
     system_prompt: str | None = None,
 ) -> AsyncIterator[str]:
     url = base_url.rstrip("/") + "/chat/completions"
-    # system_prompt 不为空时覆盖内置规则（Skill 自定义风格），否则回退 SYSTEM_RULES
+    # 调用方（stream_text）已把「Skill 自定义或规则表系统规则」解析成非空内容传入
     system_content = system_prompt.strip() if system_prompt else SYSTEM_RULES
     payload = {
         "model": model,

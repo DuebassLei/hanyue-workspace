@@ -417,6 +417,22 @@ def effective_rows(db, skill_key: str, owner_user_id: str | None) -> list:
     return result
 
 
+def effective_manifest(db, entry, owner_user_id: str | None = None) -> dict:
+    """运行期读 manifest 的统一入口：条目元数据 + 规则表合成的规则型 key。
+
+    T2 之后下游（ai_article / agent_runtime / content）一律经这里取规则，
+    不再直接读 entry.manifest 的规则型 key。db 为 None 时退回条目 manifest
+    （纯单测场景）；entry 为 None 返回空 dict，调用方走各自的内置兜底。
+    """
+    if entry is None:
+        return {}
+    if db is None:
+        manifest = entry.manifest if isinstance(entry.manifest, dict) else {}
+        return dict(manifest)
+    rows = effective_rows(db, entry.skill_key, owner_user_id)
+    return compose_manifest(entry, rows)
+
+
 def _validate_batch(rules: Sequence[dict]) -> list[dict]:
     if not isinstance(rules, (list, tuple)):
         raise RuleInvalid("规则必须是数组")

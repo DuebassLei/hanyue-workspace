@@ -65,3 +65,27 @@ def get_prompt_payload(db, key: str) -> dict:
     if value is None:
         return {}
     return dict(value["payload"])
+
+
+def describe_rules(db, keys: list[str]) -> list[dict]:
+    """request_summary 用：规则行的 key / version / 更新时间（camelCase，可序列化）。
+
+    生成记录要能复盘「这次生成用了哪份规则」：只记 key 与行版本，不整段抄内容。
+    缺失的 key 不出现（说明该次生成用的是代码兜底常量）。
+    """
+    if not keys:
+        return []
+    with db.no_autoflush:
+        rows = db.scalars(select(models.PromptRule).where(models.PromptRule.key.in_(keys))).all()
+    result: list[dict] = []
+    for row in rows:
+        updated = row.updated_at.isoformat() if row.updated_at else None
+        result.append(
+            {
+                "key": row.key,
+                "version": row.version,
+                "enabled": bool(row.enabled),
+                "updatedAt": updated,
+            }
+        )
+    return result
