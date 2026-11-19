@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models
+from . import prompt_rules
 
 # ---------------------------------------------------------------- 占位提取
 
@@ -136,8 +137,40 @@ _WORD_RULES = (
     ("buzzword-loop", "闭环"),
 )
 
+# 模式句式：整段正则匹配（AI 高频开头套路）
+_PATTERN_RULES = (
+    ("pattern-era", re.compile(r"在这个[^，。！？]{2,20}的时代")),
+    ("pattern-with", re.compile(r"随着[^，。！？]{2,20}的(?:发展|普及|进步|到来)")),
+)
+
 # 段首判定窗口：段内前 12 个非空白字符
 _LEAD_WINDOW = 12
+
+# 内置默认词表：tone_lexicon.* 各 key 的出厂数据。
+# 运行期规则表缺失某 key = 用这里的默认；显式空列表 = 该规则关闭（见 check_ai_tone）。
+DEFAULT_LEXICON: dict = {
+    "sentence_openers": {"window": _LEAD_WINDOW, "phrases": list(_SENTENCE_START_PHRASES)},
+    "buzzwords": {"rules": [{"id": rid, "word": word} for rid, word in _WORD_RULES]},
+    "patterns": {"rules": [{"id": rid, "pattern": pattern.pattern} for rid, pattern in _PATTERN_RULES]},
+    "first_then": {"words": ["首先", "其次"], "ruleId": "first-then"},
+}
+
+_TONE_LEXICON_KEYS = tuple(f"tone_lexicon.{name}" for name in DEFAULT_LEXICON)
+
+
+def load_lexicon(db: Session | None) -> dict:
+    """运行期词表：tone_lexicon.* 各 key 的 payload（经 prompt_rules 短缓存）。
+
+    缺失 / 停用 / 空 payload 的 key 不出现在结果里，check_ai_tone 会回退到内置默认。
+    """
+    lexicon: dict = {}
+    if db is None:
+        return lexicon
+    for key in _TONE_LEXICON_KEYS:
+        payload = prompt_rules.get_prompt_payload(db, key)
+        if payload:
+            lexicon[key.split(".", 1)[1]] = payload
+    return lexicon
 
 
 def _paragraphs(text: str) -> list[tuple[int, str]]:
@@ -151,27 +184,46 @@ def _paragraphs(text: str) -> list[tuple[int, str]]:
     return [(start, para) for start, para in paragraphs if para.strip()]
 
 
-def _lead_end(paragraph: str) -> int:
-    """段首窗口的结束下标：段内前 _LEAD_WINDOW 个非空白字符。"""
+def _lead_end(paragraph: str, window: int = _LEAD_WINDOW) -> int:
+    """段首窗口的结束下标：段内前 window 个非空白字符。"""
     seen = 0
     for i, ch in enumerate(paragraph):
         if ch.isspace():
             continue
         seen += 1
-        if seen >= _LEAD_WINDOW:
+        if seen >= window:
             return i + 1
     return len(paragraph)
 
 
-def check_ai_tone(markdown: str) -> dict:
-    """规则式 AI 腔调检查，只报命中位置，不打分、不调用模型。"""
+def check_ai_tone(markdown: str, lexicon: dict | None = None) -> dict:
+    """规则式 AI 腔调检查，只报命中位置，不打分、不调用模型。
+
+    lexicon：tone_lexicon.* 各 key 的 payload 合并（见 load_lexicon），按节覆盖默认：
+    某节缺失 = 用内置默认（纯函数单测不依赖 DB）；显式空列表 = 该规则关闭。
+    """
     text = markdown if isinstance(markdown, str) else ""
+    lex = {**DEFAULT_LEXICON, **(lexicon or {})}
     hits: list[dict] = []
 
+    # 段首套话（sentence_openers）：phrases 为空 = 显式关闭；window 可配置
+    openers = lex.get("sentence_openers") or {}
+    phrases = [str(p) for p in (openers.get("phrases") or []) if str(p).strip()]
+    window = openers.get("window")
+    lead_window = (
+        window
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0
+        else _LEAD_WINDOW
+    )
+
+    # 首先其次（first_then）：words 不足两个 = 关闭
+    first_then = lex.get("first_then") or {}
+    ft_words = [str(w) for w in (first_then.get("words") or []) if str(w).strip()]
+    ft_rule_id = str(first_then.get("ruleId") or "first-then")
+
     for start, para in _paragraphs(text):
-        head = para[: _lead_end(para)]
-        for phrase in _SENTENCE_START_PHRASES:
-            idx = head.find(phrase)
+        for phrase in phrases:
+            idx = para[: _lead_end(para, lead_window)].find(phrase)
             if idx >= 0:
                 hits.append(
                     {
@@ -181,14 +233,32 @@ def check_ai_tone(markdown: str) -> dict:
                     }
                 )
 
-        first, second = para.find("首先"), para.find("其次")
-        if first >= 0 and second >= 0:
-            excerpt, idx = ("首先", first) if first <= second else ("其次", second)
-            hits.append({"ruleId": "first-then", "excerpt": excerpt, "offset": start + idx})
+        if len(ft_words) >= 2:
+            first, second = para.find(ft_words[0]), para.find(ft_words[1])
+            if first >= 0 and second >= 0:
+                excerpt, idx = (ft_words[0], first) if first <= second else (ft_words[1], second)
+                hits.append({"ruleId": ft_rule_id, "excerpt": excerpt, "offset": start + idx})
 
-    for rule_id, word in _WORD_RULES:
+    # 商业黑话（buzzwords）：单词匹配
+    for rule in lex.get("buzzwords", {}).get("rules") or []:
+        if not isinstance(rule, dict) or not str(rule.get("word") or "").strip():
+            continue
+        word = str(rule["word"])
+        rule_id = str(rule.get("id") or "buzzword")
         for match in re.finditer(re.escape(word), text):
             hits.append({"ruleId": rule_id, "excerpt": word, "offset": match.start()})
+
+    # 模式句式（patterns）：正则匹配；非法正则整条跳过，不让管理端一个 typo 打挂生成
+    for rule in lex.get("patterns", {}).get("rules") or []:
+        if not isinstance(rule, dict) or not str(rule.get("pattern") or "").strip():
+            continue
+        try:
+            compiled = re.compile(str(rule["pattern"]))
+        except re.error:
+            continue
+        rule_id = str(rule.get("id") or "pattern")
+        for match in compiled.finditer(text):
+            hits.append({"ruleId": rule_id, "excerpt": match.group(0), "offset": match.start()})
 
     hits.sort(key=lambda h: h["offset"])
     return {"hits": hits}

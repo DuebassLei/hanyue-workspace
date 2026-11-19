@@ -104,6 +104,76 @@ def test_ai_tone_first_then_and_offsets_are_substrings():
     assert {h["ruleId"] for h in hits} >= {"first-then", "buzzword-leverage"}
 
 
+def test_ai_tone_default_lexicon_includes_patterns():
+    # 默认词表含模式句式（T3 新增），不传 lexicon 也应命中
+    markdown = "在这个飞速变化的时代，我们要拥抱变化。随着技术的发展，一切皆有可能。"
+    hits = check_ai_tone(markdown)["hits"]
+    ids = {h["ruleId"] for h in hits}
+    assert "pattern-era" in ids
+    assert "pattern-with" in ids
+    for hit in hits:
+        assert markdown[hit["offset"] : hit["offset"] + len(hit["excerpt"])] == hit["excerpt"]
+
+
+def test_ai_tone_empty_lexicon_section_disables_rule_explicitly():
+    markdown = "赋能与闭环都是黑话。\n\n综上所述，先说结论。"
+    base_ids = {h["ruleId"] for h in check_ai_tone(markdown)["hits"]}
+    assert {"buzzword-enable", "buzzword-loop", "sentence-opener"} <= base_ids
+
+    # 显式空列表 = 关闭该规则；未覆盖的节（段首套话）仍用默认
+    hits = check_ai_tone(markdown, {"buzzwords": {"rules": []}})["hits"]
+    ids = {h["ruleId"] for h in hits}
+    assert not (ids & {"buzzword-enable", "buzzword-leverage", "buzzword-loop"})
+    assert "sentence-opener" in ids
+
+
+def test_ai_tone_lexicon_override_adds_words_and_window():
+    markdown = "大家都知道这个数据中台很给力。\n\n总之，值得关注。"
+    lexicon = {
+        "buzzwords": {"rules": [{"id": "buzzword-custom", "word": "数据中台"}]},
+        "sentence_openers": {"window": 4, "phrases": ["大家"]},
+    }
+    hits = check_ai_tone(markdown, lexicon)["hits"]
+    customs = [h for h in hits if h["ruleId"] == "buzzword-custom"]
+    assert customs and markdown[customs[0]["offset"] : customs[0]["offset"] + 4] == "数据中台"
+    # window=4 时「大家」落在段首窗口内命中；「总之」不在自定义词表也不在默认词表，不应误报
+    assert any(h["excerpt"] == "大家" for h in hits)
+    assert all(h["excerpt"] != "总之" for h in hits)
+
+
+def test_ai_tone_invalid_pattern_rule_is_skipped():
+    markdown = "正常文本。综上所述，收个尾。"
+    lexicon = {"patterns": {"rules": [{"id": "pattern-bad", "pattern": "([unclosed"}]}}
+    hits = check_ai_tone(markdown, lexicon)["hits"]
+    assert all(h["ruleId"] != "pattern-bad" for h in hits)
+    assert "sentence-opener" in {h["ruleId"] for h in hits}
+
+
+def test_load_lexicon_reads_prompt_rules_and_uses_defaults_for_missing(memory_db):
+    from app import models
+    from app.services import prompt_rules
+
+    memory_db.add(
+        models.PromptRule(
+            key="tone_lexicon.buzzwords",
+            category="tone_lexicon",
+            title="商业黑话词表",
+            payload={"rules": [{"id": "buzzword-test", "word": "抓手"}]},
+        )
+    )
+    memory_db.commit()
+    prompt_rules.invalidate_cache(memory_db)
+
+    lex = article_workflow.load_lexicon(memory_db)
+    assert lex["buzzwords"]["rules"][0]["word"] == "抓手"
+    # 未配置的 key 不在结果里 → check_ai_tone 回退内置默认
+    assert "sentence_openers" not in lex
+    assert "patterns" not in lex
+
+    hits = check_ai_tone("这个抓手很关键。综上所述，收尾。", lex)["hits"]
+    assert {h["ruleId"] for h in hits} == {"buzzword-test", "sentence-opener"}
+
+
 # ---------------------------------------------------------------- extract_facts
 
 
@@ -170,6 +240,8 @@ def memory_db(monkeypatch):
     models.ContentVersion.__table__.create(engine)
     models.AgentToolCall.__table__.create(engine)
     models.AgentEvent.__table__.create(engine)
+    # T3：写作检查的词表运行期读 tone_lexicon.*，检查路径会查 prompt_rules
+    models.PromptRule.__table__.create(engine)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     with Session(engine) as db:
         db.add_all(

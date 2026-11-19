@@ -415,7 +415,9 @@ def get_writing_flow(
             {"title": title or "", "markdown": markdown or "", "summary": summary or ""},
             manifest.get("reviewRules") or [],
         ),
-        "check_ai_tone": article_workflow.check_ai_tone(markdown or ""),
+        "check_ai_tone": article_workflow.check_ai_tone(
+            markdown or "", article_workflow.load_lexicon(db)
+        ),
         "extract_facts": article_workflow.extract_facts(markdown or ""),
         "plan_images": article_workflow.plan_images(
             markdown or "", [], None, manifest.get("imagePolicy")
