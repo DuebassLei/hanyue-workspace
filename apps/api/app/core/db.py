@@ -2,13 +2,32 @@
 
 SQLite 开发库走 create_all + 轻量补列迁移：create_all 只建缺失的表，
 不会给已存在的表加新列，因此新增字段必须在这里显式补，否则线上旧库会 500。
+
+字段变更的自动同步：init_db 在手工清单之后跑 _sync_schema_from_models，
+把模型与库内结构的差异自动对齐——缺列/缺索引直接补；改列名/删列/VARCHAR↔TEXT
+类型对齐受 settings.db_auto_destructive_ddl 控制（默认开启），执行前把旧值归档进
+_schema_archive（可人工恢复），收窄装不下时跳过不阻塞。改列名优先靠「1 删 1 增」
+启发式；多列歧义、主键变更、时区类转换仍需手工迁移。
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    create_engine,
+    func,
+    inspect,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
@@ -35,6 +54,11 @@ def get_db() -> Iterator[Session]:
 
 
 # 已存在表需要补的列：(表名, 列名, 列定义)
+# 注意：模型新增的普通列**不再需要登记在这里**——init_db 末尾的
+# _sync_schema_from_models 会直接对比模型与库内结构自动补列（见该函数注释）。
+# 这个清单保留两类用途：① 模型没写 server_default 但旧行需要合法默认值的列；
+# ② 需要精确控制 DDL 的列（如 is_active 的默认值语义）。新写代码优先在模型上
+# 加 server_default，让自动同步成为唯一路径。
 _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     # 正式登录：邮箱密码。历史库没有这些列，必须在这里补（create_all 只管新表）
     ("users", "email", "VARCHAR(190)"),
@@ -95,8 +119,6 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("storyboard_shots", "deleted_at", "TIMESTAMP"),
     # 角色库：AI 生成的候选参考图（采用前挂在角色卡上）
     ("characters", "pending_images", "JSON"),
-    ("video_shots", "intensity", "FLOAT"),
-    ("video_shots", "focus", "JSON"),
 ]
 
 # 已存在列的加宽：(表名, 列名, 新类型)。PG 的 varchar→text 是纯元数据变更，不重写行；
@@ -135,9 +157,6 @@ _INDEXES: list[tuple[str, str]] = [
     ("ix_storyboard_projects_owner_updated", "storyboard_projects (owner_user_id, updated_at DESC, id DESC)"),
     ("ix_storyboard_scenes_project_order", "storyboard_scenes (project_id, sort_order)"),
     ("ix_storyboard_shots_scene_order", "storyboard_shots (scene_id, sort_order)"),
-    # 视频创作：列表按「最近改动」取；镜头按序读
-    ("ix_video_projects_owner_updated", "video_projects (owner_user_id, updated_at DESC, id DESC)"),
-    ("ix_video_shots_project_order", "video_shots (project_id, sort_order)"),
     # 定时任务：启动装载与对账扫 enabled；列表按 scope+owner 取；历史按 task 分页
     ("ix_sched_enabled_next", "scheduled_tasks (enabled, next_run_at)"),
     ("ix_sched_scope_owner_fired", "scheduled_tasks (scope, owner_user_id, last_fired_at DESC)"),
@@ -300,9 +319,299 @@ def _apply_additive_migrations() -> None:
                 logger.warning("users 邮箱唯一索引创建失败（可忽略）：%s", exc)
 
 
+# ── 归档表：破坏性 DDL（改名/删列）执行前的值兜底 ────────────────────────
+# 不进 Base.metadata（避免 create_all/自动同步把它当成业务表处理），独立元数据
+# 幂等创建。恢复方式：按 row_pk + archived_at 找到旧值，手工 UPDATE 回目标列。
+_SCHEMA_ARCHIVE_META = MetaData()
+_schema_archive = Table(
+    "_schema_archive",
+    _SCHEMA_ARCHIVE_META,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("action", String(16), nullable=False),  # rename / drop
+    Column("table_name", String(120), nullable=False),
+    Column("column_name", String(120), nullable=False),
+    Column("row_pk", String(255), nullable=False),
+    # json.dumps(default=str) 序列化，datetime/dict 等都能存；TEXT 两种方言都稳
+    Column("value", Text),
+    Column("archived_at", DateTime(timezone=True), server_default=func.now()),
+)
+
+
+def _archive_column_values(
+    conn, table_name: str, column_name: str, pk_cols: list[str], action: str
+) -> int:
+    """把列的全部非 NULL 值归档进 _schema_archive，返回归档行数。
+
+    与后续的 DDL 在同一事务里执行：DDL 失败则归档一并回滚，不留脏记录。
+    """
+    preparer = conn.dialect.identifier_preparer
+    qt = preparer.quote(table_name)
+    qc = preparer.quote(column_name)
+    pk_expr = " || '|' || ".join(preparer.quote(c) for c in pk_cols) or "''"
+    rows = conn.execute(
+        text(f"SELECT {pk_expr}, {qc} FROM {qt} WHERE {qc} IS NOT NULL")
+    ).fetchall()
+    for pk, value in rows:
+        conn.execute(
+            _schema_archive.insert().values(
+                action=action,
+                table_name=table_name,
+                column_name=column_name,
+                row_pk=str(pk),
+                value=json.dumps(value, ensure_ascii=False, default=str),
+            )
+        )
+    return len(rows)
+
+
+def _str_family(type_str: str) -> bool:
+    """是否属于 VARCHAR/TEXT 字符串家族（类型自动对齐只处理这一族）。"""
+    t = type_str.strip().upper()
+    return (
+        t == "TEXT"
+        or t.startswith("VARCHAR")
+        or t.startswith("CHARACTER VARYING")
+        or t.startswith("CHAR(")
+    )
+
+
+def _sync_schema_from_models() -> list[str]:
+    """模型驱动的 Schema 自动同步（幂等，additive 为主，破坏性变更受开关控制）。
+
+    create_all 只建缺失的表，_ADDED_COLUMNS 只覆盖手工登记的列——两者都不
+    会处理「库里已存在的表」与模型的差异。这里分两阶段直接对比模型元数据
+    与库内实际结构：
+
+    阶段一：破坏性差异（settings.db_auto_destructive_ddl，默认开启）
+      - 改列名：库里恰好少 1 列且模型恰好多 1 列 → 视为改名（先归档旧值再
+        RENAME COLUMN，误判可从 _schema_archive 恢复）；多列歧义不猜，走删列+新增
+      - 删列：库里模型外的列 → 归档旧值后 DROP COLUMN（FK/CHECK 等约束挡住
+        时告警跳过，不阻塞启动）
+      - 类型对齐：仅限 PG 且两侧都在 VARCHAR/TEXT 家族（varchar→text 是纯
+        元数据变更；收窄用 USING 显式转换，PG 对装不下的值直接报错回滚，
+        绝不截断）。TIMESTAMP↔TIMESTAMPTZ 等涉及时区/数值语义，坚持手工。
+        SQLite 不强制列宽，类型差异跳过。
+
+    阶段二：加列 / 加索引（始终执行）
+      - 模型有、库里没有的列 → ALTER TABLE ADD COLUMN
+      - 模型有、库里没有的索引 → CREATE INDEX（CreateIndex 编译 + IF NOT EXISTS）
+      - NOT NULL 列在非空表上按可空补入（旧行为 NULL，新行由 Python default 或
+        server_default 填充）；不补外键；主键列缺失告警跳过。
+
+    返回本次变更清单（"表.列" / "表::索引" / "表:旧->新" 等），供日志与测试断言。
+    """
+    from sqlalchemy.schema import CreateColumn, CreateIndex
+
+    from .. import models  # noqa: F401  确保模型注册到元数据
+
+    existing_tables = set(inspect(engine).get_table_names())
+    dialect = engine.dialect
+    preparer = dialect.identifier_preparer
+    pg = dialect.name == "postgresql"
+    allow_destructive = settings.db_auto_destructive_ddl
+    changed: list[str] = []
+
+    if allow_destructive:
+        _schema_archive.create(engine, checkfirst=True)
+
+    # ── 阶段一：破坏性差异（每个操作独立事务：失败只回滚该操作，不影响其余）──
+    if allow_destructive:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            reflected = {
+                c["name"]: c["type"].compile(dialect=dialect)
+                for c in inspect(engine).get_columns(table.name)
+            }
+            model_names = {c.name for c in table.columns}
+            db_only = sorted(set(reflected) - model_names)
+            model_only = sorted(model_names - set(reflected))
+            pk_cols = [c.name for c in table.primary_key.columns]
+
+            # 1) 改名启发式：恰好 1 删 1 增才猜改名，宁可不猜也不冒险
+            if len(db_only) == 1 and len(model_only) == 1:
+                old, new = db_only[0], model_only[0]
+                try:
+                    with engine.begin() as conn:
+                        n = _archive_column_values(conn, table.name, old, pk_cols, "rename")
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {preparer.quote(table.name)} "
+                                f"RENAME COLUMN {preparer.quote(old)} TO {preparer.quote(new)}"
+                            )
+                        )
+                    changed.append(f"{table.name}:{old}->{new}")
+                    logger.info(
+                        "自动改列：%s.%s → %s（旧值已归档 %s 行，可从 _schema_archive 恢复）",
+                        table.name, old, new, n,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "自动改列失败 %s.%s → %s（跳过，旧值未动，需手工处理）：%s",
+                        table.name, old, new, exc,
+                    )
+            elif db_only:
+                logger.info(
+                    "表 %s 模型外的列 %s 与模型新增列 %s 数量不一致，不猜改名，按删列+新增处理",
+                    table.name, db_only, model_only,
+                )
+
+            # 2) 删列：剩下的模型外列 → 归档 + DROP
+            reflected_now = {
+                c["name"]
+                for c in inspect(engine).get_columns(table.name)
+            }
+            for old in sorted(reflected_now - model_names):
+                if old in table.primary_key.columns:
+                    logger.warning(
+                        "表 %s 的主键列 %s 不在模型中：无法安全删除，需手工迁移",
+                        table.name, old,
+                    )
+                    continue
+                try:
+                    with engine.begin() as conn:
+                        n = _archive_column_values(conn, table.name, old, pk_cols, "drop")
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {preparer.quote(table.name)} "
+                                f"DROP COLUMN {preparer.quote(old)}"
+                            )
+                        )
+                    changed.append(f"{table.name}:-{old}")
+                    logger.info(
+                        "自动删列：%s.%s（旧值已归档 %s 行）", table.name, old, n
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "自动删列失败 %s.%s（跳过，旧值未动，需手工处理）：%s",
+                        table.name, old, exc,
+                    )
+
+            # 3) 类型对齐：仅 PG 且 VARCHAR/TEXT 家族（SQLite 不强制列宽，跳过）
+            if pg:
+                for col in table.columns:
+                    ref = reflected.get(col.name)
+                    if ref is None:
+                        continue
+                    model_type = col.type.compile(dialect=dialect)
+                    if ref == model_type:
+                        continue
+                    if not (_str_family(ref) and _str_family(model_type)):
+                        logger.info(
+                            "类型差异不自动处理：%s.%s 库=%s 模型=%s"
+                            "（涉及时区/数值语义，需手工迁移）",
+                            table.name, col.name, ref, model_type,
+                        )
+                        continue
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(
+                                text(
+                                    f"ALTER TABLE {preparer.quote(table.name)} "
+                                    f"ALTER COLUMN {preparer.quote(col.name)} "
+                                    f"TYPE {model_type} "
+                                    f"USING {preparer.quote(col.name)}::{model_type}"
+                                )
+                            )
+                        changed.append(f"{table.name}:{col.name}:{ref}->{model_type}")
+                        logger.info(
+                            "自动改列类型：%s.%s %s → %s",
+                            table.name, col.name, ref, model_type,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "自动改列类型失败 %s.%s → %s（跳过，保持原类型）：%s",
+                            table.name, col.name, model_type, exc,
+                        )
+
+    # ── 阶段二：加列 / 加索引（始终执行；破坏性阶段可能已补上改名，重新反射）──
+    inspector = inspect(engine)  # 新实例：避免拿到阶段一 DDL 之前的反射缓存
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue  # 新表由 create_all 按模型完整建立，无需处理
+            db_columns = {c["name"] for c in inspector.get_columns(table.name)}
+            # 只在真的要给非空表补 NOT NULL 列时才数行数，避免每次启动空耗 count
+            row_count: int | None = None
+
+            for col in table.columns:
+                if col.name in db_columns:
+                    continue
+                if col.name in table.primary_key.columns:
+                    logger.warning(
+                        "表 %s 缺少主键列 %s：无法自动补，需手工迁移", table.name, col.name
+                    )
+                    continue
+                not_null = not col.nullable
+                if not_null and col.server_default is None:
+                    if row_count is None:
+                        row_count = (
+                            conn.execute(
+                                text(f"SELECT count(*) FROM {preparer.quote(table.name)}")
+                            ).scalar()
+                            or 0
+                        )
+                    if row_count > 0:
+                        not_null = False
+                        logger.warning(
+                            "表 %s 已有 %s 行，NOT NULL 列 %s.%s 无默认值，按可空补入"
+                            "（旧行为 NULL，新行走 Python default）",
+                            table.name, row_count, table.name, col.name,
+                        )
+                # 用 CreateColumn 编译列定义（含类型/DEFAULT/NOT NULL 的方言渲染），
+                # 复制列以便按上面的策略降级 NOT NULL
+                ddl_col = CreateColumn(
+                    Column(
+                        col.name,
+                        col.type,
+                        nullable=not not_null,
+                        server_default=col.server_default,
+                    )
+                ).compile(dialect=dialect)
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {preparer.quote(table.name)} "
+                        f"ADD COLUMN {str(ddl_col)}"
+                    )
+                )
+                changed.append(f"{table.name}.{col.name}")
+                logger.info("自动补列：%s.%s", table.name, col.name)
+
+            # 表达式索引（如 users 的 lower(email) 唯一索引）无法被反射，SQLAlchemy
+            # 会发 SAWarning；这类索引由 _apply_additive_migrations 手工维护，这里
+            # 静音后按名字比对即可（名字已存在就不会重复创建）。
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=".*Skipped unsupported reflection of expression-based index.*",
+                )
+                db_indexes = {i["name"] for i in inspector.get_indexes(table.name)}
+            for index in table.indexes:
+                if not index.name or index.name in db_indexes:
+                    continue
+                ddl = str(CreateIndex(index).compile(dialect=dialect))
+                # 并发实例可能已建过；IF NOT EXISTS 保持幂等（PG 与 SQLite 3.24+ 均支持）
+                ddl = ddl.replace(
+                    "CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX IF NOT EXISTS ", 1
+                )
+                if "IF NOT EXISTS" not in ddl:
+                    ddl = ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+                conn.execute(text(ddl))
+                changed.append(f"{table.name}::{index.name}")
+                logger.info("自动补索引：%s（%s）", index.name, table.name)
+
+    return changed
+
+
 def init_db() -> None:
     from .. import models  # noqa: F401  确保模型注册到元数据
 
     Base.metadata.create_all(bind=engine)
     _apply_additive_migrations()
+    # 手工清单跑完后，把模型与库内剩余差异自动对齐（加列/加索引始终做；
+    # 改名/删列/类型对齐受 db_auto_destructive_ddl 控制，旧值先归档）。
+    # 放在最后：手工清单优先（默认值语义精确），自动同步兜底其余变更。
+    _sync_schema_from_models()
 

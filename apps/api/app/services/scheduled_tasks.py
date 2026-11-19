@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from sqlalchemy import select, update
 
 from .. import models
@@ -103,10 +103,43 @@ def register(spec: TaskType) -> None:
 
 
 def task_type(key: str) -> TaskType:
+    if (key or "").strip().startswith("user-script."):
+        return dynamic_task_type(key)
     spec = TASK_TYPES.get((key or "").strip())
     if spec is None:
         raise ScheduleError("unknown_task_type", f"未注册的任务类型：{key}")
     return spec
+
+
+_USER_SCRIPT_PARAMS_MODEL = create_model(
+    "UserScriptParams",
+    __config__=ConfigDict(extra="allow"),
+    params=(dict, Field(default_factory=dict)),
+)
+
+
+def dynamic_task_type(key: str) -> TaskType:
+    """为 user-script.* 生成无 DB 查询的通用类型定义。
+
+    key 中的 scriptId 只用于类型标识；脚本有效性与超时由创建入口和投递前校验。
+    """
+    normalized = (key or "").strip()
+    if not normalized.startswith("user-script."):
+        raise ScheduleError("unknown_task_type", f"未注册的任务类型：{key}")
+    script_id = normalized.removeprefix("user-script.")
+    if not script_id:
+        raise ScheduleError("unknown_task_type", "脚本任务类型缺少脚本 ID")
+    return TaskType(
+        key=normalized,
+        title="自定义脚本",
+        scope="user",
+        queue="user-script",
+        kind=normalized,
+        params_model=_USER_SCRIPT_PARAMS_MODEL,
+        build_payload=lambda _params: {"scriptId": script_id},
+        description="受信任 Python 定时脚本",
+        default_cron="0 8 * * *",
+    )
 
 
 def load_task_types() -> int:
@@ -172,7 +205,7 @@ def params_fields(spec: TaskType) -> list[dict]:
 
 
 def list_types() -> list[dict]:
-    return [
+    items = [
         {
             "key": spec.key,
             "title": spec.title,
@@ -183,9 +216,18 @@ def list_types() -> list[dict]:
         }
         for spec in TASK_TYPES.values()
     ]
+    return [
+        item for item in items if not (item["key"] or "").startswith("user-script.")
+    ]
 
 
 def validate_params(spec: TaskType, raw: dict | None) -> dict:
+    if spec.key.startswith("user-script."):
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ScheduleError("invalid_params", "参数不合法：params 必须是 JSON 对象")
+        return raw
     try:
         model = spec.params_model.model_validate(raw or {})
     except ValidationError as exc:
@@ -303,8 +345,9 @@ def preview(
 
 def _lease_seconds(job: models.BackgroundJob | None) -> int:
     settings = get_settings()
-    if job is not None and job.kind == "video.render":
-        return max(settings.job_lease_video_render_seconds, settings.job_lease_seconds)
+    if job is not None and job.kind.startswith("user-script."):
+        timeout = int((job.payload or {}).get("scriptTimeoutSeconds") or 0)
+        return max(settings.job_lease_seconds, timeout + 30)
     return settings.job_lease_seconds
 
 
@@ -372,8 +415,25 @@ def _launch(db, task, *, source: str) -> dict:
         return {"action": "skipped", "runId": run.id, "reason": run.skip_reason}
 
     spec = task_type(task.task_type)
+    script: models.ScheduledScript | None = None
+    if spec.key.startswith("user-script."):
+        script = db.get(models.ScheduledScript, spec.key.removeprefix("user-script."))
+        if (
+            script is None
+            or script.owner_user_id != task.owner_user_id
+            or not script.enabled
+            or not script.published_code
+        ):
+            raise ScheduleError("script_unavailable", "关联脚本不可用或未发布")
+    if script is not None:
+        payload = {
+            "scriptId": script.id,
+            "scriptParams": task.params or {},
+            "scriptTimeoutSeconds": script.timeout_seconds,
+        }
+    else:
+        payload = {**spec.build_payload(spec.params_model.model_validate(task.params or {}))}
     run = _new_run(db, task, source=source, status="queued")
-    payload = {**spec.build_payload(spec.params_model.model_validate(task.params or {}))}
     payload["scheduledTaskId"] = task.id
     payload["scheduledRunId"] = run.id
     job_id = queue.enqueue(

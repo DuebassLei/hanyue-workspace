@@ -160,10 +160,6 @@ const itemIcons = {
     h('rect', { x: '3', y: '3.5', width: '14', height: '13', rx: '1.5' }),
     h('path', { d: 'M3 10h14M10 3.5v13' }),
   ]),
-  videos: strokeIcon([
-    h('rect', { x: '3', y: '4.5', width: '14', height: '11', rx: '2' }),
-    h('path', { d: 'm8.5 8 4 2-4 2V8Z' }),
-  ]),
   characters: strokeIcon([
     h('circle', { cx: '10', cy: '7', r: '3' }),
     h('path', { d: 'M4.5 17a5.5 5.5 0 0 1 11 0' }),

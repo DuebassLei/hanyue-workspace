@@ -32,7 +32,7 @@
   --color-inverse-hover: rgba(255, 255, 255, 0.15);
   --color-inverse-danger: #fca5a5;
 
-  /* 纸质调性：分镜 / 视频 / 小说模块共用一套暖纸视觉语言，与中性色分开维护 */
+  /* 纸质调性：分镜 / 小说模块共用一套暖纸视觉语言，与中性色分开维护 */
   --paper-bg: #fbfaf6;
   --paper-surface: #fbfaf7;
   --paper-sunken: #f7f4ee;

@@ -62,13 +62,18 @@ class Settings(BaseSettings):
     auth_lock_threshold: int = 5  # 连续失败达到该次数即锁定
     auth_lock_minutes: int = 15  # 锁定时长
     database_url: str = f"sqlite:///{(BASE_DIR / 'hanyue.db').as_posix()}"
+    # ── Schema 自动同步（core/db.py::_sync_schema_from_models）────────
+    # 模型与库内结构的破坏性差异（改列名 / 删列 / VARCHAR↔TEXT 类型对齐）是否
+    # 自动处理。删列与改名前会把旧值归档进 _schema_archive 表（含主键定位，可人工
+    # 恢复）；类型收窄失败时跳过不阻塞启动。false 时只做加列/加索引。
+    db_auto_destructive_ddl: bool = True
     storage_dir: Path = BASE_DIR / "storage"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     # 任务租约：running 超过该秒数仍未推进即视为进程崩溃，启动时回收。
-    # 判活看 started_at——长任务须自行周期心跳刷新（见 job_runner._video_stage）。
+    # 判活看 started_at——长任务须自行周期心跳刷新。
     job_lease_seconds: int = 300
-    # 分级租约：图文成片整链渲染天然远超普通任务（生图+配音+编码），单独放宽
-    job_lease_video_render_seconds: int = 1800
+    script_sdk_token_ttl_seconds: int = 120
+    script_sdk_base_url: str = "http://api:8000"
     # ── 定时任务（docs/scheduled-tasks.md §8）──────────────────────────
     # 总开关。false 时完全不装载调度器，接口与表照常存在，用于排障。
     scheduler_enabled: bool = True

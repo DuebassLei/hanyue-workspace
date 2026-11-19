@@ -49,15 +49,6 @@ export const NAV_GROUPS = [
         ],
       },
       {
-        name: 'group-videos',
-        label: '视频',
-        short: '视频',
-        icon: 'videos',
-        children: [
-          { name: 'videos', label: '视频创作', short: '视频', permission: 'videos.use' },
-        ],
-      },
-      {
         name: 'group-novels',
         label: '小说',
         short: '小说',

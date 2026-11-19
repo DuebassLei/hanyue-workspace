@@ -373,7 +373,6 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
 |---|---|---|
 | 平台数据定时同步 | 复用 `_handle_platform_sync`，遍历 `connected_accounts` 逐个入队 | 已有连接器与游标（`design.md` §7） |
 | 热点→选题摘要 | `user` scope，按用户赛道生成选题建议 | 需要文本模型连接 |
-| 临时文件清理 | `_sweep_video_tmp` 从启动钩子改为 system 任务 | 已有逻辑，只需挪位置 |
 | 稿件草稿自动保存快照 | `user` scope | `content_items.draft_*` 字段已有 |
 
 以上几项现在都可直接按 §2.1「新增一种定时任务」实现：一个脚本 + 一条 manifest，无需改框架代码。

@@ -519,7 +519,7 @@ cmd_doctor() {
   if [ "${cpu:-0}" -ge 4 ]; then
     chk_ok "CPU ${cpu} 核"
   elif [ "${cpu:-0}" -ge 2 ]; then
-    chk_warn "CPU ${cpu} 核：满足最低要求，1080p 视频成片会很慢（建议 4 核）"
+    chk_warn "CPU ${cpu} 核：满足最低要求，批量生图等重任务会偏慢（建议 4 核）"
   else
     chk_fail "CPU ${cpu} 核：低于最低要求（2 核）"
   fi
@@ -530,7 +530,7 @@ cmd_doctor() {
   elif [ "${mem_mb:-0}" -ge 3800 ]; then
     chk_ok "内存 ${mem_mb}MB（达到最低要求 4GB）"
   elif [ "${mem_mb:-0}" -ge 1800 ]; then
-    chk_warn "内存 ${mem_mb}MB：低于建议的 4GB。可跑（单用户/小团队、非视频为主），但构建前端需在别处做或加 2GB swap"
+    chk_warn "内存 ${mem_mb}MB：低于建议的 4GB。可跑（单用户/小团队），但构建前端需在别处做或加 2GB swap"
   else
     chk_fail "内存 ${mem_mb}MB：不足以构建与渲染"
   fi

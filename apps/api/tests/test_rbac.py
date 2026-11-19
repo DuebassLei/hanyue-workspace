@@ -713,8 +713,8 @@ def test_legacy_menu_prune_and_articles_bootstrap(client):
         db.commit()
 
 
-def test_workspace_menu_split_into_four_groups(client):
-    """工作区下按文章 / 图片 / 视频 / 小说分四组，跨类型入口留在顶级。"""
+def test_workspace_menu_split_into_three_groups(client):
+    """工作区下按文章 / 图片 / 小说分三组，跨类型入口留在顶级。"""
     headers, _ = _superadmin(client)
     body = client.get(f"{PREFIX}/rbac/me", headers=headers).json()
     workspace = next(group for group in body["menus"] if group["key"] == "workspace")
@@ -724,7 +724,6 @@ def test_workspace_menu_split_into_four_groups(client):
         "prompts",
         "group-articles",
         "group-images",
-        "group-videos",
         "group-novels",
     ]
     groups = {item["name"]: item for item in workspace["items"] if item.get("children")}
@@ -738,7 +737,6 @@ def test_workspace_menu_split_into_four_groups(client):
         "storyboards",
         "assets",
     ]
-    assert [child["name"] for child in groups["group-videos"]["children"]] == ["videos"]
     assert [child["name"] for child in groups["group-novels"]["children"]] == [
         "novels",
         "characters",
@@ -746,7 +744,7 @@ def test_workspace_menu_split_into_four_groups(client):
 
 
 def test_workspace_groups_migration_reparents_legacy_menus(client):
-    """老库升级：页面原本直接挂工作区，迁移把它们重挂到四个分类下。"""
+    """老库升级：页面原本直接挂工作区，迁移把它们重挂到三个分类下。"""
     from app import models
     from app.core.db import SessionLocal
     from app.services import rbac_service
@@ -754,7 +752,6 @@ def test_workspace_groups_migration_reparents_legacy_menus(client):
     layout = {
         "group-articles": ("articles", "cards"),
         "group-images": ("images", "stickers", "storyboards", "assets"),
-        "group-videos": ("videos",),
         "group-novels": ("novels", "characters"),
     }
 
@@ -797,7 +794,7 @@ def test_workspace_groups_migration_reparents_legacy_menus(client):
                 page = db.scalar(select(models.Menu).where(models.Menu.menu_key == key))
                 assert page.parent_id == group.id
 
-        # 创作空间、提示词库仍留在顶级，且排在四个分类之前
+        # 创作空间、提示词库仍留在顶级，且排在三个分类之前
         top = db.scalars(
             select(models.Menu)
             .where(models.Menu.parent_id == workspace.id)
@@ -807,20 +804,33 @@ def test_workspace_groups_migration_reparents_legacy_menus(client):
 
 
 def test_storyboards_move_from_videos_to_images(client):
-    """漫画分镜曾误放在「视频」下，一次性迁移把它挪到「图片」，且只跑一次。"""
+    """漫画分镜曾误放在「视频」下，一次性迁移把它挪到「图片」，且只跑一次。
+
+    视频功能已下线，group-videos 不再播种；这里伪造老库里的视频分组来验证迁移。
+    """
     from app import models
     from app.core.db import SessionLocal
     from app.services import rbac_service
 
     with SessionLocal() as db:
         storyboards = db.scalar(select(models.Menu).where(models.Menu.menu_key == "storyboards"))
-        videos_group = db.scalar(select(models.Menu).where(models.Menu.menu_key == "group-videos"))
+        workspace = db.scalar(select(models.Menu).where(models.Menu.menu_key == "workspace"))
         images_group = db.scalar(select(models.Menu).where(models.Menu.menu_key == "group-images"))
         stickers = db.scalar(select(models.Menu).where(models.Menu.menu_key == "stickers"))
         assets = db.scalar(select(models.Menu).where(models.Menu.menu_key == "assets"))
-        assert all([storyboards, videos_group, images_group, stickers, assets])
+        assert all([storyboards, workspace, images_group, stickers, assets])
 
-        # --- 伪造上一版结构：分镜挂在视频下 ---
+        # --- 伪造上一版结构：视频分组还在，分镜挂在它下面 ---
+        videos_group = models.Menu(
+            parent_id=workspace.id,
+            menu_key="group-videos",
+            label="视频",
+            kind="group",
+            path=f"{workspace.path}/group-videos",
+            sort=999,
+        )
+        db.add(videos_group)
+        db.flush()
         storyboards.parent_id = videos_group.id
         storyboards.sort = 20
         setting = db.get(models.AppSetting, rbac_service._MIGRATION_SETTING_KEY)
@@ -847,9 +857,58 @@ def test_storyboards_move_from_videos_to_images(client):
         db.commit()
         assert storyboards.parent_id == videos_group.id
 
-        # 还原：搬回图片，不污染后续用例
+        # 还原：搬回图片并删掉伪造的视频分组，不污染后续用例
         storyboards.parent_id = images_group.id
         storyboards.sort = stickers.sort + 1
+        db.delete(videos_group)
         db.commit()
         rbac_service.rebuild_paths(db)
         db.commit()
+
+
+def test_remove_videos_migration_prunes_menus_and_permission(client):
+    """视频功能下线：老库里的视频菜单、分组与 videos.use 权限点被一次性清理。"""
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services import rbac_service
+
+    with SessionLocal() as db:
+        workspace = db.scalar(select(models.Menu).where(models.Menu.menu_key == "workspace"))
+        videos_group = models.Menu(
+            parent_id=workspace.id,
+            menu_key="group-videos",
+            label="视频",
+            kind="group",
+            path=f"{workspace.path}/group-videos",
+            sort=999,
+        )
+        db.add(videos_group)
+        db.flush()
+        videos_page = models.Menu(
+            parent_id=videos_group.id,
+            menu_key="videos",
+            label="视频创作",
+            kind="page",
+            path=f"{videos_group.path}/videos",
+            permission_code="videos.use",
+            sort=10,
+        )
+        db.add(videos_page)
+        db.add(models.Permission(code="videos.use", name="视频创作", module="创作", sort=90))
+        db.flush()
+
+        setting = db.get(models.AppSetting, rbac_service._MIGRATION_SETTING_KEY)
+        done = set((setting.value or {}).get("done", [])) if setting else set()
+        done.discard(rbac_service.MIGRATION_REMOVE_VIDEOS)
+        setting.value = {"done": sorted(done)}
+        db.commit()
+
+        rbac_service.seed(db)
+        db.commit()
+
+        assert db.scalar(select(models.Menu).where(models.Menu.menu_key == "videos")) is None
+        assert db.scalar(select(models.Menu).where(models.Menu.menu_key == "group-videos")) is None
+        assert db.get(models.Permission, "videos.use") is None
+        assert db.scalars(
+            select(models.RolePermission).where(models.RolePermission.permission_code == "videos.use")
+        ).all() == []

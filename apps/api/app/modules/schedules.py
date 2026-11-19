@@ -15,6 +15,7 @@ from .. import models, schemas
 from ..core import pagination
 from ..core.config import get_settings
 from ..core.deps import ApiError, CurrentUser, DbSession, conflict, forbidden, not_found
+from ..modules.script_schedules import script_task_type
 from ..services import scheduled_tasks
 from ..services import scheduler as scheduler_module
 from ..services.scheduled_tasks import ScheduleError
@@ -181,9 +182,22 @@ def _translate(exc: ScheduleError) -> ApiError:
 
 
 @router.get("/types")
-def list_types(user: CurrentUser) -> dict:
+def list_types(user: CurrentUser, db: DbSession) -> dict:
     """类型清单：前端按 params.fields 渲染表单，不需要内置任何字段知识。"""
-    return {"items": scheduled_tasks.list_types(), "systemWritable": _system_writable()}
+    script_rows = db.scalars(
+        select(models.ScheduledScript)
+        .where(
+            models.ScheduledScript.owner_user_id == user.id,
+            models.ScheduledScript.enabled.is_(True),
+        )
+    ).all()
+    script_types = [
+        script_task_type(script) for script in script_rows if script.published_code
+    ]
+    return {
+        "items": [*scheduled_tasks.list_types(), *script_types],
+        "systemWritable": _system_writable(),
+    }
 
 
 @router.get("")
@@ -196,7 +210,14 @@ def list_schedules(user: CurrentUser, db: DbSession) -> dict:
         )
         .order_by(models.ScheduledTask.last_fired_at.desc(), models.ScheduledTask.created_at.desc())
     ).all()
-    return {"items": [_out(row, user) for row in rows]}
+    return {
+        "items": [
+            _out(row, user)
+            for row in rows
+            if not row.task_type.startswith("user-script.")
+            or row.owner_user_id == user.id
+        ]
+    }
 
 
 @router.post("", status_code=201)
@@ -207,6 +228,18 @@ def create_schedule(
         spec = scheduled_tasks.task_type(payload.task_type)
     except ScheduleError as exc:
         raise _translate(exc) from exc
+
+    if spec.key.startswith("user-script."):
+        script = db.get(models.ScheduledScript, spec.key.removeprefix("user-script."))
+        if (
+            script is None
+            or script.owner_user_id != user.id
+            or not script.enabled
+            or not script.published_code
+        ):
+            raise _translate(
+                ScheduleError("script_unavailable", "关联脚本不可用或未发布")
+            )
 
     if spec.scope == "system" and not _system_writable():
         raise forbidden("系统级定时任务在当前部署下不可新建，请用 seed 维护")

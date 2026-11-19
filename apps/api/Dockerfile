@@ -23,16 +23,10 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 
 # libpq5：psycopg 运行期系统库兜底
 # tzdata：应用用 zoneinfo 解析用户时区（Asia/Shanghai 等），slim 镜像默认不含时区库
-# ffmpeg/ffprobe：图文成片的硬依赖（video_render.probe_duration / ffmpeg_bin），
-#   缺失时能力探测会返回 ffmpeg_missing，视频合成直接不可用
-# fonts-wqy-microhei + fontconfig：ASS 硬字幕写死 Microsoft YaHei，需别名到开源中文字体
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 tzdata ffmpeg fonts-wqy-microhei fontconfig \
+        libpq5 tzdata \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
-
-COPY docker/fonts-cjk-alias.conf /etc/fonts/conf.d/99-cjk-alias.conf
-RUN fc-cache -f >/dev/null
 
 # 国内构建可传 --build-arg PIP_INDEX_URL=... 加速。
 # http 协议的源（如腾讯云内网 http://mirrors.tencentyun.com/pypi/simple）

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import shutil
-import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -35,6 +33,7 @@ from .modules import (
     prompts,
     publishing,
     rbac,
+    script_schedules,
     skills,
     novels,
     schedules,
@@ -42,7 +41,6 @@ from .modules import (
     storyboards,
     style_presets,
     topics,
-    videos,
     wechat_mp,
     workspaces,
 )
@@ -73,7 +71,6 @@ async def lifespan(app: FastAPI):
         recovered = queue.recover_pending()
         if stale or recovered:
             logger.info("API 启动恢复：崩溃遗留 %s 个、未开始 %s 个", stale, recovered)
-    _sweep_video_tmp()
     _start_scheduler()
     yield
     scheduler.stop()
@@ -97,26 +94,6 @@ def _start_scheduler() -> None:
             scheduler.start(session)
     except Exception as exc:
         logger.exception("定时调度器启动失败，定时任务不会触发（接口与表仍可用）：%s", exc)
-
-
-def _sweep_video_tmp() -> None:
-    """清理图文成片中间产物残留：失败/取消/进程被杀时 handler 的 rmtree 不会执行，
-    单项目峰值 ~80MB，必须兜底。判据用目录 mtime——运行中任务每个阶段都写文件，
-    mtime 必然新鲜，24h 阈值绝不误伤活跃渲染；失败现场也保留满一天供取证。"""
-    root = get_settings().storage_dir / "video_tmp"
-    if not root.is_dir():
-        return
-    cutoff = time.time() - 24 * 3600
-    swept = 0
-    for child in root.iterdir():
-        try:
-            if child.is_dir() and child.stat().st_mtime < cutoff:
-                shutil.rmtree(child, ignore_errors=True)
-                swept += 1
-        except OSError:
-            continue
-    if swept:
-        logger.info("video_tmp 启动清理：回收过期目录 %s 个", swept)
 
 
 app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
@@ -161,7 +138,7 @@ for module in (
     stickers,
     storyboards,
     style_presets,
-    videos,
+    script_schedules,
     schedules,
     rbac,
 ):

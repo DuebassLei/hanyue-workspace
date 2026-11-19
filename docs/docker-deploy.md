@@ -43,7 +43,6 @@
 | `apps/api/Dockerfile` | 后端镜像：非 root、`TZ` + `tzdata`、可选 pip 镜像源 |
 | `apps/worker/Dockerfile` | Worker 镜像：与 api 共用领域代码，保证两种执行后端语义一致 |
 | `apps/web/Dockerfile` | 前端镜像：Node 构建 → nginx 运行，产物不含源码 |
-| `apps/api/docker/fonts-cjk-alias.conf` | 把 ASS 字幕的 `Microsoft YaHei` 别名到开源中文字体（见 2.5） |
 | `.dockerignore` / `apps/api/.dockerignore` / `apps/web/.dockerignore` | 把 `.env`、`*.db`、`node_modules`、`storage` 挡在构建上下文之外 |
 
 ## 2. 运行环境要求
@@ -54,12 +53,12 @@
 |---|---|---|
 | 宿主机 | Linux x86_64 / arm64，内核 ≥ 4.19 | Windows/macOS 用 Docker Desktop（WSL2 后端）可做验证，不建议生产 |
 | Docker | Engine ≥ 24 + Compose v2 | `docker compose version` 能输出版本号 |
-| CPU | 2 vCPU | api / worker / db / redis / nginx 五进程常驻；1 核会被渲染或建表饿死 |
+| CPU | 2 vCPU | api / worker / db / redis / nginx 五进程常驻；1 核会被批量任务或建表饿死 |
 | 内存 | 2 GB | 2 GB 可正常跑（空载 500–650 MB，见 2.3）；构建请放在打包机 |
-| 磁盘 | 40 GB 可用 | 运行镜像合计约 2.5 GB（api/worker 各含 ffmpeg，各约 0.6 GB）；构建机另需 3–5 GB 构建缓存（`docker builder prune` 可回收）；其余随 PG 数据与 `storage` 素材增长 |
+| 磁盘 | 40 GB 可用 | 运行镜像合计约 2 GB；构建机另需 3–5 GB 构建缓存（`docker builder prune` 可回收）；其余随 PG 数据与 `storage` 素材增长 |
 | 架构 | amd64 / arm64 均可 | psycopg[binary]、postgres、nginx、node、python 均有多架构镜像 |
 
-推荐 4 vCPU / 8 GB；视频成片用得多的给到 8 vCPU。
+推荐 4 vCPU / 8 GB。
 
 ### 2.2 各服务常驻内存
 
@@ -67,13 +66,12 @@
 |---|---|---|---|
 | `web` | 10–30 MB | ~100 MB | 大量并发静态请求 |
 | `api` | **110–180 MB**（实测） | ~400 MB | 批量导出、生图回调、首启动 `create_all` |
-| `worker` | 150–200 MB | ~650 MB | 1080×1920 视频合成（ffmpeg 子进程 +440 MB） |
+| `worker` | 150–200 MB | ~400 MB（估算） | 批量生图回调、大图 Pillow 处理 |
 | `db` | 150–250 MB | ~600 MB | 大表排序 / 索引重建 |
 | `redis` | 10–20 MB | ~100 MB | 队列堆积 |
 
 空载合计约 **500–650 MB**（含 dockerd 自身 80–150 MB），这是实测值不是估算：`api` 加载全部路由后
-110 MB，ffmpeg 渲染 1080×1920 单条成片峰值 439 MB（限 2 线程）/ 841 MB（14 核默认开线程）。
-换言之「4 GB 起步」是为了给构建和并发留余量，**纯运行 2 GB 也能撑住**，见 2.3。
+110 MB。换言之「4 GB 起步」是为了给构建和并发留余量，**纯运行 2 GB 也能撑住**，见 2.3。
 
 ### 2.3 2 核 2G 能跑吗（实测结论）
 
@@ -84,23 +82,22 @@
 |---|---|
 | 五容器常驻 | ✅ 空载约 500–650 MB，余 1.3 GB |
 | 出文章 / 排版 / 发布 | ✅ 无压力，请求耗时正常 |
-| 单条 1080×1920 成片 | ⚠️ 能出片，但 ffmpeg 吃满 2 核，30 秒成片约 1–3 分钟 |
-| 渲染期间同时刷页面 | ⚠️ 可用但变慢：CPU 被 ffmpeg 抢占，接口响应从几十 ms 涨到几百 ms |
-| 两条视频同时渲染 | 不会发生：队列单消费者串行，一次只跑一个任务 |
+| 批量生图 / 大图处理 | ✅ 队列串行执行，内存平稳 |
+| 多个耗时任务并发 | 不会发生：队列单消费者串行，一次只跑一个任务 |
 
 内存账（实测）：空载 `api` 110 MB + `worker` 150–200 MB + `db` 150–250 MB + `redis` 20 MB
-+ `web` 30 MB + dockerd 80–150 MB ≈ **500–650 MB**；渲染时 worker 侧再叠 ffmpeg 峰值 439 MB
-（限 2 线程；不限线程时 14 核上会到 841 MB，2 核天然停在 440 MB 档）。总占用约 1.1 GB，**仍在 2 GB 内**。
++ `web` 30 MB + dockerd 80–150 MB ≈ **500–650 MB**；批量任务期间 worker 侧略有上浮，
+总占用仍在 2 GB 内。
 
-#### 渲染期间的两个健康误判（已在代码/编排里处理）
+#### 长任务期间的两个健康误判（已在代码/编排里处理）
 
 | 症状 | 原因 | 现状 |
 |---|---|---|
-| `worker` 显示 `unhealthy`，但日志正在正常渲染 | 心跳原本写在消费循环里，`run_job` 阻塞期间不刷新；TTL 30s 过期 + 健康检查 10 次重试（约 100s）→ 超过约 130s 必判不健康。2 核上 30 秒成片就要 1–3 分钟 | **已修**：心跳改由独立守护线程每 10s 刷新（`worker.py` 的 `_heartbeat_loop`），阻塞期间照常心跳 |
-| 渲染时 `api` 偶发 `unhealthy` | healthcheck 用 `urllib` 3 秒超时，CPU 满载时首次请求要吃解释器冷启动 | 概率很低（`/health` 是纯内存操作）；真遇到把 compose 里 api 的 `urllib` timeout 调到 5 秒、`timeout` 调到 6s |
+| `worker` 显示 `unhealthy`，但日志正在正常执行任务 | 心跳原本写在消费循环里，`run_job` 阻塞期间不刷新；TTL 30s 过期 + 健康检查 10 次重试（约 100s）→ 长任务超过约 130s 必判不健康 | **已修**：心跳改由独立守护线程每 10s 刷新（`worker.py` 的 `_heartbeat_loop`），阻塞期间照常心跳 |
+| 长任务运行时 `api` 偶发 `unhealthy` | healthcheck 用 `urllib` 3 秒超时，CPU 满载时首次请求要吃解释器冷启动 | 概率很低（`/health` 是纯内存操作）；真遇到把 compose 里 api 的 `urllib` timeout 调到 5 秒、`timeout` 调到 6s |
 
-**渲染时看到 `deploy.sh health` 返回非 0，先看 `docker logs` 有没有实际错误**，不要直接
-`restart worker` —— 那会中断渲染且丢掉任务现场（`stop_grace_period` 只等 60 秒）。
+**长任务运行时看到 `deploy.sh health` 返回非 0，先看 `docker logs` 有没有实际错误**，不要直接
+`restart worker` —— 那会中断任务且丢掉任务现场（`stop_grace_period` 只等 60 秒）。
 
 #### 小内存档（自动生效）
 
@@ -111,7 +108,7 @@
 |---|---|---|
 | `db` | `shared_buffers=160MB`、`work_mem=8MB`、`max_connections=40`、`jit=off`、并行查询降到 1 | 默认 `work_mem=4MB` 配合大表排序会把内存打穿，JIT 在 2 核上只增开销 |
 | `redis` | `maxmemory=128MB`、`maxmemory-policy=noeviction` | **不能淘汰**：这是任务队列，LRU 会静默丢 job；写满时入队直接报错，界面可见 |
-| `worker` | `mem_limit=896m`、`MALLOC_ARENA_MAX=2` | 单条渲染 ffmpeg 峰值约 440 MB + Python 侧约 200 MB |
+| `worker` | `mem_limit=896m`、`MALLOC_ARENA_MAX=2` | 批量生图 / 大图处理的内存上限，防单任务失控 |
 | `api` | `mem_limit=512m`、`MALLOC_ARENA_MAX=2` | 实测 110–180 MB，上限用于防批量任务失控 |
 | `web` | `mem_limit=96m` | nginx 空载 10–30 MB |
 
@@ -129,15 +126,15 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 free -m | grep -i swap
 ```
 
-注意 swap 只是防 OOM 的缓冲，视频渲染会慢到不可用——那 4 vCPU 更好用。
+注意 swap 只是防 OOM 的缓冲，重负载任务在 swap 上会慢到不可用——那 4 vCPU 更好用。
 
 #### 2 核 2G 的合理定位
 
 | 场景 | 判断 |
 |---|---|
 | 1–5 人内部使用、写文章/排版为主 | ✅ 推荐，够 |
-| 公众号日更、偶尔出短视频 | ⚠️ 可用，视频排队慢慢跑 |
-| 多人协作 + 批量生图/批量成片 | ❌ 换 4 vCPU / 8 GB |
+| 公众号日更、偶尔批量生图 | ✅ 可用，任务排队串行跑 |
+| 多人协作 + 高频批量生图 | ❌ 换 4 vCPU / 8 GB |
 
 ### 2.4 构建机要求（可与运行机分开）
 
@@ -145,7 +142,7 @@ free -m | grep -i swap
   2 GB 内存的机器会以 `JavaScript heap out of memory` 失败 → 加 swap 或换机器构建。
 - **一次只构建一个镜像**：compose v2.22+ 默认用 bake 把 web / api / worker 并行构建，
   在 2 核 / < 3 GB 的机器上等于 npm、pip、apt 三份同时抢内存与带宽——典型症状是
-  `apt-get install ffmpeg` 慢到 5 分钟、`npm ci` 崩在 `Exit handler never called!`
+  `apt-get install` 慢到 5 分钟、`npm ci` 崩在 `Exit handler never called!`
   （这条报错不带任何原因，是 npm 在连接被掐断时退出路径自身的 bug）。
   `deploy.sh up` / `build` 默认串行（web → api → worker），大机器可用 `BUILD_PARALLEL=1` 恢复并行。
 - `pip install`：轮子为主，CPU 一般不是瓶颈，但 `pillow` 等仍需要数百 MB 峰值。
@@ -159,7 +156,7 @@ free -m | grep -i swap
 | 层 | 慢在哪 | 怎么改 |
 |---|---|---|
 | 拉基础镜像 | `registry-1.docker.io`（python / node / nginx / postgres / redis） | `./scripts/deploy.sh mirror` |
-| Debian 包 | `apt-get install ffmpeg`（api / worker） | `.env` 的 `APT_MIRROR=mirrors.aliyun.com` |
+| Debian 包 | `apt-get install libpq5 tzdata`（api / worker） | `.env` 的 `APT_MIRROR=mirrors.aliyun.com` |
 | pip | `pip install`（api / worker） | `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` |
 | npm | `npm ci`（web） | `NPM_REGISTRY=https://registry.npmmirror.com` |
 | Alpine 包 | `apk add tzdata`（web） | `APK_MIRROR=mirrors.aliyun.com` |
@@ -199,38 +196,23 @@ Docker Hub 走 `./scripts/deploy.sh mirror`：脚本通过 metadata 服务识别
 在非腾讯云机器上跑同一条命令会自动跳过它（metadata 探测失败）。
 
 
-### 2.5 视频成片的额外要求
-
-- **ffmpeg + ffprobe 是硬依赖**：`video_render.py` 直接调二进制，缺失时能力探测返回
-  `ffmpeg_missing`，视频合成不可用。api 与 worker 镜像都已 `apt install ffmpeg`。
-- 输出 1080×1920 或 1920×1080、H.264（libx264 `-preset medium -crf 21`）+ AAC，
-  纯 CPU 编码，未启用硬件加速。实测桌面 CPU 限 2 线程跑 8 秒成片用 1.1 秒（单图 zoompan，
-  峰值 439 MB）；叠加多段拼接、字幕烧制（libass）与 2 核云主机的单核性能差后，
-  **30 秒成片约 1–3 分钟**。2 核能出片，4 vCPU 才谈得上顺手。
-- 渲染时 CPU 会被吃满：同一台机器上的接口请求会变慢（见 2.3 的两个健康误判）。
-- 临时空间：单个项目渲染中间产物峰值约 80 MB（`storage/video_tmp`，24 小时后自动清理）。
-- 中文字幕：ASS 样式写死 `Microsoft YaHei`，镜像用 `fonts-wqy-microhei` + fontconfig
-  别名顶上（微软雅黑受授权限制不能随镜像分发）。换字体改
-  `apps/api/docker/fonts-cjk-alias.conf` 与 `services/video_render.py` 的 `font=`。
-
-### 2.6 网络与端口
+### 2.5 网络与端口
 
 - 入站：只需 `WEB_PORT`（默认 8080）可达。`API_PORT` 只绑 `127.0.0.1`，不要对外。
 - 出站 HTTPS/WSS 443：
   - AI 供应商（`IMAGE_PROVIDER_BASE_URL` 等自定义 OpenAI 兼容端点）
   - 微信公众号 `api.weixin.qq.com`（草稿箱），并把服务器出口 IP 加入公众号 IP 白名单
-  - edge-tts 内置语音走微软在线服务，无外网则配音阶段失败
 - 容器间 DNS 由 compose 内置的 `127.0.0.11` 提供，不需要自建 DNS。
 - 外层反代必须保留原始 URI 与查询串——素材直链的签名在 `?exp=&sig=` 里，剥掉前缀或重写查询会 403。
 
-### 2.7 时区与编码
+### 2.6 时区与编码
 
 - 三个镜像都设 `TZ=Asia/Shanghai` 并装了 `tzdata`；应用内部时间戳统一存 UTC，
   `zoneinfo` 解析用户时区依赖 `tzdata`，slim 镜像默认不带。
 - PostgreSQL 用官方镜像默认的 UTF8，**不要**加 `--locale`：alpine 版可能缺对应
   locale，initdb 会直接失败。
 
-### 2.8 想要域名 + HTTPS
+### 2.7 想要域名 + HTTPS
 
 在 `web` 前面再挂一层 Caddy/Nginx（或云负载均衡），或把 `WEB_PORT` 改成 `80`/`443` 并挂证书。
 证书与 TLS 不在本编排范围内，保持「一层反代只做静态托管 + `/api` 反代」最容易排障。
@@ -382,8 +364,9 @@ git -C .. pull                       # 或者用 CI 把代码同步到服务器
 
 **数据库表结构**：每次 `up` 时 `db-init` 服务会把 `infra/postgres/` 下的 SQL（`init/*.sql` +
 `schema.sql`）做内容哈希与库内记录比对，有变更就自动按序重跑（脚本均幂等，失败则 api/worker
-不启动，`docker compose logs db-init` 看报错）；应用启动时另有 `create_all` + 补列迁移
-（`core/db.py::_apply_additive_migrations`），只加表/加列/加索引，不做删除与改类型。需要回滚时，
+不启动，`docker compose logs db-init` 看报错）；应用启动时另有 `create_all` + 补列迁移 +
+模型驱动的自动同步（`core/db.py`）：模型新增的字段/索引会自动补到已存在的老表上（additive-only，
+带 `server_default` 的列可为旧行兜底；改列名/删列/改类型仍需手工迁移）。需要回滚时，
 容器镜像回退即可，但已加的列会留在库里（幂等，不影响旧代码运行）。涉及破坏性变更前先 `./scripts/deploy.sh backup`。
 
 ### 5.1 镜像打包（含离线分发）
@@ -520,7 +503,7 @@ docker compose cp ../apps/api/storage/. api:/data/storage/
 - [ ] `ALLOW_REGISTRATION=false`（除非确实要对外开放注册）；密码策略保持默认或更严
 - [ ] `.env` 权限 600，且不进版本库（`.gitignore` 已忽略）
 - [ ] `backups/` 落在独立磁盘并异地同步
-- [ ] 给 `api`/`worker` 配资源上限（`deploy.resources.limits`），避免视频渲染拖垮宿主机
+- [ ] 给 `api`/`worker` 配资源上限（`deploy.resources.limits`），避免批量任务拖垮宿主机
 - [ ] 公众号草稿箱：把服务器出口 IP 加入公众号 IP 白名单
 - [ ] 定期 `./scripts/deploy.sh health` 接入监控；日志已有 10MB × 3 轮转
 
@@ -539,12 +522,11 @@ docker compose cp ../apps/api/storage/. api:/data/storage/
 | 前端请求 502 / 一直 pending | api 未健康或端口被占；`./scripts/deploy.sh health` |
 | 构建 `web` 卡在 `npm ci`（exit 1，日志含 `ETIMEDOUT`/`ECONNRESET`/`network`） | `registry.npmjs.org` 不可达。在 `infra/.env` 设 `NPM_REGISTRY=https://registry.npmmirror.com` 后重新 `build web`；镜像内会同时设 `replace-registry-host=always`，把 lock 里写死的 resolved 主机改写成该源 |
 | `npm ci` 报 `Exit handler never called!`，不带任何原因 | npm 退出路径的 bug，触发条件是连接被中途掐断：并发构建互抢带宽/内存、镜像源限流、磁盘写满都会命中。已默认 `maxsockets 4` + 串行构建；仍复现就 `./scripts/deploy.sh doctor` 看 docker 数据目录剩余空间，并按日志尾部（现在会打印 npm debug log）判断是断连还是 `ENOSPC` |
-| `apt-get install` 跑了几分钟（ffmpeg 约 120 MB） | 先确认没在并行构建（`BUILD_PARALLEL=1` 会并行）；再确认 `.env` 的 `APT_MIRROR` 生效——`build` 日志里该层应显示 `[ -n "mirrors.aliyun.com" ]` |
+| `apt-get install` 跑了几分钟 | 先确认没在并行构建（`BUILD_PARALLEL=1` 会并行）；再确认 `.env` 的 `APT_MIRROR` 生效——`build` 日志里该层应显示 `[ -n "mirrors.aliyun.com" ]` |
 | 构建 `api`/`worker` 卡在 `pip install` | 同上思路，设 `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` |
 | `up --build` 卡在 `Pulling fs layer` 不动，或基础镜像拉取只有几十 KB/s | 直连 docker.io。跑 `./scripts/deploy.sh mirror`（Docker Desktop 则 Settings → Docker Engine 加 `registry-mirrors`）后重试，见 2.4 |
 | 构建 `api`/`worker` 卡在 `apt-get update` | Debian 源未换：`.env` 设 `APT_MIRROR=mirrors.aliyun.com` 后 `build api worker`；web 的 `apk add` 慢则设 `APK_MIRROR` |
 | 上传大文件 413 | 改 nginx `client_max_body_size` 与后端 `MAX_UPLOAD_BYTES` 两处 |
-| 视频成片报 `ffmpeg_missing`，或字幕显示为方块 | 镜像缺 ffmpeg 或缺中文字体；确认镜像内有 `ffmpeg` 与 `fonts-wqy-microhei`，见 §2.5 |
 | worker 不消费、任务停在 queued | worker 未 healthy / 连不上 redis；`logs worker`。Redis 后端下 API 不再自行回收任务 |
 | 任务时间戳差 8 小时 | 容器缺 `TZ`/`tzdata`，或迁移脚本未按 UTC 补时区；确认 Dockerfile 与 compose 的 `TZ` |
 | `platform-evidence.json` 变成目录 | 挂载源文件缺失时 Docker 自动建目录；删掉目录后 `init-env` 重新生成 |

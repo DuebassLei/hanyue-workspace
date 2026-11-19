@@ -53,7 +53,7 @@ rbac_audit_logs  ← 记录每一次角色/菜单/授权变更
 
 | 模块 | 权限点 |
 |---|---|
-| 创作 | `overview.view`、`hot_topics.view`、`calendar.view`、`studio.use`、`cards.use`、`images.use`、`stickers.use`、`storyboards.use`、`videos.use`、`novels.use`、`characters.use`、`prompts.use`、`assets.use` |
+| 创作 | `overview.view`、`hot_topics.view`、`calendar.view`、`studio.use`、`cards.use`、`images.use`、`stickers.use`、`storyboards.use`、`novels.use`、`characters.use`、`prompts.use`、`assets.use` |
 | 运营 | `publishing.view`、`publishing.use`、`wechat_layout.use`、`schedules.use` |
 | 系统 | `models.view`、`models.manage`、`logs.view`、`settings.view` |
 | 权限 | `rbac.role.manage`、`rbac.menu.manage`、`rbac.user.manage`、`rbac.audit.view` |
@@ -125,7 +125,6 @@ rbac_audit_logs  ← 记录每一次角色/菜单/授权变更
 | 位置 | 页面权限 | 动作所需权限 |
 |---|---|---|
 | 创作空间「转为图文卡片」 | `studio.use` | `cards.use` |
-| 创作空间「转为视频」 | `studio.use` | `videos.use` |
 | 创作空间「发布」 | `studio.use` | `publishing.use` |
 | 热点选题「写这篇」 | `hot_topics.view` | `studio.use` |
 | 热点选题「做贴图」 | `hot_topics.view` | `stickers.use` |
@@ -139,8 +138,8 @@ rbac_audit_logs  ← 记录每一次角色/菜单/授权变更
 const { can, disabledReason } = usePermission()
 
 // 动作：置灰 + 说明原因。让用户知道有这功能、也知道该找管理员要什么权限
-:disabled="Boolean(disabledReason('videos.use', '视频创作'))"
-:title="disabledReason('videos.use', '视频创作') || '将当前正文带入视频创作'"
+:disabled="Boolean(disabledReason('cards.use', '图文卡片'))"
+:title="disabledReason('cards.use', '图文卡片') || '将当前正文带入图文卡片创作台'"
 
 // 纯导航/整块内容：直接不渲染。报表页留一个点进去就 403 的卡片没有意义
 <section v-if="can('publishing.use')">
@@ -208,7 +207,6 @@ router = APIRouter(tags=["logs"], dependencies=[require_permission("logs.view")]
 | `cards` | `/cards/*` | `cards.use` |
 | `prompts` | `/prompts*` | `prompts.use` |
 | `novels` | `/novels/*` | `novels.use` |
-| `videos` | `/video-provider/status`、`/videos*` | `videos.use` |
 | `storyboards` | `/storyboards/*` | `storyboards.use` |
 
 ### 7.2 跨页面共用 → `mode="any"`

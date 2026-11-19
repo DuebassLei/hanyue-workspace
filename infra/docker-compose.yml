@@ -13,7 +13,7 @@ x-logging: &default-logging
     max-file: "3"
 
 # 国内网络可用 PIP_INDEX_URL / APT_MIRROR 走镜像源，留空则为官方源
-# （api 与 worker 共用：两者都要装 ffmpeg/字体，apt 阶段最容易卡住）
+# （api 与 worker 共用：apt 与 pip 阶段最容易卡住）
 x-pip-build-args: &pip-build-args
   PIP_INDEX_URL: ${PIP_INDEX_URL:-}
   PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
@@ -23,6 +23,9 @@ x-pip-build-args: &pip-build-args
 # 「接口能创建任务但 worker 执行失败」这类难查的问题，因此用锚点统一注入。
 x-app-env: &app-env
   DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hanyue}:${POSTGRES_PASSWORD:?请在 infra/.env 设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hanyue}
+  # Schema 自动同步的破坏性开关（改名/删列/类型对齐，执行前旧值归档进
+  # _schema_archive 可恢复）。默认开启；不想让启动动表结构就设 false。
+  DB_AUTO_DESTRUCTIVE_DDL: ${DB_AUTO_DESTRUCTIVE_DDL:-true}
   SECRET_KEY: ${SECRET_KEY:?请在 infra/.env 设置至少 32 字符的随机 SECRET_KEY}
   # 默认按生产跑（启动门禁会校验 SECRET_KEY / 登录开关 / 不用 SQLite）。
   # 正式登录走邮箱密码：首个账号用 ./scripts/deploy.sh create-user create --email ...
@@ -61,6 +64,7 @@ x-app-env: &app-env
   HOT_TOPICS_WECHAT_10W_URL: ${HOT_TOPICS_WECHAT_10W_URL:-}
   HOT_TOPICS_WECHAT_KEYWORD: ${HOT_TOPICS_WECHAT_KEYWORD:-}
   HOT_TOPICS_API_URL: ${HOT_TOPICS_API_URL:-}
+  SCRIPT_SDK_BASE_URL: ${SCRIPT_SDK_BASE_URL:-http://api:8000}
 
 x-app-volumes: &app-volumes
   - storage:/data/storage
@@ -148,7 +152,7 @@ services:
       retries: 10
       start_period: 30s
     init: true
-    # 长任务（视频渲染、批量生图）需要时间收尾，避免一 stop 就丢任务现场
+    # 长任务（批量生图、大图处理）需要时间收尾，避免一 stop 就丢任务现场
     stop_grace_period: 60s
     security_opt:
       - no-new-privileges:true

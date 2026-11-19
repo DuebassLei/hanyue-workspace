@@ -34,7 +34,6 @@ PERMISSION_CATALOG: tuple[tuple[str, str, str, int], ...] = (
     ("images.use", "图片生成", "创作", 60),
     ("stickers.use", "贴图创作", "创作", 70),
     ("storyboards.use", "漫画分镜", "创作", 80),
-    ("videos.use", "视频创作", "创作", 90),
     ("novels.use", "小说创作", "创作", 100),
     ("characters.use", "角色库", "创作", 110),
     ("prompts.use", "提示词库", "创作", 120),
@@ -46,6 +45,7 @@ PERMISSION_CATALOG: tuple[tuple[str, str, str, int], ...] = (
     ("publishing.use", "发布管理", "运营", 200),
     ("wechat_layout.use", "微信排版", "运营", 210),
     ("schedules.use", "定时任务", "运营", 220),
+    ("scheduled-script.admin", "受信任脚本管理", "运营", 230),
     # 读与写分开：能看见「配了哪些模型、Key 掩码是什么」是一件事，
     # 能换 Key、删连接、改模型代号是另一件事。后者一旦误操作，全站创作立即停摆。
     ("models.view", "模型查看", "系统", 295),
@@ -76,7 +76,6 @@ _EDITOR_EXTRA = (
     "images.use",
     "stickers.use",
     "storyboards.use",
-    "videos.use",
     "novels.use",
     "characters.use",
     "wechat_layout.use",
@@ -89,6 +88,7 @@ _OPERATOR_EXTRA = (
     "publishing.view",
     "publishing.use",
     "schedules.use",
+    "scheduled-script.admin",
     "logs.view",
     "models.view",
 )

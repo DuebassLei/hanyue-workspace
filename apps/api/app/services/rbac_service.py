@@ -93,14 +93,6 @@ MENU_SEED: tuple[MenuSeed, ...] = (
                 ),
             ),
             _group(
-                "group-videos",
-                "视频",
-                "videos",
-                (
-                    _page("videos", "视频创作", "视频", "videos", "videos.use"),
-                ),
-            ),
-            _group(
                 "group-novels",
                 "小说",
                 "novels",
@@ -385,14 +377,13 @@ MIGRATION_MODEL_READ_SPLIT = "2026-11.models-read-split"
 MIGRATION_PRUNE_LEGACY_MENUS = "2026-11.prune-legacy-menus"
 _DEPRECATED_MENU_KEYS = ("image-styles",)
 
-# 2026-11：工作区菜单太挤（11 项平铺），拆成「文章 / 图片 / 视频 / 小说」四个分类。
+# 2026-11：工作区菜单太挤（11 项平铺），拆成「文章 / 图片 / 小说」三个分类。
 # 老库里页面直接挂在 workspace 下，播种只增不减、不会搬动它们，故用一次性迁移重挂载。
 # 只调整归属和分类顺序：页面自身的排序、隐藏状态和管理员的角色绑定一律保留。
 MIGRATION_WORKSPACE_GROUPS = "2026-11.workspace-groups"
 _WORKSPACE_SUBGROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("group-articles", ("articles", "cards")),
     ("group-images", ("images", "stickers", "storyboards", "assets")),
-    ("group-videos", ("videos",)),
     ("group-novels", ("novels", "characters")),
 )
 
@@ -472,6 +463,37 @@ def _migrate_storyboards_to_images(db) -> None:
     rebuild_paths(db)
 
 
+# 2026-11：视频创作功能整体下线。菜单播种只增不减，老库里的视频菜单与权限点
+# 需要一次性迁移清理。必须在漫画分镜迁移之后执行（分镜可能还挂在视频分组下）。
+MIGRATION_REMOVE_VIDEOS = "2026-11.remove-videos"
+
+
+def _migrate_remove_videos(db) -> None:
+    videos_group = db.scalar(select(models.Menu).where(models.Menu.menu_key == "group-videos"))
+    if videos_group is not None:
+        # 管理员可能手工往视频分组下挂过别的页面：先搬回工作区，避免 RESTRICT 挡删
+        workspace = db.scalar(select(models.Menu).where(models.Menu.menu_key == "workspace"))
+        for child in db.scalars(
+            select(models.Menu).where(models.Menu.parent_id == videos_group.id)
+        ).all():
+            if child.menu_key != "videos":
+                child.parent_id = workspace.id if workspace is not None else None
+        db.flush()
+    for key in ("videos", "group-videos"):
+        menu = db.scalar(select(models.Menu).where(models.Menu.menu_key == key))
+        if menu is not None:
+            db.execute(delete(models.RoleMenu).where(models.RoleMenu.menu_id == menu.id))
+            db.delete(menu)
+    db.execute(
+        delete(models.RolePermission).where(models.RolePermission.permission_code == "videos.use")
+    )
+    permission = db.get(models.Permission, "videos.use")
+    if permission is not None:
+        db.delete(permission)
+    db.flush()
+    rebuild_paths(db)
+
+
 def _run_migrations(db) -> None:
     setting = db.get(models.AppSetting, _MIGRATION_SETTING_KEY)
     done = set((setting.value or {}).get("done", [])) if setting else set()
@@ -502,7 +524,7 @@ def _run_migrations(db) -> None:
         done.add(MIGRATION_PRUNE_LEGACY_MENUS)
         changed = True
 
-    # 迁移 3：工作区二级分类（文章 / 图片 / 视频 / 小说）
+    # 迁移 3：工作区二级分类（文章 / 图片 / 小说）
     if MIGRATION_WORKSPACE_GROUPS not in done:
         _migrate_workspace_groups(db)
         done.add(MIGRATION_WORKSPACE_GROUPS)
@@ -512,6 +534,12 @@ def _run_migrations(db) -> None:
     if MIGRATION_STORYBOARDS_TO_IMAGES not in done:
         _migrate_storyboards_to_images(db)
         done.add(MIGRATION_STORYBOARDS_TO_IMAGES)
+        changed = True
+
+    # 迁移 5：视频创作下线，清理视频菜单与权限点（须在迁移 4 之后）
+    if MIGRATION_REMOVE_VIDEOS not in done:
+        _migrate_remove_videos(db)
+        done.add(MIGRATION_REMOVE_VIDEOS)
         changed = True
 
     if changed:

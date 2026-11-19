@@ -17,6 +17,7 @@ import {
 } from 'naive-ui'
 import { api } from '../api/client'
 import { toast } from '../ui/feedback'
+import CustomScriptsPanel from '../features/schedules/CustomScriptsPanel.vue'
 
 const CRON_PRESETS = [
   { label: '每 30 分钟', value: '*/30 * * * *' },
@@ -67,10 +68,14 @@ const runsTask = ref(null)
 const runs = ref([])
 const runsLoading = ref(false)
 const runsCursor = ref(null)
+const scripts = ref([])
+const scriptsPanel = ref(null)
+const expandedRunId = ref('')
 
 const form = reactive({
   taskType: '',
   name: '',
+  paramsText: '{}',
   params: {},
   scheduleKind: 'cron',
   cron: '0 8 * * *',
@@ -95,6 +100,36 @@ const intervalSeconds = computed(() => Math.max(60, Number(form.intervalValue ||
 
 const currentType = computed(() => typeMap.value[form.taskType] || null)
 const currentFields = computed(() => currentType.value?.params?.fields || [])
+const isUserScriptType = computed(() => String(form.taskType || '').startsWith('user-script.'))
+const taskTypeOptions = computed(() =>
+  (editingId.value ? types.value : creatableTypes.value).map((item) => ({
+    label: item.title,
+    value: item.key,
+  })),
+)
+const scriptCreatableTypes = computed(() => types.value.filter((item) => item.key.startsWith('user-script.')))
+
+function toggleRun(id) {
+  expandedRunId.value = expandedRunId.value === id ? '' : id
+}
+
+function formatOutput(value) {
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function hasScriptOutput(run) {
+  return (
+    run.exitCode !== null && run.exitCode !== undefined
+    || (run.result !== null && run.result !== undefined)
+    || !!run.stdout
+    || !!run.stderr
+  )
+}
 
 function fmtTime(value) {
   if (!value) return '—'
@@ -111,6 +146,7 @@ async function load() {
     rows.value = list.items || []
     types.value = meta.items || []
     systemWritable.value = !!meta.systemWritable
+    await reloadScripts()
   } catch (err) {
     error.value = err.message
   } finally {
@@ -126,6 +162,34 @@ function defaultParams(fields) {
   return out
 }
 
+function refreshScriptTypes() {
+  const keys = new Set(types.value.map((item) => item.key))
+  for (const script of scripts.value) {
+    const key = `user-script.${script.id}`
+    if (!keys.has(key)) {
+      types.value.push({
+        key,
+        title: `自定义脚本 · ${script.name}`,
+        description: '运行参数必须是 JSON 对象，脚本可通过 get_params() 读取。',
+        scope: 'user',
+      })
+    }
+  }
+  const validKeys = new Set(scripts.value.map((script) => `user-script.${script.id}`))
+  types.value = types.value.filter(
+    (item) => !item.key.startsWith('user-script.') || validKeys.has(item.key),
+  )
+}
+
+async function reloadScripts() {
+  await scriptsPanel.value?.load?.()
+  refreshScriptTypes()
+}
+
+function handleScriptsChanged() {
+  refreshScriptTypes()
+}
+
 function openCreate() {
   const first = creatableTypes.value[0]
   if (!first) return
@@ -135,7 +199,9 @@ function openCreate() {
   previewError.value = ''
   form.taskType = first.key
   form.name = first.title
-  form.params = defaultParams(first.params.fields || [])
+  form.paramsText = isUserScriptType.value
+    ? '{}'
+    : JSON.stringify(defaultParams(first.params.fields || []), null, 2)
   form.scheduleKind = 'cron'
   form.cron = first.defaultCron || '0 8 * * *'
   form.intervalValue = 30
@@ -154,7 +220,7 @@ function openEdit(row) {
   previewError.value = ''
   form.taskType = row.taskType
   form.name = row.name
-  form.params = { ...(row.params || {}) }
+  form.paramsText = JSON.stringify(row.params || {}, null, 2)
   form.scheduleKind = row.scheduleKind
   form.cron = row.cron || type?.defaultCron || '0 8 * * *'
   form.intervalValue = Math.max(1, Math.round((row.intervalSeconds || 1800) / 60))
@@ -172,6 +238,7 @@ function schedulePreview() {
 }
 
 async function refreshPreview() {
+  if (isUserScriptType.value) return
   previewError.value = ''
   previewTimes.value = []
   const payload = {
@@ -190,8 +257,26 @@ async function refreshPreview() {
 }
 
 watch(() => [form.scheduleKind, form.cron, form.intervalValue, form.intervalUnit, form.timezone], schedulePreview)
+watch(
+  () => scripts.value,
+  () => refreshScriptTypes(),
+  { deep: true },
+)
 
 function paramsPayload() {
+  if (isUserScriptType.value) {
+    try {
+      const parsed = JSON.parse(form.paramsText || '{}')
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        formError.value = '运行参数必须是 JSON 对象'
+        return null
+      }
+      return parsed
+    } catch {
+      formError.value = '运行参数 JSON 解析失败，请检查格式'
+      return null
+    }
+  }
   const out = {}
   for (const field of currentFields.value) {
     const value = form.params[field.name]
@@ -214,9 +299,11 @@ async function save() {
     formError.value = '请填写 cron 表达式'
     return
   }
+  const params = paramsPayload()
+  if (params === null) return
   const payload = {
     name: form.name.trim(),
-    params: paramsPayload(),
+    params,
     scheduleKind: form.scheduleKind,
     cron: form.scheduleKind === 'cron' ? form.cron.trim() : '',
     intervalSeconds: form.scheduleKind === 'interval' ? intervalSeconds.value : null,
@@ -338,7 +425,11 @@ onBeforeUnmount(() => {
       </div>
       <n-tooltip :disabled="creatableTypes.length > 0">
         <template #trigger>
-          <n-button type="primary" :disabled="creatableTypes.length === 0" @click="openCreate">
+          <n-button
+            type="primary"
+            :disabled="creatableTypes.length === 0 || scriptCreatableTypes.length === 0"
+            @click="openCreate"
+          >
             新建任务
           </n-button>
         </template>
@@ -351,7 +442,7 @@ onBeforeUnmount(() => {
     <n-spin :show="loading">
       <n-empty v-if="!loading && rows.length === 0" description="还没有定时任务">
         <template #extra>
-          <n-button v-if="creatableTypes.length" size="small" @click="openCreate">新建任务</n-button>
+          <n-button v-if="creatableTypes.length && scriptCreatableTypes.length" size="small" @click="openCreate">新建任务</n-button>
           <span v-else class="sched-empty-hint">
             系统级任务会在首次登录时自动创建；若没有出现，检查后端定时调度器是否启动。
           </span>
@@ -421,17 +512,29 @@ onBeforeUnmount(() => {
       </ul>
     </n-spin>
 
+    <CustomScriptsPanel ref="scriptsPanel" v-model:scripts="scripts" @updated="handleScriptsChanged" />
+
     <!-- 新建 / 编辑 -->
     <n-modal v-model:show="showEditor" preset="card" class="sched-modal" :title="editingId ? '编辑定时任务' : '新建定时任务'">
       <n-form label-placement="top" :show-feedback="false">
         <n-form-item label="任务类型">
           <n-select
             v-model:value="form.taskType"
-            :options="(editingId ? types : creatableTypes).map((item) => ({ label: item.title, value: item.key }))"
+            :options="taskTypeOptions"
             :disabled="!!editingId"
           />
         </n-form-item>
         <p v-if="currentType?.description" class="sched-type-desc">{{ currentType.description }}</p>
+
+        <n-form-item v-if="isUserScriptType" label="运行参数（JSON 对象）">
+          <n-input
+            v-model:value="form.paramsText"
+            type="textarea"
+            class="sched-params-json"
+            :rows="6"
+            placeholder="{}"
+          />
+        </n-form-item>
 
         <n-form-item label="名称">
           <n-input v-model:value="form.name" placeholder="例：拉取热点榜单" />
@@ -550,6 +653,25 @@ onBeforeUnmount(() => {
           <p v-if="run.errorMessage" class="sched-run-error">
             {{ run.errorCode }}: {{ run.errorMessage }}
           </p>
+          <button
+            v-if="hasScriptOutput(run)"
+            type="button"
+            class="sched-run-toggle"
+            @click="toggleRun(run.id)"
+          >
+            {{ expandedRunId === run.id ? '收起输出' : '展开输出' }}
+          </button>
+          <div v-if="expandedRunId === run.id" class="sched-run-output">
+            <p v-if="run.exitCode !== null && run.exitCode !== undefined" class="sched-run-output-line">
+              exitCode：{{ run.exitCode }}
+            </p>
+            <p v-if="run.result !== null && run.result !== undefined" class="sched-run-output-line">result</p>
+            <pre v-if="run.result !== null && run.result !== undefined" class="sched-run-log">{{ formatOutput(run.result) }}</pre>
+            <p v-if="run.stdout" class="sched-run-output-line">stdout</p>
+            <pre v-if="run.stdout" class="sched-run-log">{{ run.stdout }}</pre>
+            <p v-if="run.stderr" class="sched-run-output-line">stderr</p>
+            <pre v-if="run.stderr" class="sched-run-log">{{ run.stderr }}</pre>
+          </div>
         </li>
       </ul>
       <div v-if="runsCursor" class="sched-runs-more">
@@ -740,6 +862,46 @@ onBeforeUnmount(() => {
   font-size: var(--font-xs);
   color: var(--color-danger);
   word-break: break-all;
+}
+.sched-params-json :deep(textarea) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+.sched-run-toggle {
+  margin-top: var(--space-1);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+.sched-run-output {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+.sched-run-output-line {
+  margin: 0;
+  font-size: var(--font-xs);
+  color: var(--color-text-muted);
+}
+.sched-run-log {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md, 8px);
+  background: var(--color-surface-muted);
+  color: var(--color-text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .sched-runs-more {
   display: flex;

@@ -10,7 +10,6 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,
@@ -19,7 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .core.db import Base
 
@@ -878,7 +877,7 @@ class StoryboardProject(Base, TimestampMixin):
     summary: Mapped[str] = mapped_column(Text, default="")
     assets: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
-    # 组级统一出图风格快照：{style_id, prompt_suffix, reference_asset_id, seed, negative_prompt}
+    # 组级统一出图风格：{style_number, generation_name, group_key}，指向手绘风格库。
     style_config: Mapped[dict] = mapped_column(JSON, default=dict)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
@@ -988,62 +987,6 @@ class NovelAlias(Base, TimestampMixin):
     new_name: Mapped[str] = mapped_column(String(120), default="")
 
 
-# ---------------- 视频创作（图文成片） ----------------
-
-
-def _default_video_settings() -> dict:
-    return {
-        "aspectRatio": "9:16",       # 9:16 | 16:9
-        "voice": "zh-CN-XiaoxiaoNeural",
-        "rate": "+0%",               # edge-tts 语速偏移
-        "subtitles": True,
-        "bgmAssetId": None,
-        "bgmVolume": 0.18,           # BGM 相对旁白的音量
-        "motionIntensity": 0.12,
-        "motionFocus": {"x": 0.5, "y": 0.5},
-        "subtitleAnimation": "fade_in",
-    }
-
-
-class VideoProject(Base, TimestampMixin):
-    """图文成片项目：文案 → 解说分镜 → 镜头配图/配音 → FFmpeg 合成。"""
-
-    __tablename__ = "video_projects"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
-    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
-    title: Mapped[str] = mapped_column(String(200), default="未命名视频")
-    source_text: Mapped[str] = mapped_column(Text, default="")
-    source_content_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    settings: Mapped[dict] = mapped_column(JSON, default=_default_video_settings)
-    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
-    render_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    render_job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
-    render_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    rendered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-
-
-class VideoShot(Base, TimestampMixin):
-    """镜头：旁白驱动时长；配图走 AI 生图，配音走可插拔 TTS。"""
-
-    __tablename__ = "video_shots"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    project_id: Mapped[str] = mapped_column(ForeignKey("video_projects.id"), index=True)
-    sort_order: Mapped[int] = mapped_column(Integer, default=0)
-    narration: Mapped[str] = mapped_column(Text, default="")
-    image_prompt: Mapped[str] = mapped_column(Text, default="")
-    image_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    audio_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
-    motion: Mapped[str] = mapped_column(String(16), default="zoom_in")
-    intensity: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
-    focus: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-
-
 class ScheduledTask(Base, TimestampMixin):
     """定时任务定义（docs/scheduled-tasks.md §4.1）。
 
@@ -1101,6 +1044,56 @@ class ScheduledTaskRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ScheduledScript(Base, TimestampMixin):
+    """UI 可维护的受信任定时脚本：草稿与发布代码分离，执行只用发布快照。"""
+
+    __tablename__ = "scheduled_scripts"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id", "name", name="uq_scheduled_script_owner_name"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    draft_code: Mapped[str] = mapped_column(Text, default="", server_default="")
+    published_code: Mapped[str] = mapped_column(Text, default="", server_default="")
+    published_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_hash: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=60, server_default="60")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+    versions: Mapped[list["ScheduledScriptVersion"]] = relationship(
+        back_populates="script",
+        cascade="all, delete-orphan",
+        order_by="ScheduledScriptVersion.version.desc()",
+    )
+
+
+class ScheduledScriptVersion(Base):
+    """发布历史快照：同一次发布的代码必须可追溯。"""
+
+    __tablename__ = "scheduled_script_versions"
+    __table_args__ = (
+        UniqueConstraint("script_id", "version", name="uq_scheduled_script_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    script_id: Mapped[str] = mapped_column(
+        ForeignKey("scheduled_scripts.id"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    code: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    script: Mapped[ScheduledScript] = relationship(back_populates="versions")
 
 
 # ---------------- RBAC：角色 / 权限 / 菜单 ----------------

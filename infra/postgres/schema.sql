@@ -469,6 +469,26 @@ CREATE TABLE IF NOT EXISTS role_permissions (
 	FOREIGN KEY(permission_code) REFERENCES permissions (code) ON DELETE CASCADE
 );
 
+-- scheduled_scripts
+CREATE TABLE IF NOT EXISTS scheduled_scripts (
+	id VARCHAR(32) NOT NULL, 
+	owner_user_id VARCHAR(32) NOT NULL, 
+	name VARCHAR(120) NOT NULL, 
+	description VARCHAR(500) DEFAULT '' NOT NULL, 
+	draft_code TEXT DEFAULT '' NOT NULL, 
+	published_code TEXT DEFAULT '' NOT NULL, 
+	published_version INTEGER DEFAULT '0' NOT NULL, 
+	published_at TIMESTAMP WITH TIME ZONE, 
+	published_hash VARCHAR(64) DEFAULT '' NOT NULL, 
+	timeout_seconds INTEGER DEFAULT '60' NOT NULL, 
+	enabled BOOLEAN DEFAULT 'true' NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_scheduled_script_owner_name UNIQUE (owner_user_id, name), 
+	FOREIGN KEY(owner_user_id) REFERENCES users (id)
+);
+
 -- scheduled_tasks
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
 	id VARCHAR(32) NOT NULL, 
@@ -719,6 +739,18 @@ CREATE TABLE IF NOT EXISTS role_menus (
 	FOREIGN KEY(menu_id) REFERENCES menus (id) ON DELETE CASCADE
 );
 
+-- scheduled_script_versions
+CREATE TABLE IF NOT EXISTS scheduled_script_versions (
+	id VARCHAR(32) NOT NULL, 
+	script_id VARCHAR(32) NOT NULL, 
+	version INTEGER NOT NULL, 
+	code TEXT NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_scheduled_script_version UNIQUE (script_id, version), 
+	FOREIGN KEY(script_id) REFERENCES scheduled_scripts (id)
+);
+
 -- scheduled_task_runs
 CREATE TABLE IF NOT EXISTS scheduled_task_runs (
 	id VARCHAR(32) NOT NULL, 
@@ -767,28 +799,6 @@ CREATE TABLE IF NOT EXISTS storyboard_projects (
 	assets JSON NOT NULL, 
 	status VARCHAR(16) NOT NULL, 
 	style_config JSON NOT NULL, 
-	deleted_at TIMESTAMP WITH TIME ZONE, 
-	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
-	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
-	PRIMARY KEY (id), 
-	FOREIGN KEY(owner_user_id) REFERENCES users (id), 
-	FOREIGN KEY(workspace_id) REFERENCES workspaces (id)
-);
-
--- video_projects
-CREATE TABLE IF NOT EXISTS video_projects (
-	id VARCHAR(32) NOT NULL, 
-	owner_user_id VARCHAR(32) NOT NULL, 
-	workspace_id VARCHAR(32) NOT NULL, 
-	title VARCHAR(200) NOT NULL, 
-	source_text TEXT NOT NULL, 
-	source_content_id VARCHAR(32), 
-	settings JSON NOT NULL, 
-	status VARCHAR(16) NOT NULL, 
-	render_asset_id VARCHAR(32), 
-	render_job_id VARCHAR(32), 
-	render_error TEXT, 
-	rendered_at TIMESTAMP WITH TIME ZONE, 
 	deleted_at TIMESTAMP WITH TIME ZONE, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
@@ -1002,26 +1012,6 @@ CREATE TABLE IF NOT EXISTS storyboard_scenes (
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(project_id) REFERENCES storyboard_projects (id)
-);
-
--- video_shots
-CREATE TABLE IF NOT EXISTS video_shots (
-	id VARCHAR(32) NOT NULL, 
-	project_id VARCHAR(32) NOT NULL, 
-	sort_order INTEGER NOT NULL, 
-	narration TEXT NOT NULL, 
-	image_prompt TEXT NOT NULL, 
-	image_asset_id VARCHAR(32), 
-	audio_asset_id VARCHAR(32), 
-	duration_ms INTEGER NOT NULL, 
-	motion VARCHAR(16) NOT NULL, 
-	intensity FLOAT, 
-	focus JSON, 
-	deleted_at TIMESTAMP WITH TIME ZONE, 
-	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
-	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
-	PRIMARY KEY (id), 
-	FOREIGN KEY(project_id) REFERENCES video_projects (id)
 );
 
 -- agent_approvals
@@ -1277,6 +1267,9 @@ CREATE INDEX IF NOT EXISTS ix_rbac_audit_logs_created_at ON rbac_audit_logs (cre
 -- rbac_audit_logs.ix_rbac_audit_target
 CREATE INDEX IF NOT EXISTS ix_rbac_audit_target ON rbac_audit_logs (target_type, target_id);
 
+-- scheduled_scripts.ix_scheduled_scripts_owner_user_id
+CREATE INDEX IF NOT EXISTS ix_scheduled_scripts_owner_user_id ON scheduled_scripts (owner_user_id);
+
 -- scheduled_tasks.ix_scheduled_tasks_enabled
 CREATE INDEX IF NOT EXISTS ix_scheduled_tasks_enabled ON scheduled_tasks (enabled);
 
@@ -1376,6 +1369,9 @@ CREATE INDEX IF NOT EXISTS ix_publish_jobs_target ON publish_jobs (target);
 -- publish_jobs.ix_publish_jobs_workspace_id
 CREATE INDEX IF NOT EXISTS ix_publish_jobs_workspace_id ON publish_jobs (workspace_id);
 
+-- scheduled_script_versions.ix_scheduled_script_versions_script_id
+CREATE INDEX IF NOT EXISTS ix_scheduled_script_versions_script_id ON scheduled_script_versions (script_id);
+
 -- scheduled_task_runs.ix_scheduled_task_runs_job_id
 CREATE INDEX IF NOT EXISTS ix_scheduled_task_runs_job_id ON scheduled_task_runs (job_id);
 
@@ -1408,21 +1404,6 @@ CREATE INDEX IF NOT EXISTS ix_storyboard_projects_status ON storyboard_projects 
 
 -- storyboard_projects.ix_storyboard_projects_workspace_id
 CREATE INDEX IF NOT EXISTS ix_storyboard_projects_workspace_id ON storyboard_projects (workspace_id);
-
--- video_projects.ix_video_projects_deleted_at
-CREATE INDEX IF NOT EXISTS ix_video_projects_deleted_at ON video_projects (deleted_at);
-
--- video_projects.ix_video_projects_owner_user_id
-CREATE INDEX IF NOT EXISTS ix_video_projects_owner_user_id ON video_projects (owner_user_id);
-
--- video_projects.ix_video_projects_render_job_id
-CREATE INDEX IF NOT EXISTS ix_video_projects_render_job_id ON video_projects (render_job_id);
-
--- video_projects.ix_video_projects_status
-CREATE INDEX IF NOT EXISTS ix_video_projects_status ON video_projects (status);
-
--- video_projects.ix_video_projects_workspace_id
-CREATE INDEX IF NOT EXISTS ix_video_projects_workspace_id ON video_projects (workspace_id);
 
 -- week_reviews.ix_week_reviews_owner_user_id
 CREATE INDEX IF NOT EXISTS ix_week_reviews_owner_user_id ON week_reviews (owner_user_id);
@@ -1484,12 +1465,6 @@ CREATE INDEX IF NOT EXISTS ix_storyboard_scenes_deleted_at ON storyboard_scenes 
 -- storyboard_scenes.ix_storyboard_scenes_project_id
 CREATE INDEX IF NOT EXISTS ix_storyboard_scenes_project_id ON storyboard_scenes (project_id);
 
--- video_shots.ix_video_shots_deleted_at
-CREATE INDEX IF NOT EXISTS ix_video_shots_deleted_at ON video_shots (deleted_at);
-
--- video_shots.ix_video_shots_project_id
-CREATE INDEX IF NOT EXISTS ix_video_shots_project_id ON video_shots (project_id);
-
 -- agent_approvals.ix_agent_approvals_run_id
 CREATE INDEX IF NOT EXISTS ix_agent_approvals_run_id ON agent_approvals (run_id);
 
@@ -1532,8 +1507,6 @@ CREATE INDEX IF NOT EXISTS ix_sticker_images_set_order ON sticker_images (set_id
 CREATE INDEX IF NOT EXISTS ix_storyboard_projects_owner_updated ON storyboard_projects (owner_user_id, updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS ix_storyboard_scenes_project_order ON storyboard_scenes (project_id, sort_order);
 CREATE INDEX IF NOT EXISTS ix_storyboard_shots_scene_order ON storyboard_shots (scene_id, sort_order);
-CREATE INDEX IF NOT EXISTS ix_video_projects_owner_updated ON video_projects (owner_user_id, updated_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS ix_video_shots_project_order ON video_shots (project_id, sort_order);
 CREATE INDEX IF NOT EXISTS ix_sched_enabled_next ON scheduled_tasks (enabled, next_run_at);
 CREATE INDEX IF NOT EXISTS ix_sched_scope_owner_fired ON scheduled_tasks (scope, owner_user_id, last_fired_at DESC);
 CREATE INDEX IF NOT EXISTS ix_sched_runs_task_time ON scheduled_task_runs (task_id, triggered_at DESC, id DESC);

@@ -79,9 +79,8 @@ services:
       MALLOC_ARENA_MAX: "2"
     mem_limit: 512m
 
-  # ── Worker：唯一会跑 ffmpeg 的服务。
-  #    实测 1080×1920 单条成片 ffmpeg 峰值 440MB（2 线程）+ Python 侧约 150MB，
-  #    896m 是「单条渲染不 OOM、又不会把整机吃光」的折中。
+  # ── Worker：批量生图 / 大图处理是主要内存消耗方，
+  #    896m 是「单任务不 OOM、又不会把整机吃光」的宽裕上限。
   worker:
     environment:
       MALLOC_ARENA_MAX: "2"

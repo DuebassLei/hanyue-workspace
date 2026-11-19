@@ -30,7 +30,7 @@ const route = useRoute()
 const router = useRouter()
 const modelSelection = useModelSelectionStore()
 
-// 创作空间本身只要 studio.use，但页内的「转为卡片/视频」「发布」各自需要别的权限点。
+// 创作空间本身只要 studio.use，但页内的「转为卡片」「发布」各自需要别的权限点。
 // 置灰而不是隐藏：让用户知道有这个动作，也知道该找管理员要什么权限。
 const { disabledReason } = usePermission()
 
@@ -1477,15 +1477,6 @@ onBeforeUnmount(() => {
           @click="router.push({ name: 'cards', state: { markdown: draftBody } })"
         >
           转为图文卡片
-        </n-button>
-        <n-button
-          quaternary
-          size="small"
-          :disabled="!detail || !draftBody || Boolean(disabledReason('videos.use', '视频创作'))"
-          :title="disabledReason('videos.use', '视频创作') || '将当前正文带入视频创作，自动拆分镜'"
-          @click="router.push({ name: 'videos', state: { videoSource: draftBody, videoTitle: detail?.title || '' } })"
-        >
-          转为视频
         </n-button>
         <n-button
           quaternary
