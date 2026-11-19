@@ -735,12 +735,10 @@ def test_workspace_menu_split_into_four_groups(client):
     assert [child["name"] for child in groups["group-images"]["children"]] == [
         "images",
         "stickers",
+        "storyboards",
         "assets",
     ]
-    assert [child["name"] for child in groups["group-videos"]["children"]] == [
-        "videos",
-        "storyboards",
-    ]
+    assert [child["name"] for child in groups["group-videos"]["children"]] == ["videos"]
     assert [child["name"] for child in groups["group-novels"]["children"]] == [
         "novels",
         "characters",
@@ -755,8 +753,8 @@ def test_workspace_groups_migration_reparents_legacy_menus(client):
 
     layout = {
         "group-articles": ("articles", "cards"),
-        "group-images": ("images", "stickers", "assets"),
-        "group-videos": ("videos", "storyboards"),
+        "group-images": ("images", "stickers", "storyboards", "assets"),
+        "group-videos": ("videos",),
         "group-novels": ("novels", "characters"),
     }
 
@@ -806,3 +804,52 @@ def test_workspace_groups_migration_reparents_legacy_menus(client):
             .order_by(models.Menu.sort)
         ).all()
         assert [menu.menu_key for menu in top[:2]] == ["studio", "prompts"]
+
+
+def test_storyboards_move_from_videos_to_images(client):
+    """漫画分镜曾误放在「视频」下，一次性迁移把它挪到「图片」，且只跑一次。"""
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services import rbac_service
+
+    with SessionLocal() as db:
+        storyboards = db.scalar(select(models.Menu).where(models.Menu.menu_key == "storyboards"))
+        videos_group = db.scalar(select(models.Menu).where(models.Menu.menu_key == "group-videos"))
+        images_group = db.scalar(select(models.Menu).where(models.Menu.menu_key == "group-images"))
+        stickers = db.scalar(select(models.Menu).where(models.Menu.menu_key == "stickers"))
+        assets = db.scalar(select(models.Menu).where(models.Menu.menu_key == "assets"))
+        assert all([storyboards, videos_group, images_group, stickers, assets])
+
+        # --- 伪造上一版结构：分镜挂在视频下 ---
+        storyboards.parent_id = videos_group.id
+        storyboards.sort = 20
+        setting = db.get(models.AppSetting, rbac_service._MIGRATION_SETTING_KEY)
+        done = set((setting.value or {}).get("done", [])) if setting else set()
+        done.discard(rbac_service.MIGRATION_STORYBOARDS_TO_IMAGES)
+        if setting is None:
+            setting = models.AppSetting(key=rbac_service._MIGRATION_SETTING_KEY, value={})
+            db.add(setting)
+        setting.value = {"done": sorted(done)}
+        db.commit()
+
+        rbac_service.seed(db)
+        db.commit()
+
+        assert storyboards.parent_id == images_group.id
+        assert storyboards.path == f"{images_group.path}/storyboards"
+        # 顺序：贴图创作之后、素材图库之前
+        assert stickers.sort < storyboards.sort < assets.sort
+
+        # 管理员之后手工挪走，再次 seed 不会被搬回来（迁移只跑一次）
+        storyboards.parent_id = videos_group.id
+        db.commit()
+        rbac_service.seed(db)
+        db.commit()
+        assert storyboards.parent_id == videos_group.id
+
+        # 还原：搬回图片，不污染后续用例
+        storyboards.parent_id = images_group.id
+        storyboards.sort = stickers.sort + 1
+        db.commit()
+        rbac_service.rebuild_paths(db)
+        db.commit()

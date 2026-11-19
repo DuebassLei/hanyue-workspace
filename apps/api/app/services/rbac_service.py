@@ -88,6 +88,7 @@ MENU_SEED: tuple[MenuSeed, ...] = (
                 (
                     _page("images", "图片生成", "图片", "images", "images.use"),
                     _page("stickers", "贴图创作", "贴图", "stickers", "stickers.use"),
+                    _page("storyboards", "漫画分镜", "分镜", "storyboards", "storyboards.use"),
                     _page("assets", "素材图库", "图库", "assets", "assets.use"),
                 ),
             ),
@@ -97,7 +98,6 @@ MENU_SEED: tuple[MenuSeed, ...] = (
                 "videos",
                 (
                     _page("videos", "视频创作", "视频", "videos", "videos.use"),
-                    _page("storyboards", "漫画分镜", "分镜", "storyboards", "storyboards.use"),
                 ),
             ),
             _group(
@@ -391,8 +391,8 @@ _DEPRECATED_MENU_KEYS = ("image-styles",)
 MIGRATION_WORKSPACE_GROUPS = "2026-11.workspace-groups"
 _WORKSPACE_SUBGROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("group-articles", ("articles", "cards")),
-    ("group-images", ("images", "stickers", "assets")),
-    ("group-videos", ("videos", "storyboards")),
+    ("group-images", ("images", "stickers", "storyboards", "assets")),
+    ("group-videos", ("videos",)),
     ("group-novels", ("novels", "characters")),
 )
 
@@ -435,6 +435,41 @@ def _migrate_workspace_groups(db) -> None:
             if page.parent_id == workspace.id:
                 page.parent_id = group.id
     db.flush()
+    rebuild_paths(db)
+
+
+# 2026-11：漫画分镜按产出归到「图片」分类（最初误放在「视频」下）。
+# 已经跑过上一轮迁移的库需要单独的一次性迁移把它挪回来。
+MIGRATION_STORYBOARDS_TO_IMAGES = "2026-11.storyboards-to-images"
+
+
+def _migrate_storyboards_to_images(db) -> None:
+    storyboards = db.scalar(select(models.Menu).where(models.Menu.menu_key == "storyboards"))
+    images_group = db.scalar(select(models.Menu).where(models.Menu.menu_key == "group-images"))
+    if storyboards is None or images_group is None:
+        return
+    if storyboards.parent_id == images_group.id:
+        return
+    videos_group = db.scalar(select(models.Menu).where(models.Menu.menu_key == "group-videos"))
+    workspace = db.scalar(select(models.Menu).where(models.Menu.menu_key == "workspace"))
+    # 只搬仍挂在旧分类（视频）或工作区下的；管理员手工挪过的不覆盖
+    old_parents = {
+        menu.id for menu in (videos_group, workspace) if menu is not None
+    }
+    if storyboards.parent_id not in old_parents:
+        return
+    siblings = db.scalars(
+        select(models.Menu).where(models.Menu.parent_id == images_group.id)
+    ).all()
+    stickers = next((menu for menu in siblings if menu.menu_key == "stickers"), None)
+    if stickers is not None:
+        # 排在贴图创作之后、素材图库之前
+        storyboards.sort = stickers.sort + 1
+    else:
+        storyboards.sort = max((menu.sort for menu in siblings), default=0) + 10
+    storyboards.parent_id = images_group.id
+    db.flush()
+    rebuild_paths(db)
 
 
 def _run_migrations(db) -> None:
@@ -471,6 +506,12 @@ def _run_migrations(db) -> None:
     if MIGRATION_WORKSPACE_GROUPS not in done:
         _migrate_workspace_groups(db)
         done.add(MIGRATION_WORKSPACE_GROUPS)
+        changed = True
+
+    # 迁移 4：漫画分镜从「视频」挪到「图片」
+    if MIGRATION_STORYBOARDS_TO_IMAGES not in done:
+        _migrate_storyboards_to_images(db)
+        done.add(MIGRATION_STORYBOARDS_TO_IMAGES)
         changed = True
 
     if changed:

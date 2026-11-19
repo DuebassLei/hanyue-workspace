@@ -44,6 +44,7 @@ export const NAV_GROUPS = [
         children: [
           { name: 'images', label: '图片生成', short: '图片', permission: 'images.use' },
           { name: 'stickers', label: '贴图创作', short: '贴图', permission: 'stickers.use' },
+          { name: 'storyboards', label: '漫画分镜', short: '分镜', permission: 'storyboards.use' },
           { name: 'assets', label: '素材图库', short: '图库', permission: 'assets.use' },
         ],
       },
@@ -54,7 +55,6 @@ export const NAV_GROUPS = [
         icon: 'videos',
         children: [
           { name: 'videos', label: '视频创作', short: '视频', permission: 'videos.use' },
-          { name: 'storyboards', label: '漫画分镜', short: '分镜', permission: 'storyboards.use' },
         ],
       },
       {
