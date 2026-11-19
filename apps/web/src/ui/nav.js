@@ -85,6 +85,7 @@ export const NAV_GROUPS = [
     items: [
       { name: 'models', label: '模型管理', short: '模型', permission: 'models.view' },
       { name: 'logs', label: '系统日志', short: '日志', permission: 'logs.view' },
+      { name: 'writing-rules', label: '创作规则', short: '规则', permission: 'writing_rules.use' },
       { name: 'settings', label: '设置', short: '我的', permission: 'settings.view' },
     ],
   },

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NAlert,
@@ -7,11 +7,6 @@ import {
   NCheckbox,
   NCheckboxGroup,
   NEmpty,
-  NForm,
-  NFormItem,
-  NInput,
-  NModal,
-  NSelect,
   NSpace,
   NTab,
   NTabs,
@@ -19,7 +14,6 @@ import {
 } from 'naive-ui'
 import { api } from '../api/client'
 import { useSessionStore } from '../stores/session'
-import { toast } from '../ui/feedback'
 
 const session = useSessionStore()
 const route = useRoute()
@@ -122,7 +116,6 @@ async function load() {
 
 onMounted(() => {
   load()
-  loadThemeOptions()
 })
 
 // 深链到某个分栏时，即使已经在设置页也要切过去
@@ -174,44 +167,7 @@ const RISK_LABELS = {
   external_side_effect: '外部副作用',
   forbidden: '禁止',
 }
-// 写作风格的默认排版主题：从 /wechat-mp/themes 拉取系统预设
-// （manifest 校验只认预设，自定义主题不能出现在这里）。
-// 这个接口要 wechat_layout.use 或 publishing.use；普通用户会 403，退回内置快照。
-const THEME_FALLBACK = [
-  { value: 'ink-green', label: '墨绿简约 · 知识/职场/干货' },
-  { value: 'warm-orange', label: '暖橙生活 · 生活/情感/美食' },
-  { value: 'mono', label: '极简黑白 · 深度长文/访谈' },
-  { value: 'terracotta-warm', label: '暖陶土 · 工具推荐/产品测评' },
-  { value: 'blue-business', label: '商务蓝 · 职场干货/产品教程' },
-  { value: 'dispatch', label: '公文 · 通知/报告/政务说明' },
-]
-const THEME_OPTIONS = ref(THEME_FALLBACK)
-async function loadThemeOptions() {
-  try {
-    const data = await api.get('/wechat-mp/themes')
-    if (data.presets?.length) {
-      THEME_OPTIONS.value = data.presets.map((t) => ({
-        value: t.id,
-        label: t.description ? `${t.name} · ${t.description}` : t.name,
-      }))
-    }
-  } catch {
-    // 排版服务不可达时用内置快照，不阻塞设置页
-  }
-}
-const showStyle = ref(false)
-const styleEditingId = ref('')
-// 定制来源：编辑内置风格时记录其 id，保存时创建个人定制副本而非直接修改
-const styleForkSourceId = ref('')
-const styleForm = reactive({
-  skillKey: '',
-  displayName: '',
-  description: '',
-  tone: '',
-  styleRules: '',
-  defaultTheme: 'ink-green',
-  promptTemplate: '',
-})
+// 写作风格判定只用于分组展示；规则本身在「创作规则」页维护。
 
 /** 写作风格 = 自定义 Skill，或带 tone 的内置风格（与后端 styleSkills 判定保持一致） */
 function isStyle(skill) {
@@ -222,125 +178,6 @@ const styleSkills = computed(() => skills.value.filter(isStyle))
 /** 流程型 Skill：供 Agent 编排调用，与写作风格分区展示，避免同一批条目出现两次 */
 const flowSkills = computed(() => skills.value.filter((skill) => !isStyle(skill)))
 
-function openStyleCreate() {
-  styleEditingId.value = ''
-  styleForkSourceId.value = ''
-  styleForm.skillKey = ''
-  styleForm.displayName = ''
-  styleForm.description = ''
-  styleForm.tone = ''
-  styleForm.styleRules = ''
-  styleForm.defaultTheme = 'ink-green'
-  styleForm.promptTemplate = ''
-  showStyle.value = true
-}
-
-function openStyleEdit(skill) {
-  styleEditingId.value = skill.source === 'custom' ? skill.id : ''
-  styleForkSourceId.value = skill.source === 'custom' ? '' : skill.id
-  const manifest = skill.manifest || {}
-  styleForm.skillKey = skill.skillKey
-  styleForm.displayName = skill.displayName
-  styleForm.description = skill.description || ''
-  styleForm.tone = manifest.tone || ''
-  styleForm.styleRules = (manifest.styleRules || []).join('\n')
-  styleForm.defaultTheme = manifest.defaultTheme || 'ink-green'
-  styleForm.promptTemplate = manifest.promptTemplate || ''
-  showStyle.value = true
-}
-
-function styleTagLabel(skill) {
-  if (skill.customized) return '已定制'
-  return skill.source === 'custom' ? '自定义' : '内置'
-}
-
-const styleModalTitle = computed(() => {
-  if (styleEditingId.value) return '编辑写作风格'
-  if (styleForkSourceId.value) return '定制内置风格'
-  return '新建写作风格'
-})
-
-function buildStyleManifest() {
-  const manifest = {}
-  if (styleForm.tone.trim()) manifest.tone = styleForm.tone.trim()
-  const rules = styleForm.styleRules
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-  if (rules.length) manifest.styleRules = rules
-  if (styleForm.defaultTheme) manifest.defaultTheme = styleForm.defaultTheme
-  if (styleForm.promptTemplate.trim()) manifest.promptTemplate = styleForm.promptTemplate.trim()
-  return manifest
-}
-
-async function saveStyle() {
-  error.value = ''
-  if (!styleForm.displayName.trim()) {
-    error.value = '请填写风格名称'
-    return
-  }
-  try {
-    if (styleEditingId.value) {
-      const updated = await api.put(`/skills/${styleEditingId.value}`, {
-        displayName: styleForm.displayName,
-        description: styleForm.description,
-        manifest: buildStyleManifest(),
-      })
-      const idx = skills.value.findIndex((s) => s.id === updated.id)
-      if (idx >= 0) skills.value[idx] = updated
-      toast('写作风格已更新，下次 AI 成文即生效。')
-    } else if (styleForkSourceId.value) {
-      // 定制内置风格：创建个人副本，内置原版在列表中被副本替换
-      await api.post(`/skills/${styleForkSourceId.value}/customize`, {
-        displayName: styleForm.displayName,
-        description: styleForm.description,
-        manifest: buildStyleManifest(),
-      })
-      showStyle.value = false
-      await load()
-      toast('内置风格已定制，仅对当前账号生效；删除副本可恢复默认。')
-      return
-    } else {
-      const key = styleForm.skillKey.trim() || `style-${Date.now()}`
-      if (!/^[a-z0-9][a-z0-9-]{2,}$/.test(key)) {
-        error.value = '标识只能用 3 位以上小写字母、数字或连字符（例如 sharp-review）'
-        return
-      }
-      const created = await api.post('/skills', {
-        skillKey: key,
-        displayName: styleForm.displayName,
-        description: styleForm.description,
-        allowedToolIds: ['create_outline', 'generate_article'],
-        manifest: buildStyleManifest(),
-      })
-      showStyle.value = false
-      // 创建接口返回的是服务端真实状态（归属/信任/版本），以列表重载为准
-      await load()
-      toast(`写作风格「${created.displayName}」已创建，可在创作空间的 AI 助手里选用。`)
-      return
-    }
-    showStyle.value = false
-  } catch (err) {
-    error.value = err.message
-  }
-}
-
-async function removeStyle(skill) {
-  error.value = ''
-  try {
-    await api.del(`/skills/${skill.id}`)
-    if (skill.customized) {
-      // 删除定制副本后内置原版重新可见，需重新拉取
-      await load()
-      toast('已恢复内置默认风格。')
-    } else {
-      skills.value = skills.value.filter((s) => s.id !== skill.id)
-      toast('写作风格已删除。')
-    }
-  } catch (err) {
-    error.value = err.message
-  }
-}
 </script>
 
 <template>
@@ -479,48 +316,24 @@ async function removeStyle(skill) {
           </div>
         </div>
       </div>
-      <!-- 写作风格：AI 成文时可选，决定语气、结构与排版主题 -->
+      <!-- 写作规则已统一到「创作规则」页：这里只留入口与只读概览，避免两处编辑同一份数据 -->
       <div class="card-flat" style="margin-top: var(--space-3)">
         <div class="row" style="gap: var(--space-2)">
-          <strong>写作风格</strong>
-          <n-tag size="small" round>AI 写作可选</n-tag>
+          <strong>写作风格与创作规则</strong>
+          <n-tag size="small" round>统一入口</n-tag>
           <div class="spacer" />
-          <n-button type="primary" size="small" @click="openStyleCreate">新建写作风格</n-button>
+          <RouterLink v-slot="{ navigate }" custom :to="{ name: 'writing-rules' }">
+            <n-button type="primary" size="small" @click="navigate">打开创作规则 →</n-button>
+          </RouterLink>
         </div>
         <p class="field-hint" style="margin-top: var(--space-2)">
-          写作风格决定 AI 写作时的语气、结构规则与默认排版主题；在创作空间的 AI 助手里选用。
-          编辑内置风格会生成个人定制副本（仅对当前账号生效），删除副本即恢复默认。
+          语气、风格规则、审稿规则、工作流步骤、目标字数、事实/配图/修复策略，以及输出契约、系统提示词与
+          AI 味词表，都在「创作规则」页维护：管理员改全局（需创作规则管理权限），每位成员维护自己的副本。
+          本页不再提供编辑入口，避免两处改同一份数据后互相覆盖。
         </p>
-        <div v-if="styleSkills.length" class="stack" style="margin-top: var(--space-2)">
-          <div v-for="skill in styleSkills" :key="skill.id" class="style-row">
-            <div class="list-main">
-              <div class="list-title">
-                {{ skill.displayName }}
-                <n-tag size="small" :type="skill.source === 'custom' ? 'warning' : 'default'" round>
-                  {{ styleTagLabel(skill) }}
-                </n-tag>
-              </div>
-              <div class="list-meta">
-                {{ skill.description || '未填写说明' }}
-                <template v-if="skill.manifest?.tone">
-                  <br />语气：{{ skill.manifest.tone }}
-                </template>
-                <template v-if="skill.manifest?.defaultTheme">
-                  · 主题：{{ THEME_OPTIONS.find((t) => t.value === skill.manifest.defaultTheme)?.label || skill.manifest.defaultTheme }}
-                </template>
-              </div>
-            </div>
-            <template v-if="skill.source === 'custom'">
-              <n-button quaternary size="small" @click="openStyleEdit(skill)">编辑</n-button>
-              <n-button quaternary size="small" type="error" @click="removeStyle(skill)">
-                {{ skill.customized ? '恢复默认' : '删除' }}
-              </n-button>
-            </template>
-            <n-button v-else quaternary size="small" @click="openStyleEdit(skill)">编辑</n-button>
-          </div>
-        </div>
-        <div v-else class="empty" style="margin-top: var(--space-2)">
-          <n-empty description="新建后可在创作空间的 AI 助手里选用。" size="small" />
+        <div class="list-meta" style="margin-top: var(--space-2)">
+          当前可选写作风格 {{ styleSkills.length }} 个 · 流程 Skill {{ flowSkills.length }} 个 ·
+          风格仍在创作空间的 AI 助手里选用
         </div>
       </div>
 
@@ -641,64 +454,6 @@ async function removeStyle(skill) {
         </div>
       </div>
     </section>
-
-    <n-modal
-      v-model:show="showStyle"
-      preset="card"
-      :title="styleModalTitle"
-      style="width: min(560px, calc(100vw - 32px))"
-    >
-      <n-form label-placement="top">
-        <n-form-item label="风格名称">
-          <n-input v-model:value="styleForm.displayName" placeholder="例如：犀利锐评" />
-        </n-form-item>
-        <n-form-item v-if="!styleEditingId && !styleForkSourceId" label="标识（可选）">
-          <n-input v-model:value="styleForm.skillKey" placeholder="例如：sharp-review" />
-          <template #feedback>留空自动生成；只能用小写字母、数字、连字符。</template>
-        </n-form-item>
-        <n-form-item label="说明">
-          <n-input v-model:value="styleForm.description" placeholder="这个风格适合什么场景" />
-        </n-form-item>
-        <n-form-item label="语气风格">
-          <n-input
-            v-model:value="styleForm.tone"
-            type="textarea"
-            :autosize="{ minRows: 3, maxRows: 6 }"
-            placeholder="例如：语气犀利直接，多用短句和反问，观点鲜明，不绕弯子"
-          />
-          <template #feedback>会填入写作 prompt 的 {tone} 占位符，直接影响文章语气。</template>
-        </n-form-item>
-        <n-form-item label="风格规则（每行一条）">
-          <n-input
-            v-model:value="styleForm.styleRules"
-            type="textarea"
-            :autosize="{ minRows: 4, maxRows: 8 }"
-            placeholder="不用 emoji&#10;每段不超过 3 行&#10;关键结论前置"
-          />
-          <template #feedback>这些规则会作为「必须遵守」附加到写作指令中。</template>
-        </n-form-item>
-        <n-form-item label="默认排版主题">
-          <n-select v-model:value="styleForm.defaultTheme" :options="THEME_OPTIONS" />
-        </n-form-item>
-        <n-form-item label="高级：完整 Prompt 模板（可选）">
-          <n-input
-            v-model:value="styleForm.promptTemplate"
-            type="textarea"
-            :autosize="{ minRows: 4, maxRows: 10 }"
-            placeholder="留空使用系统内置模板；可用 {tone} 占位符引用上面的语气风格"
-          />
-          <template #feedback>
-            留空时沿用内置模板（输出严格 JSON）。填写后需保留 JSON 输出结构，否则会导致解析失败。
-          </template>
-        </n-form-item>
-      </n-form>
-      <template #footer>
-        <n-space justify="end">
-          <n-button quaternary @click="showStyle = false">取消</n-button>
-          <n-button type="primary" @click="saveStyle">保存</n-button>
-        </n-space>
-      </template>
-    </n-modal>
   </div>
 </template>
 

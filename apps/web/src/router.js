@@ -24,6 +24,7 @@ const routes = [
   { path: '/characters', name: 'characters', component: () => import('./views/CharactersView.vue'), meta: { title: '角色库', icon: '☻', permission: 'characters.use' } },
   { path: '/assets', name: 'assets', component: () => import('./views/AssetsView.vue'), meta: { title: '素材图库', icon: '▣', permission: 'assets.use' } },
   { path: '/prompts', name: 'prompts', component: () => import('./views/PromptsView.vue'), meta: { title: '提示词库', icon: '✧', permission: 'prompts.use' } },
+  { path: '/writing-rules', name: 'writing-rules', component: () => import('./views/WritingRulesView.vue'), meta: { title: '创作规则', icon: '≡', permission: 'writing_rules.use' } },
   { path: '/handdraw', name: 'handdraw', component: () => import('./views/HanddrawView.vue'), meta: { title: '提示词库', icon: '✧', permission: 'prompts.use' } },
   { path: '/publishing', name: 'publishing', component: () => import('./views/PublishingView.vue'), meta: { title: '发布管理', icon: '▲', permission: 'publishing.view' } },
   { path: '/wechat-layout', name: 'wechat-layout', component: () => import('./views/LayoutView.vue'), meta: { title: '微信排版', icon: '❐', permission: 'wechat_layout.use' } },
