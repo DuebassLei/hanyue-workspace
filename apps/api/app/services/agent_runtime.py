@@ -641,7 +641,11 @@ def _run_writing_check(db: Session, run: models.AgentRun, tool_id: str, args: di
         return {**result, "versionId": version.id}
 
     if tool_id == "check_ai_tone":
-        return {**article_workflow.check_ai_tone(markdown), "versionId": version.id}
+        # 词表运行期经规则表（tone_lexicon.*），管理端改动即时生效
+        return {
+            **article_workflow.check_ai_tone(markdown, article_workflow.load_lexicon(db)),
+            "versionId": version.id,
+        }
 
     if tool_id == "extract_facts":
         return {**article_workflow.extract_facts(markdown), "versionId": version.id}
