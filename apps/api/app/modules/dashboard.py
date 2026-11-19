@@ -1,23 +1,36 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
+from pydantic import Field
 from sqlalchemy import func, select
 
 from .. import models, schemas
 from ..connectors import base as connectors
 from ..core.deps import CurrentUser, DbSession, default_workspace
-from ..services import publish_state
+from ..services import hot_topics, publish_state
 
 from ..core.rbac import require_permission
+
+
+class DashboardWithHotOut(schemas.DashboardOut):
+    """首页总览 + 今日热点。
+
+    schemas.py 属其他 Agent 独占，故在这里用子类补充一个字段；CamelModel 的
+    alias_generator 会把 hot_highlights 自动输出成 hotHighlights。
+    """
+
+    hot_highlights: dict[str, Any] = Field(default_factory=dict)
+
 
 router = APIRouter(tags=["dashboard"], dependencies=[require_permission("overview.view")])
 
 
-@router.get("/dashboard", response_model=schemas.DashboardOut)
-def dashboard(user: CurrentUser, db: DbSession) -> schemas.DashboardOut:
+@router.get("/dashboard", response_model=DashboardWithHotOut)
+def dashboard(user: CurrentUser, db: DbSession) -> DashboardWithHotOut:
     workspace = default_workspace(db, user)
     now = datetime.now(timezone.utc)
     week_start = (now - timedelta(days=now.weekday())).replace(
@@ -98,7 +111,7 @@ def dashboard(user: CurrentUser, db: DbSession) -> schemas.DashboardOut:
         by_day[key] = by_day.get(key, 0) + 1
     activity = [{"date": day, "value": count} for day, count in sorted(by_day.items())]
 
-    return schemas.DashboardOut(
+    return DashboardWithHotOut(
         publish_progress={
             "planned": planned,
             "published": published,
@@ -137,4 +150,5 @@ def dashboard(user: CurrentUser, db: DbSession) -> schemas.DashboardOut:
             "note": "未配置供应商凭据时生成请求会明确返回 provider_unavailable，不产生占位内容",
         },
         activity=activity,
+        hot_highlights=hot_topics.dashboard_highlights(db),
     )

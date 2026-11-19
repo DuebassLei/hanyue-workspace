@@ -101,3 +101,89 @@ GET /api/v1/style-presets?applicableTo=comic_panel
 2. **PromptTemplate CK**：任务书只要求 `prompt_type` 的 CK，我额外加了 `source` 的 CK（同属枚举契约），写法与 `ImageStyle` 一致；若 Lead 认为多余可删 `ck_prompt_templates_source`。
 3. **Schema 默认值**：Out 的新标量字段给了与 ORM 一致的默认值（如 `prompt_type="normal"`），`style_config` 用 `dict | None = None`，确保 D 未改 `_project_out` 时现有测试不回归。
 4. `_ADDED_COLUMNS` 的 JSON 补列带 `DEFAULT '[]'/'{}'`，与项目现有纯 `"JSON"` 写法略有差异，目的是避免老库已有行读到 NULL 导致 Out 校验失败。
+
+---
+
+## Agent A 交接（agent/a-hot-source，需求 01）
+
+> 门禁：API 全量 **586 passed**（570 基线 + 16 新增）；`compileall -q app` 通过；`npm run build` ✓ built in 16.52s。
+> 已知基线 flaky `tests/test_rbac.py::test_reset_password_kicks_existing_session_and_not_self` 在第一轮全量中出现一次，原样重跑即 586 全过（与 F 记录一致，非本分支回归）。
+
+### 1. 实现说明
+
+新建 `apps/api/app/hot_sources/` 包，`services/hot_sources.py` 收缩为兼容层（re-export + `_rows_*` 解析入口 + `collect` 同名转发），不改 `collect(platforms) -> (rows, notes)` 签名，`hot_topics.refresh()` 与 `scheduled_scripts/hot_topics.py:refresh` 都走这一套。
+
+| 文件 | 职责 |
+|---|---|
+| `contracts.py` | `HotRawItem` / `CollectResult` / `CollectContext` / `HotSourcesError`；`safe_get` 统一走 ssrf，统一超时/重试/错误码 |
+| `catalog.yaml` + `catalog.py` | 单一真相源；`enabled_platforms` / `enabled_sources` / `source_catalog` 全部读它，消除散落 `*_SOURCES` 常量 |
+| `parsers.py` | 原 `_rows_*` 解析函数原样迁入，行为等价（21 项旧测试全过） |
+| `adapters.py` | `JsonAdapter` / `TextPatternAdapter` / `ScriptAdapter`；单源失败返回 `ok=false` 不抛 |
+| `__init__.py` | 编排器：按 catalog 遍历、统一超时重试、汇总 rows/notes、全源失败抛 `HotSourcesError` |
+
+### 2. catalog 平台清单（22 个，顺序即采集顺序）
+
+| id | name | kind | parser |
+|---|---|---|---|
+| toutiao | 今日头条 | json | direct |
+| baidu | 百度 | json | direct |
+| douyin | 抖音 | json | direct |
+| weibo | 微博 | json | agg |
+| zhihu | 知乎 | json | agg |
+| aihot_hot | AI·热点 | json | aihot |
+| aihot_feed | AI·资讯 | json | aihot |
+| aihot_agent_hot | AIHOT 热点与早报 | markdown | aihot_agent |
+| aihot_agent_daily | AIHOT 日报 | markdown | aihot_agent |
+| wechat_10w | 微信 10w+ 爆文池 | json | wechat_10w |
+| wechat_search | 微信文章搜索 | html | wechat_search |
+| openrank_today | 开源榜·每日飙升 | html | openrank |
+| openrank_weekly | 开源榜·每周飙升 | html | openrank |
+| openrank_stars | 开源榜·Star 总榜 | html | openrank |
+| uapi_bilibili | B站 | json | uapi |
+| uapi_tieba | 贴吧 | json | uapi |
+| uapi_36kr | 36氪 | json | uapi |
+| uapi_huxiu | 虎嗅 | json | uapi |
+| uapi_ithome | IT之家 | json | uapi |
+| uapi_coolapk | 酷安 | json | uapi |
+| uapi_juejin | 掘金 | json | uapi |
+| uapi_sspai | 少数派 | json | uapi |
+
+### 3. Adapter 用法：新增一个平台
+
+1. 在 `catalog.yaml` 加一条：`id`（稳定，落库后不改）/ `name`（展示名，也是 `HOT_TOPICS_PLATFORMS` 过滤值）/ `kind` / `adapter`（模板入口）/ `parser` / `url` / `enabled` / `timeout_seconds` / `retry` / `tags`。
+2. 结构常见的 JSON 源：`parser: direct` + `options.items_path` / `title_keys` / `hot_keys` / `url_keys`，**0 行代码**即可产出数据。
+3. Markdown/HTML：选 `parser: aihot_agent` / `wechat_search` / `openrank`。
+4. 完全自定义：写 `app/hot_sources/scripts/<name>.py` 的 `collect(ctx: CollectContext) -> CollectResult`，catalog 设 `kind: script` + `adapter: app.hot_sources.scripts.<name>:collect`（受控进程内扩展，随代码评审部署，非在线任意执行）。
+5. 解析到 0 行会自动标 `selector_may_changed`；若该源「本来就可能没数据」，加 `allow_empty: true` 关闭该标注。
+6. 跑 `pytest tests/test_hot_sources.py`；`docs/hot-topics.md` 的表格只是镜像，同步一下即可。
+
+### 4. notes / error_code 清单
+
+error_code（`CollectResult.error_code` / `HotSourcesError.code`）：
+
+| code | 触发 |
+|---|---|
+| `fetch_failed` | httpx 网络异常，重试后仍失败 |
+| `http_status` | 3xx/4xx/5xx（`safe_request` 不把重定向页当成功） |
+| `ssrf_blocked` | `ssrf.UnsafeUrl`：协议/端口/内网/云元数据/重定向越界 |
+| `invalid_response` | JsonAdapter 拿到非 JSON |
+| `adapter_error` | 解析函数抛异常 / 编排器兜底 / 脚本 import 或调用失败 |
+| `unknown_parser` | catalog 的 parser 未注册 |
+| `config_missing` | ScriptAdapter 的 adapter 未配成 `模块:函数` |
+| `invalid_result` | 脚本没返回 `CollectResult` |
+| `all_sources_failed` | 编排器判定全源失败，`refresh` 转 502（retryable=true） |
+
+notes（`GET /hot-topics/degraded` 以 `{"dim": "source", "reason": ...}` 输出）：
+- `{平台}：N 条`（成功条数）
+- `{平台}：selector_may_changed（解析到 0 条，页面结构可能改版）`
+- `{平台}：未配置关键词（HOT_TOPICS_WECHAT_KEYWORD），已跳过`（不算失败）
+- `{平台}：失败（{error_code}）...`
+
+### 5. 未改 / 越界项（交 Lead 集成期决策）
+
+1. **`job_runner._execute` 的 handlers 分派未动**：F 在 §3 写「留给 Agent A」，但本任务书明确不要收敛 refresh/digest 双入口，故未删任何 handler。两个入口当前都调 `hot_topics.refresh()` → 新 `collect()`，行为一致；是否二选一由 Lead 定。
+2. **`infra/docker-compose.yml` 的 `x-app-env` 锚点未加 HOT_TOPICS_***（compose 不在独占清单）：`infra/.env.example` 已补齐 6 个变量，但 compose 采用显式白名单透传（`environment: *app-env`），Docker 部署要生效需在该锚点同样加 `HOT_TOPICS_PLATFORMS` / `HOT_TOPICS_TIMEOUT` / `HOT_TOPICS_REFRESH_COOLDOWN` / `HOT_TOPICS_WECHAT_10W_URL` / `HOT_TOPICS_WECHAT_KEYWORD` / `HOT_TOPICS_API_URL`。
+3. **并发与响应快照回落未做**：并发属规范 M2 可选项（SSRF 逐跳校验下需额外保证结果顺序稳定），快照回落按 Q2 明确首期不做；当前串行 + catalog 统一超时/重试，三条不变量（可复现/幂等/不伪造）全部保留。
+4. **`schemas.py` 不可改**：`/dashboard` 的 `hotHighlights` 用 `modules/dashboard.py` 里的 `DashboardWithHotOut(schemas.DashboardOut)` 本地子类输出，CamelModel 自动转 camelCase。
+5. **notes 不落库**（`models.py` 不可改）：`services/hot_topics.py` 进程内缓存最近一轮 notes，`/degraded` 可读；服务重启清空，多 worker 下只反映处理该次刷新的 worker。把 notes 写进 `job.result` 需改 `job_runner`，留集成期。
+6. **`fetch_hot_topics()` 兼容层原样保留**（创作空间灵感面板在用）；`scheduled_scripts/hot_topics.py` 代码未改（本来就调同一 refresh），只在 manifest 描述里指向 catalog。

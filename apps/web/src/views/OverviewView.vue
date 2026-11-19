@@ -25,6 +25,9 @@ const publishLabel = computed(() => {
   return `${progress.published} / ${progress.planned} 已发布`
 })
 
+// 首页「今日热点」：后端 dashboard 聚合好的当日 Top 簇，点击进热点选题页
+const hotTopics = computed(() => data.value?.hotHighlights?.topics || [])
+
 const HEAT_DAYS = 52 * 7
 const HEAT_COLS = 53
 
@@ -199,6 +202,41 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
           <template #indicator-trailing-text>多</template>
         </n-heatmap>
         <p class="heat-note">每个格子是一天。颜色按当天新建的稿件数，从周一排起。</p>
+      </section>
+
+      <section class="card overview-card hot-card" aria-label="今日热点">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">TODAY'S SIGNALS</span>
+            <h2 class="card-title">今日热点</h2>
+          </div>
+          <RouterLink class="text-link" :to="{ name: 'hot-topics' }">查看全部 <span>→</span></RouterLink>
+        </div>
+        <div v-if="!hotTopics.length" class="empty compact-empty">
+          <span class="empty-icon">热</span>
+          <span class="empty-title">今天还没有采集到热点</span>
+          <span>去「热点选题」手动刷新一次，或等待定时任务拉榜。</span>
+          <RouterLink v-slot="{ navigate }" custom :to="{ name: 'hot-topics' }">
+            <n-button type="primary" size="small" @click="navigate">打开热点选题</n-button>
+          </RouterLink>
+        </div>
+        <div v-else class="hot-list">
+          <RouterLink
+            v-for="(item, index) in hotTopics"
+            :key="item.id"
+            class="hot-row"
+            :to="{ name: 'hot-topics' }"
+          >
+            <div class="hot-index">{{ String(index + 1).padStart(2, '0') }}</div>
+            <div class="list-main">
+              <div class="list-title">{{ item.title }}</div>
+              <div class="list-meta">
+                {{ item.grade }} · {{ item.platformCount }} 个平台 · {{ item.score }} 分
+              </div>
+            </div>
+            <span class="row-arrow">↗</span>
+          </RouterLink>
+        </div>
       </section>
 
       <div class="overview-grid">
@@ -414,6 +452,36 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
   margin: var(--space-3) 0 0;
   color: var(--color-text-muted);
   font-size: var(--font-xs);
+}
+.hot-card {
+  min-height: 0;
+}
+.hot-list {
+  display: flex;
+  flex-direction: column;
+}
+.hot-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--color-border);
+  color: inherit;
+  text-decoration: none;
+  transition: background 140ms ease;
+}
+.hot-row:hover {
+  background: var(--color-surface-raised);
+}
+.hot-index {
+  width: 24px;
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+.hot-row .row-arrow {
+  font-size: var(--font-section);
 }
 .overview-grid {
   display: grid;

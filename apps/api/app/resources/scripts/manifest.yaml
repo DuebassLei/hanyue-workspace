@@ -17,7 +17,7 @@ scripts:
     scope: system
     queue: hot-topics
     kind: hot_topics.refresh
-    description: 采集各平台热榜 → 合并同一事件 → 评分落库，供「热点选题」页直接使用。
+    description: 按 app/hot_sources/catalog.yaml 注册的源采集热榜 → 合并同一事件 → 评分落库，供「热点选题」页与首页「今日热点」使用。
     default_cron: "0 8,12,18 * * *"
     runner: app.scheduled_scripts.hot_topics:refresh
     fields:
@@ -28,7 +28,7 @@ scripts:
         required: false
         nullable: true
         default: null
-        description: 留空跑全部采集源；填了就只跑这些平台（如 微博、知乎、抖音）
+        description: 留空跑 catalog.yaml 中全部启用源；填了就只跑这些平台（如 微博、知乎、抖音），平台名对齐 catalog 的 name
 
   - key: hot_topics.digest
     title: 热点选题简报

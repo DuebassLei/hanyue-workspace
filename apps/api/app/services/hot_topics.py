@@ -67,6 +67,21 @@ class HotTopicsError(RuntimeError):
 _COOLDOWN_LOCK = threading.Lock()
 _last_refresh: dict[str, float] = {}
 
+# 最近一轮采集的降级说明（单源失败 / selector_may_changed / 源未配置关键词）。
+# 不落库（models 不在本 Agent 范围），只作为「最近一次」的进程内视图，
+# 供 /hot-topics/degraded 与排障读取；服务重启后自然清空。
+_last_source_notes: list[str] = []
+
+
+def _remember_source_notes(notes: list[str]) -> None:
+    global _last_source_notes
+    _last_source_notes = list(notes or [])
+
+
+def source_notes() -> list[str]:
+    """最近一轮采集的 notes 副本（供测试/排障，不改内部状态）。"""
+    return list(_last_source_notes)
+
 
 def cooldown_seconds() -> float:
     try:
@@ -85,9 +100,10 @@ def reserve_refresh(key: str = "all") -> None:
 
 
 def reset_cooldown() -> None:
-    """测试与排障用：清空冷却状态。"""
+    """测试与排障用：清空冷却状态与缓存的采集 notes。"""
     with _COOLDOWN_LOCK:
         _last_refresh.clear()
+    _remember_source_notes([])
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -436,7 +452,9 @@ def refresh(
     try:
         rows, notes = hot_sources.collect(platforms)
     except hot_sources.HotSourcesError as exc:
+        _remember_source_notes(exc.notes or [exc.message])
         raise HotTopicsError("all_sources_failed", exc.message) from exc
+    _remember_source_notes(notes)
 
     items = _ingest(db, day, rows, captured_at)
     db.flush()
@@ -514,6 +532,11 @@ def degraded_reasons(db: Session, day: str | None = None) -> list[dict]:
     elif rounds < 3:
         out.append({"dim": "fresh", "reason": labels["fresh"] + f"，当前 {rounds} 轮"})
     out.append({"dim": "hot", "reason": labels["hot"]})
+
+    # 采集侧的降级说明也进同一接口：单源失败、解析 0 行（selector_may_changed）、
+    # 源未配置关键词都要让前端看到，不能「悄悄少一个平台」。
+    for note in _last_source_notes:
+        out.append({"dim": "source", "reason": note})
     return out
 
 
@@ -645,6 +668,33 @@ def summary(db: Session, day: str | None = None) -> dict:
         "tracks": tracks,
         "platforms": platform_counts,
         "capturedAt": latest,
+    }
+
+
+def dashboard_highlights(db: Session, limit: int = 5) -> dict:
+    """首页「今日热点」：复用当日高分簇与概要，不引入第二套查询口径。
+
+    没有数据时返回空 topics 而非报错——首页必须永远能打开。
+    """
+    day = latest_day(db)
+    if not day:
+        return {"day": "", "capturedAt": "", "clusters": 0, "topics": []}
+    stats = summary(db, day=day)
+    clusters = list_clusters(db, day=day, sort="score", limit=limit)
+    return {
+        "day": stats["day"],
+        "capturedAt": stats["capturedAt"],
+        "clusters": stats["clusters"],
+        "topics": [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "score": row["score"],
+                "grade": row["grade"],
+                "platformCount": row["platformCount"],
+            }
+            for row in clusters
+        ],
     }
 
 
