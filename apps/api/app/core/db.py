@@ -79,6 +79,17 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     # 创作空间 AI 自动配图偏好
     ("user_preferences", "studio_image_preferences", "JSON"),
     ("storyboard_shots", "asset_refs", "JSON"),
+    # 提示词合并（地基契约 §7）：老库补列后已有行也拿到合法默认值；
+    # JSON 用字符串字面量默认值，SQLite 与 PG 都能把 '[]'/'{}' 隐式转成 json。
+    ("prompt_templates", "prompt_type", "VARCHAR(16) DEFAULT 'normal'"),
+    ("prompt_templates", "negative_content", "TEXT DEFAULT ''"),
+    ("prompt_templates", "summary", "VARCHAR(120) DEFAULT ''"),
+    ("prompt_templates", "sort_order", "INTEGER DEFAULT 0"),
+    ("prompt_templates", "enabled", "BOOLEAN DEFAULT true"),
+    ("prompt_templates", "preview_asset_ids", "JSON DEFAULT '[]'"),
+    ("prompt_templates", "source", "VARCHAR(16) DEFAULT 'manual'"),
+    # 分镜组级统一风格配置（JSON 快照）
+    ("storyboard_projects", "style_config", "JSON DEFAULT '{}'"),
     ("storyboard_projects", "deleted_at", "TIMESTAMP"),
     ("storyboard_scenes", "deleted_at", "TIMESTAMP"),
     ("storyboard_shots", "deleted_at", "TIMESTAMP"),
