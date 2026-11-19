@@ -209,7 +209,7 @@ const baseStylePrompt = computed(() => (detail.value?.item.baseStylePrompt || ''
 const baseStyleLocked = computed(() => Boolean(baseStylePrompt.value))
 const baseStyleHint = computed(() => (
   baseStylesLoaded.value && !baseStyles.value.length
-    ? '还没有可用风格，请管理员到风格库添加'
+    ? '还没有可用的基础风格，请管理员到提示词库添加'
     : '先选一个基础风格'
 ))
 const baseStyleSelectValue = computed(() => {
@@ -241,9 +241,26 @@ function composeImagePrompt(scene) {
   return description ? `${style}, ${description}` : style
 }
 
+// 负向词走独立字段；供应商不支持时由服务端并入正向文本并在结果中标注。
+const activeTemplateNegative = ref('')
+function composeNegativePrompt() {
+  return activeTemplateNegative.value.trim()
+}
+
+// 风格统一来自提示词库；这里做一层字段归一化，保持下面组件继续使用 name/prompt。
 async function loadStyles(purpose) {
+  const promptType = { base: 'base', cover: 'cover', inline: 'illustration' }[purpose] || purpose
   try {
-    return await api.get(`/image-styles?purpose=${purpose}`)
+    const rows = await api.get(`/prompts?promptType=${promptType}&enabled=true`)
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.title,
+      prompt: row.content,
+      negativeContent: row.negativeContent || '',
+      summary: row.summary || '',
+      sortOrder: row.sortOrder || 0,
+      enabled: row.enabled !== false,
+    }))
   } catch (err) {
     imgError.value = err.message
     return []
@@ -293,11 +310,42 @@ function applyCoverTemplate(id) {
   const style = coverStyles.value.find((item) => item.id === id)
   const row = sceneDrafts.value.find((item) => item.purpose === 'cover')
   if (style && row) row.scene = style.prompt
+  if (style) activeTemplateNegative.value = style.negativeContent
 }
 
 function applyInlineTemplate(id) {
   const style = inlineStyles.value.find((item) => item.id === id)
   if (style) imgPrompt.value = style.prompt
+  if (style) activeTemplateNegative.value = style.negativeContent
+}
+
+// AI 成文配图提示词沉淀：默认不自动入库，由用户手动点击触发（source=ai）。
+const promptDepositBusy = ref(false)
+const promptManageDenied = computed(() => disabledReason('image_styles.manage', '管理提示词库'))
+async function depositAiPrompts() {
+  if (promptManageDenied.value || !sceneDrafts.value.length) return
+  const cover = sceneDrafts.value.find((row) => row.purpose === 'cover')?.scene || ''
+  const inline = sceneDrafts.value
+    .filter((row) => row.purpose === 'inline')
+    .map((row) => row.scene)
+    .filter(Boolean)
+  if (!cover && !inline.length) {
+    toast('当前没有可存入的配图提示词', 'error')
+    return
+  }
+  promptDepositBusy.value = true
+  try {
+    const rows = await api.post('/prompts/from-draft', {
+      title: detail.value?.item?.title || 'AI 成文',
+      coverPrompt: cover,
+      inlinePrompts: inline,
+    })
+    toast(rows.length ? `已存入 ${rows.length} 条提示词` : '这些提示词已经在库里了')
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    promptDepositBusy.value = false
+  }
 }
 
 async function changeBaseStyle(styleId) {
@@ -341,6 +389,7 @@ async function submitSceneDrafts() {
       const prompt = composeImagePrompt(row.scene)
       const response = await api.post('/ai/image-generations', {
         prompt,
+        negativePrompt: composeNegativePrompt() || null,
         purpose: row.purpose,
         aspectRatio: row.purpose === 'cover' ? aiCoverAspectRatio.value : aiInlineAspectRatio.value,
         count: 1,
@@ -801,6 +850,7 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
     const prompt = composeImagePrompt(request.scene)
     const response = await api.post('/ai/image-generations', {
       prompt,
+      negativePrompt: composeNegativePrompt() || null,
       purpose: request.purpose,
       aspectRatio: request.aspectRatio,
       count: 1,
@@ -1157,6 +1207,7 @@ async function generateImages() {
     const prompt = composeImagePrompt(scene)
     const res = await api.post('/ai/image-generations', {
       prompt,
+      negativePrompt: composeNegativePrompt() || null,
       aspectRatio: imgAspectRatio.value,
       count: Number(imgCount.value),
       modelId: imgModelId.value || null,
@@ -1191,6 +1242,7 @@ async function retryImageJob(job) {
     const prompt = composeImagePrompt(scene)
     const response = await api.post('/ai/image-generations', {
       prompt,
+      negativePrompt: job.negativePrompt || null,
       purpose: job.purpose || 'cover',
       aspectRatio: job.aspectRatio || (job.purpose === 'cover' ? '3:4' : '1:1'),
       count: job.count || 1,
@@ -1917,14 +1969,26 @@ onBeforeUnmount(() => {
                   placeholder="画面描述"
                 />
               </div>
-              <n-button
-                size="small"
-                type="primary"
-                :loading="sceneSubmitting"
-                :disabled="!baseStyleLocked || sceneSubmitting"
-                @click="submitSceneDrafts"
-              >按此生成</n-button>
+              <n-space :size="8">
+                <n-button
+                  size="small"
+                  type="primary"
+                  :loading="sceneSubmitting"
+                  :disabled="!baseStyleLocked || sceneSubmitting"
+                  @click="submitSceneDrafts"
+                >按此生成</n-button>
+                <n-button
+                  size="small"
+                  :loading="promptDepositBusy"
+                  :disabled="Boolean(promptManageDenied) || !sceneDrafts.length"
+                  :title="promptManageDenied || '把当前封面/配图提示词存入统一提示词库'"
+                  @click="depositAiPrompts"
+                >存入提示词库</n-button>
+              </n-space>
               <p v-if="!baseStyleLocked" class="ai-image-settings-error">{{ baseStyleHint }}</p>
+              <p class="ai-image-settings-status">
+                若所选供应商不支持独立负向字段，负向词会以文本并入正向提示词并在生成结果中标注。
+              </p>
             </section>
           </div>
         </section>

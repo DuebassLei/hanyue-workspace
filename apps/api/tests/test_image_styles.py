@@ -256,7 +256,9 @@ def test_factory_cover_style_seeded_at_startup(client):
     assert style["sortOrder"] == 0
     assert "2.35:1" in style["prompt"]
     assert "chibi" in style["prompt"]
-    assert "画面避免出现" in style["prompt"]
+    # 出厂模板的负向句已拆入独立字段，不再混杂在正向 prompt 里
+    assert "画面避免出现" not in style["prompt"]
+    assert "小字、细节过多的背景" in style["negativeContent"]
     assert "【主标题" in style["prompt"]
     # 不能超管理端 PATCH 的 2000 上限，否则管理员在 UI 里点保存就 422
     assert len(style["prompt"]) <= 2000

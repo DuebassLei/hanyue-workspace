@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NAlert, NButton, NInput, NModal, NSelect } from 'naive-ui'
+import { NAlert, NButton, NInput, NInputNumber, NModal, NSelect } from 'naive-ui'
 import { api, fetchBlobUrl } from '../api/client'
 
 const REFERENCE_LIMIT = 4
@@ -24,7 +24,7 @@ const router = useRouter()
 const route = useRoute()
 const provider = ref({ available: false, note: '', modelCode: null, providers: [] })
 const selectedModelId = ref('')
-const form = reactive({ prompt: '', aspectRatio: '3:4', count: 1 })
+const form = reactive({ prompt: '', negativePrompt: '', seed: null, aspectRatio: '3:4', count: 1 })
 const referenceFiles = ref([])
 const busy = ref(false)
 const error = ref('')
@@ -48,9 +48,17 @@ let pollRounds = 0
 const promptLibrary = ref([])
 const promptLibraryLoading = ref(false)
 const promptLibraryError = ref('')
+const PROMPT_TYPE_OPTIONS = [
+  { label: '全部类型', value: '' },
+  { label: '普通', value: 'normal' },
+  { label: '封面图', value: 'cover' },
+  { label: '文章配图', value: 'illustration' },
+  { label: '基础风格', value: 'base' },
+]
 const promptPickerOpen = ref(false)
 const promptKeyword = ref('')
 const promptCategory = ref('')
+const promptType = ref('')
 const appliedPrompt = ref('')
 
 // 手绘风格：从提示词库选好风格后，合成提示词并记录参考图来源
@@ -180,6 +188,7 @@ const promptCategories = computed(() => {
 const filteredPrompts = computed(() => {
   const q = promptKeyword.value.trim().toLowerCase()
   return promptLibrary.value.filter((item) => {
+    if (promptType.value && item.promptType !== promptType.value) return false
     if (promptCategory.value && item.category !== promptCategory.value) return false
     if (!q) return true
     const haystack = [item.title, item.content, item.category, ...(item.tags || [])]
@@ -217,11 +226,17 @@ function openPromptPicker() {
 
 function applyPrompt(item, mode = 'replace') {
   const text = (item.content || '').trim()
-  if (!text) return
-  form.prompt =
-    mode === 'append' && form.prompt.trim()
-      ? `${form.prompt.trim()}\n\n${text}`
-      : text
+  const negative = (item.negativeContent || '').trim()
+  if (!text && !negative) return
+  const append = mode === 'append' && form.prompt.trim()
+  if (text) {
+    form.prompt = append ? `${form.prompt.trim()}\n\n${text}` : text
+  }
+  if (negative) {
+    form.negativePrompt = append && form.negativePrompt.trim()
+      ? `${form.negativePrompt.trim()}, ${negative}`
+      : negative
+  }
   appliedPrompt.value = item.title
   promptPickerOpen.value = false
 }
@@ -472,6 +487,8 @@ function releaseReferences() {
 function resetForm() {
   if (busy.value) return
   form.prompt = ''
+  form.negativePrompt = ''
+  form.seed = null
   form.count = 1
   appliedPrompt.value = ''
   releaseReferences()
@@ -501,6 +518,8 @@ async function generate() {
     }
     const res = await api.post('/ai/image-generations', {
       prompt: form.prompt.trim(),
+      negativePrompt: form.negativePrompt.trim() || null,
+      seed: form.seed === null || form.seed === '' ? null : Number(form.seed),
       aspectRatio: form.aspectRatio,
       count: Number(form.count),
       modelId: selectedModelId.value || null,
@@ -752,6 +771,26 @@ onBeforeUnmount(() => {
           <p class="field-hint">
             真实人物写真、性感或身体特写容易被上游安全策略拒绝；插画、水彩、景物或虚构角色更稳定。
           </p>
+        </div>
+
+        <div class="gen-block">
+          <div class="gen-block-head">
+            <label class="field-label" for="gen-negative">负向提示词（可选）</label>
+          </div>
+          <n-input
+            id="gen-negative"
+            v-model:value="form.negativePrompt"
+            type="textarea"
+            placeholder="例如：低清, 水印, 文字错乱"
+            :autosize="{ minRows: 2, maxRows: 5 }"
+          />
+          <p class="field-hint">
+            供应商支持时作为独立负向字段透传；不支持时服务端会并入正向文本，并在结果中标注「负向词已并入」。
+          </p>
+          <label class="field" style="margin-top: var(--space-2)">
+            <span class="field-label">随机种子（可选，仅支持的供应商生效）</span>
+            <n-input-number v-model:value="form.seed" :show-button="false" placeholder="留空则不固定" />
+          </label>
         </div>
 
         <div class="gen-block">
@@ -1080,6 +1119,12 @@ onBeforeUnmount(() => {
           aria-label="按分类筛选"
           style="width: 160px"
         />
+        <n-select
+          v-model:value="promptType"
+          :options="PROMPT_TYPE_OPTIONS"
+          aria-label="按类型筛选"
+          style="width: 160px"
+        />
       </div>
 
       <n-alert v-if="promptLibraryError" type="error" :bordered="false" style="margin-top: var(--space-3)">
@@ -1103,9 +1148,13 @@ onBeforeUnmount(() => {
           <div class="picker-item-main">
             <div class="picker-item-head">
               <strong>{{ item.title }}</strong>
-              <span class="tag tag-accent">{{ item.category }}</span>
+              <span class="tag tag-accent">{{ item.promptType || 'normal' }}</span>
+              <span class="tag">{{ item.category }}</span>
             </div>
             <p class="picker-item-content">{{ item.content }}</p>
+            <p v-if="item.negativeContent" class="picker-item-content field-hint">
+              负向：{{ item.negativeContent }}
+            </p>
           </div>
           <div class="picker-item-actions">
             <n-button type="primary" size="small" @click="applyPrompt(item, 'replace')">使用</n-button>

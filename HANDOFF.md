@@ -101,3 +101,77 @@ GET /api/v1/style-presets?applicableTo=comic_panel
 2. **PromptTemplate CK**：任务书只要求 `prompt_type` 的 CK，我额外加了 `source` 的 CK（同属枚举契约），写法与 `ImageStyle` 一致；若 Lead 认为多余可删 `ck_prompt_templates_source`。
 3. **Schema 默认值**：Out 的新标量字段给了与 ORM 一致的默认值（如 `prompt_type="normal"`），`style_config` 用 `dict | None = None`，确保 D 未改 `_project_out` 时现有测试不回归。
 4. `_ADDED_COLUMNS` 的 JSON 补列带 `DEFAULT '[]'/'{}'`，与项目现有纯 `"JSON"` 写法略有差异，目的是避免老库已有行读到 NULL 导致 Out 校验失败。
+
+---
+
+# Agent C 交接：提示词体系统一（agent/c-prompts）
+
+门禁：`pytest -q` → **575 passed, 1 failed**（失败为本文 §7 记录的已知 flaky）；
+`compileall -q app` 通过；`npm run build` 通过。新增 6 个测试（基线 570 → 576 收集）。
+
+## 1. API 变更（`/prompts`）
+
+| 接口 | 权限 | 变化 |
+|---|---|---|
+| `GET /api/v1/prompts` | `prompts.use`（全员可读） | **去掉 `owner_user_id == user.id` 过滤**，全局返回；新增查询参数 `promptType`、`enabled`（FastAPI bool）；排序改为 `sort_order ASC, created_at ASC, id ASC`。 |
+| `POST /prompts` | `image_styles.manage` | 接入全部新字段；`owner_user_id` 恒为 `null`（全局资源）；校验 `prompt_type`/`source` 枚举，非法 → 400 `invalid_prompt_type`/`invalid_source`。 |
+| `PATCH /prompts/{id}` | `image_styles.manage` | 支持 `promptType`/`negativeContent`/`summary`/`sortOrder`/`enabled`/`previewAssetIds`/`source`；不存在仍返回 404。 |
+| `DELETE /prompts/{id}` | `image_styles.manage` | 不再校验 owner；不存在仍返回 404。 |
+| `POST /prompts/from-draft` | `image_styles.manage`（新增） | AI 成文提示词沉淀。入参 `{title, coverPrompt, inlinePrompts[]}`；返回 `PromptTemplateOut[]`；`source=ai`，封面→`cover`、插图→`illustration`，标题 `<title>·封面` / `<title>·配图N`。按标题幂等，重复调用返回 `[]`。 |
+
+字段清单（Out/In/Patch 均已在地基就位，路由层已接）：`id,title,category,content,tags,promptType,negativeContent,summary,sortOrder,enabled,previewAssetIds,source,createdAt,updatedAt`。
+合法 `promptType`：`normal/cover/illustration/base/comic_panel/reference`；合法 `source`：`manual/ai/factory`。
+
+**注意**：`DELETE /prompts/{id}` 目前不会像旧 `/image-styles` 那样把引用它的 `ContentItem.base_style_deleted` 置位（该逻辑仅在兼容壳 DELETE 中保留）。若 B 的 `content.py` 快照机制要求统一 DELETE 也标记，请在集成时决定并补。
+
+## 2. 负向词 / seed 最后一环
+
+`modules/ai_images.py:create_image_generation` 入队 payload 已加 `negativePrompt` / `seed`（来自 `ImageGenerationIn`）。地基的 provider / job_runner 已能据此做能力探测、兜底拼接与结果标注。新增 `tests/test_negative_prompt_pipeline.py` 直接断言任务行 payload。
+
+## 3. `/image-styles` 兼容壳（DEPRECATED）
+
+`modules/image_styles.py` 保留全部旧路由（OpenAPI 已标 `deprecated`），**以 `prompt_templates` 为准**读写：
+`purpose→prompt_type`：base→base、cover→cover、inline→illustration；`name→title`、`prompt→content`、负向句→`negativeContent`。
+Out 新增 `negativeContent` 字段；其余字段（含 `includeDisabled=1` 的 403 语义）不变。
+
+**过渡双写（重要，集成后需清理）**：本 worktree 尚无 B 的 `content.py` 迁移（仍查 `image_styles` 表）。为保证基础风格锁定不 404，兼容壳在 POST/PATCH/DELETE/seed 时**同时写回 `image_styles` 旧表，两表共用同一 id**，旧表保留完整 prompt（含负向标记）。等 B 的 `content.py` 改为查 `prompt_templates(prompt_type=base)` 并验证通过后，应删除 image_styles.py 中所有 `models.ImageStyle` 双写代码。
+
+出厂封面模板在 seed / 迁移时按标记 `画面避免出现：` 拆为 `content` + `negativeContent`；`tests/test_image_styles.py:248` 的断言已相应更新（正向不再含标记，负向断言 `negativeContent`）。
+
+## 4. 迁移脚本
+
+```bash
+cd apps/api
+.venv/Scripts/python.exe -m app.scripts.migrate_prompts
+```
+
+- 文件：`app/scripts/migrate_prompts.py`（新建，可调用 `migrate(db) -> dict` + `__main__`；**不在应用启动时自动执行**）。
+- 行为：`image_styles` 行迁入 `prompt_templates`（purpose 映射见 §3；prompt 按 `画面避免出现：` 拆正负向）；按 `(title, owner_user_id)` 判重，重复跑不新增；历史私有提示词 `owner_user_id` 原值保留仅作追溯、不参与可见性；新记录恒 null。
+- 统计输出：`legacy_prompts_kept / styles_inserted / styles_skipped`。产出 `source`：出厂封面 `factory`，其余 `manual`。
+- 测试：`tests/test_migrate_prompts.py`（含拆分、映射、幂等、出厂负向断言）。
+- 建议集成顺序：先部署地基新列 → 启动播种（此时 prompt_templates 已有出厂行）→ 跑迁移脚本（会自动判重跳过出厂行）→ 再启用新前端。
+
+## 5. AI 成文提示词沉淀
+
+- `services/ai_article.py` 新增 `deposit_article_prompts(db, cover_prompt, inline_prompts, title_prefix)` 与 `deposit_draft_prompts(db, ArticleDraft, ...)` 便捷重载；`source=ai`、按标题幂等。
+- `article_workflow.py` 未改动（该文件设计原则是纯函数/只读查询，不写库）。
+- HTTP 入口为 `POST /prompts/from-draft`（§1），由 StudioView「存入提示词库」按钮手动触发；**默认不自动沉淀**，符合 Q5。
+- 前端：`StudioView.vue` 在「画面描述」区加按钮，非管理员 `disabledReason('image_styles.manage')` 置灰。
+
+## 6. 示例图流程（D5 落库、跨会话）
+
+1. 管理员在 `PromptsView.vue` 编辑弹窗里填正向 `content` + 负向 `negativeContent`、选比例（3:4/1:1/16:9/9:16），点「生成示例图」。新提示词需先保存（按钮在保存前禁用）。
+2. 前端 `POST /ai/image-generations`（带 `negativePrompt`），轮询 `GET /jobs/{jobId}`。
+3. 成功后从 `job.result.assetIds` 取 asset id，追加进 `previewAssetIds` 并 `PATCH /prompts/{id}` 回写。
+4. 卡片与编辑弹窗用 `fetchBlobUrl('/assets/{id}/raw')` 显示缩略图，点击放大；素材删除时缩略图静默忽略。
+5. 结果标注 `negativePromptMerged` 时提示「负向词已并入正向文本」（D2 明示）。
+
+前端其余变更：`ImageGenView.vue` 提示词选择器支持类型过滤、套用时同时填入正/负向、提交带 `negativePrompt`/`seed` 与对应输入框；`StudioView.vue` 封面/基础/配图风格源改为 `/prompts?promptType=cover|base|illustration&enabled=true`（前端做字段归一化），生图请求带 `negativePrompt`；`ImageStylesView.vue` 改为重定向壳（跳 `/prompts?type=cover`），与 B 的 router 重定向双保险。`PromptsView.vue` Tab 改为类型（含手绘风格入口），全局只读 + 管理员编辑。
+
+## 7. 需要 Lead / 其他 Agent 处理（越界项）
+
+1. **SIZE_MAP 补 2.35:1（Q4）**：`services/image_provider.py:SIZE_MAP`（F 所有）未加该比例，当前 `SIZE_MAP.get(ratio, "1024x1536")` 会静默回落 3:4。C 未改该文件，仅在 `PromptsView.vue` 明示「2.35:1 暂不支持，回落 3:4」。若需真正支持，请 Lead 决定是否在 SIZE_MAP 加 `"2.35:1": "<供应商接受的尺寸>"`（需确认供应商支持自定义尺寸）；否则保留前端明示 + 回落。
+2. **已知 flaky 测试（本环境稳定失败，非本分支回归）**：`tests/test_rbac.py::test_reset_password_kicks_existing_session_and_not_self`。根因在 `core/deps.py:67` 用秒级 `pwdv < epoch_seconds(password_changed_at)`，登录与重置落同一秒时旧会话不失效。本次全量重跑两次均失败（200 != 401），隔离运行亦失败；未在地基分支验证到通过，属 A/B 范围。请 Lead 安排把比较改为 `<=` 或提高时间戳精度（password_changed_at 带微秒且 token 内记录同精度）。其余 575 项全通过。
+3. **双写清理（§3）**：B 的 `content.py` 迁移合入并验证后，删除 `image_styles.py` 的 `models.ImageStyle` 双写（POST/PATCH/DELETE/seed 四处）。
+4. **统一 DELETE 与稿件快照（§1 末）**：决定 `/prompts` 删除时是否也要标记 `ContentItem.base_style_deleted`。
+5. **PromptTemplate CK 仅对新库生效**（地基 HANDOFF §1 已说明）：老库补列无 CheckConstraint，如需老库强约束请 Lead 另写迁移。

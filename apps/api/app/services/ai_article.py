@@ -20,6 +20,8 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from sqlalchemy import select
+
 from .. import models
 from . import ai_gateway, skill_registry, wechat_layout
 
@@ -298,3 +300,65 @@ def _resolve_theme(theme_id: str) -> dict:
 def article_to_variant_body(draft: ArticleDraft) -> str:
     """把草稿转成平台版本的 body（Markdown，推送时再渲染 HTML）。"""
     return draft.markdown
+
+
+def deposit_article_prompts(
+    db,
+    *,
+    cover_prompt: str = "",
+    inline_prompts: list[str] | None = None,
+    title_prefix: str = "",
+) -> list[models.PromptTemplate]:
+    """手动把 AI 成文的封面/插图提示词沉淀进统一提示词库（source=ai）。
+
+    默认不自动调用；由 StudioView 的「存入提示词库」按钮经接口显式触发，避免污染库。
+    幂等：同一标题的 AI 提示词已存在时跳过，重复点击不会产生副本。
+    """
+    prefix = (title_prefix or "").strip()[:40] or "AI 成文"
+    specs: list[tuple[str, str, str, str]] = []
+    cover = (cover_prompt or "").strip()
+    if cover:
+        specs.append((f"{prefix}·封面", cover, "cover", "封面图"))
+    for index, raw in enumerate(inline_prompts or []):
+        text = (raw or "").strip() if isinstance(raw, str) else ""
+        if text:
+            specs.append((f"{prefix}·配图{index + 1}", text, "illustration", "文章配图"))
+    if not specs:
+        return []
+
+    existing = set(
+        db.scalars(
+            select(models.PromptTemplate.title).where(models.PromptTemplate.source == "ai")
+        )
+    )
+    created: list[models.PromptTemplate] = []
+    for title, content, prompt_type, label in specs:
+        if title in existing:
+            continue
+        row = models.PromptTemplate(
+            title=title[:120],
+            category="AI 成文",
+            content=content,
+            tags=["ai", prompt_type],
+            prompt_type=prompt_type,
+            source="ai",
+            summary=f"AI 成文生成的{label}提示词",
+        )
+        db.add(row)
+        existing.add(title)
+        created.append(row)
+    if created:
+        db.commit()
+    return created
+
+
+def deposit_draft_prompts(
+    db, draft: ArticleDraft, title_prefix: str = ""
+) -> list[models.PromptTemplate]:
+    """便捷重载：直接接收 ArticleDraft（供服务内部/未来自动沉淀开关使用）。"""
+    return deposit_article_prompts(
+        db,
+        cover_prompt=draft.cover_prompt,
+        inline_prompts=draft.inline_prompts,
+        title_prefix=title_prefix or draft.title,
+    )
