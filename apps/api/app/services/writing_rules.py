@@ -31,6 +31,7 @@ from .skill_manifest import (
     MAX_EXEMPLARS,
     MAX_EXEMPLAR_EXCERPT,
     MAX_EXEMPLAR_TITLE,
+    MAX_REVIEW_RULES,
     MAX_RULES,
     MAX_RULE_LENGTH,
     MAX_TONE,
@@ -93,6 +94,9 @@ _LIST_LIMITS = {
     "style_rule": MAX_RULES,
     "workflow_step": MAX_WORKFLOW_STEPS,
     "exemplar": MAX_EXEMPLARS,
+    # 审稿规则此前漏了限额：manifest 校验只在上限校验时才生效，
+    # 成批写入时可以塞进超过 MAX_REVIEW_RULES 条，这里补齐。
+    "review_rule": MAX_REVIEW_RULES,
 }
 
 

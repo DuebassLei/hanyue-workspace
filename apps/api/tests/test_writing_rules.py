@@ -335,3 +335,33 @@ def test_manifest_accepts_bounded_exemplars():
         validate_manifest({"exemplars": four})
     with pytest.raises(Exception):
         validate_manifest({"exemplars": [{"title": "  ", "excerpt": "正文"}]})
+
+
+def test_replace_rules_enforces_review_rule_limit(client):
+    """review_rule 此前漏在 _LIST_LIMITS 外，能塞进超过 MAX_REVIEW_RULES 条。
+
+    上限对齐 manifest 的 MAX_REVIEW_RULES（20），第 21 条必须整组拒绝。
+    """
+    from app.services.skill_manifest import MAX_REVIEW_RULES
+
+    key = _fresh_skill_key()
+    rules = [
+        _rule(
+            "review_rule",
+            {"id": f"rv-{index}", "kind": "not_contains", "value": "禁用词"},
+            key=f"rv-{index}",
+        )
+        for index in range(MAX_REVIEW_RULES + 1)
+    ]
+    with SessionLocal() as db:
+        with pytest.raises(RuleInvalid):
+            writing_rules.replace_rules(db, skill_key=key, owner_user_id=None, rules=rules)
+        db.rollback()
+        assert writing_rules.list_rule_rows(db, skill_key=key, owner_user_id=None) == []
+
+        # 刚好到上限时可以写入
+        ok = writing_rules.replace_rules(
+            db, skill_key=key, owner_user_id=None, rules=rules[:MAX_REVIEW_RULES]
+        )
+        db.commit()
+        assert ok["types"] == {"review_rule": MAX_REVIEW_RULES}

@@ -127,6 +127,31 @@ def _check_contract_content(content: str) -> None:
         )
 
 
+def _assert_workflow_tools(db, skill_key: str, owner: str | None, rules: list[dict]) -> None:
+    """workspace 工作流里的 tool 必须落在该 Skill 的 allowed_tool_ids 内。
+
+    计划 §4 要求写前校验：否则管理员能存下一条运行到一半才失败的流程，
+    报错发生在生成时、和「保存成功」的反馈相互矛盾。
+    """
+    tools = {
+        (rule.get("payload") or {}).get("tool")
+        for rule in rules
+        if rule.get("ruleType") == "workflow_step"
+    }
+    tools.discard(None)
+    if not tools:
+        return
+    entry = _require_entry(db, skill_key, owner)
+    allowed = set(entry.allowed_tool_ids or [])
+    unknown = sorted(tool for tool in tools if tool not in allowed)
+    if unknown:
+        raise ApiError(
+            "tool_not_in_skill",
+            f"工作流里的工具不在该 Skill 的授权工具内：{'、'.join(unknown)}",
+            status_code=409,
+        )
+
+
 # ---------------------------------------------------------------- Skill 规则行
 
 
@@ -199,6 +224,7 @@ def replace_skill_rules(
     _require_write_access(access, scope)
 
     rules = [rule.dump() for rule in payload.rules]
+    _assert_workflow_tools(db, skill_key, owner, rules)
     if scope == "global" and not rules:
         # R4：删除行会被启动导入从出厂恢复，所以「清空」语义是全部禁用
         current = writing_rules.list_rule_rows(db, skill_key=skill_key, owner_user_id=None)
@@ -227,7 +253,9 @@ def create_skill_rule(
     """单条新增（同 type+key 已存在则覆盖其内容）。"""
     owner = _owner_for_scope(scope, user)
     _require_write_access(access, scope)
-    row = _translate(writing_rules.upsert_rule, db, skill_key=skill_key, owner_user_id=owner, rule=payload.dump())
+    rule = payload.dump()
+    _assert_workflow_tools(db, skill_key, owner, [rule])
+    row = _translate(writing_rules.upsert_rule, db, skill_key=skill_key, owner_user_id=owner, rule=rule)
     db.commit()
     prompt_rules.invalidate_cache(db)
     return schemas.WritingRuleOut(**row)
@@ -256,6 +284,7 @@ def patch_skill_rule(
         "enabled": payload.enabled if payload.enabled is not None else bool(row.enabled),
     }
     normalized = _translate(writing_rules.validate_rule, merged)
+    _assert_workflow_tools(db, skill_key, owner, [normalized])
     row.payload = normalized["payload"]
     row.sort_order = normalized["sortOrder"]
     row.enabled = normalized["enabled"]

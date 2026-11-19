@@ -388,3 +388,59 @@ def test_preview_outline_and_repair_kinds(client):
     assert repair.status_code == 200
     text = repair.json()["text"]
     assert "重试" in text and "草稿样本" in text
+
+
+def test_workflow_step_with_unallowed_tool_rejected_before_write(client):
+    """计划 §4：工作流的工具必须在 Skill 授权范围内，写前 409，而不是运行到一半才失败。"""
+    headers = login(client)
+    key = "article-drafting"
+    before = _get_rules(client, headers, key).json()
+    bad = client.post(
+        f"/api/v1/writing-rules/skills/{key}/rules?scope=global",
+        headers=headers,
+        json={
+            "ruleType": "workflow_step",
+            "ruleKey": "wf-smoke",
+            # publish_article 不在 article-drafting 的 tools 里
+            "payload": {"tool": "publish_article", "args": {}},
+        },
+    )
+    assert bad.status_code == 409, bad.text
+    assert bad.json()["code"] == "tool_not_in_skill"
+    # 库不变：既没有新增这一步，原有步骤也没被改动
+    after = _get_rules(client, headers, key).json()
+    assert len(after["rules"]) == len(before["rules"])
+    assert all(row["ruleKey"] != "wf-smoke" for row in after["rules"])
+
+
+def test_batch_replace_with_unallowed_tool_rejected_and_db_unchanged(client):
+    """整组保存时同样拦截：不能让一条非法步骤把整组写进去。"""
+    headers = login(client)
+    key = "article-drafting"
+    current = _get_rules(client, headers, key).json()["rules"]
+    rules = [
+        {
+            "ruleType": row["ruleType"],
+            "ruleKey": row["ruleKey"],
+            "payload": row["payload"],
+            "sortOrder": row["sortOrder"],
+            "enabled": row["enabled"],
+        }
+        for row in current
+    ]
+    rules.append(
+        {
+            "ruleType": "workflow_step",
+            "ruleKey": "wf-bad",
+            "payload": {"tool": "delete_content", "args": {}},
+        }
+    )
+    res = client.put(
+        f"/api/v1/writing-rules/skills/{key}/rules?scope=global",
+        headers=headers,
+        json={"rules": rules},
+    )
+    assert res.status_code == 409, res.text
+    assert res.json()["code"] == "tool_not_in_skill"
+    after = _get_rules(client, headers, key).json()["rules"]
+    assert len(after) == len(current), "校验失败不得落库"

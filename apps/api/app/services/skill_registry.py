@@ -539,7 +539,17 @@ def fork_builtin(db, user, skill_id: str, payload: schemas.SkillUpdateIn) -> sch
     db.add(fork)
     # 个人副本带上全局规则行（source=user）：规则表是规则型 key 的权威源，
     # fork 只复制条目 manifest 的话，T2 之后个人副本会读不到规则。
+    # 用户可能先在「创作规则」页直接维护过个人副本行（不 fork 也能写），
+    # 这里按 (rule_type, rule_key) 去重：已存在的个人行是用户自己改过的，不能被全局值覆盖。
+    existing_pairs = {
+        (row.rule_type, row.rule_key)
+        for row in writing_rules.list_rule_rows(
+            db, skill_key=entry.skill_key, owner_user_id=user.id
+        )
+    }
     for row in writing_rules.list_rule_rows(db, skill_key=entry.skill_key, owner_user_id=None):
+        if (row.rule_type, row.rule_key) in existing_pairs:
+            continue
         db.add(
             models.SkillWritingRule(
                 skill_key=entry.skill_key,

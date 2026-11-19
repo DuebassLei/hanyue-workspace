@@ -447,7 +447,7 @@ function jsonStatus(row) {
                   <template #trigger>
                     <n-button quaternary size="tiny" type="error">删除</n-button>
                   </template>
-                  删除这一条规则？
+                  删除这一条规则？{{ props.scope === 'global' ? '（全局行删掉后，下次启动会被出厂数据补回来）' : '' }}
                 </n-popconfirm>
                 <n-button
                   v-else

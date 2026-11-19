@@ -333,8 +333,65 @@ def test_fork_builtin_copies_global_rules_to_personal(client):
         db.commit()
 
 
-# ---------------- 4. 条目换源后语义不变 ----------------
+def test_fork_builtin_merges_with_existing_personal_rows(client):
+    """先在规则页维护过个人副本行、再 fork 内置风格时的合并语义。
 
+    没有这层去重会撞 (skill_key, owner, rule_type, rule_key) 唯一约束直接 500；
+    同时也不能用全局值覆盖用户自己改过的行（用户的改动优先）。
+    """
+    headers = login(client, "factory-fork-merge")
+    me = client.get("/api/v1/auth/me", headers=headers).json()
+    key = "style-tech-article"
+    with SessionLocal() as db:
+        entry = db.scalars(
+            select(models.SkillRegistryEntry).where(
+                models.SkillRegistryEntry.skill_key == key,
+                models.SkillRegistryEntry.owner_user_id.is_(None),
+            )
+        ).one()
+        entry_id = entry.id
+        global_rows = writing_rules.list_rule_rows(db, skill_key=key, owner_user_id=None)
+
+    # 1) 用户先写一条自己的语气（不 fork 也能写个人副本，这是「创作规则」页的正常路径）
+    added = client.post(
+        f"/api/v1/writing-rules/skills/{key}/rules?scope=personal",
+        headers=headers,
+        json={"ruleType": "tone", "ruleKey": "default", "payload": {"text": "我先改过的语气"}},
+    )
+    assert added.status_code == 201, added.text
+
+    # 2) fork 内置风格：应成功（回归点：此前 500 IntegrityError）
+    forked = client.post(
+        f"/api/v1/skills/{entry_id}/customize",
+        headers=headers,
+        json={"manifest": {"tone": "fork 提交的语气"}},
+    )
+    assert forked.status_code == 201, forked.text
+
+    # 3) 规则集合补齐到与全局一致，但用户改过的那条保持原值
+    with SessionLocal() as db:
+        personal = writing_rules.list_rule_rows(db, skill_key=key, owner_user_id=me["id"])
+        assert {(r.rule_type, r.rule_key) for r in personal} == {
+            (r.rule_type, r.rule_key) for r in global_rows
+        }
+        tone = next(row for row in personal if row.rule_type == "tone")
+        assert tone.payload == {"text": "我先改过的语气"}
+
+        # 清理
+        for row in personal:
+            db.delete(row)
+        fork = db.scalar(
+            select(models.SkillRegistryEntry).where(
+                models.SkillRegistryEntry.skill_key == key,
+                models.SkillRegistryEntry.owner_user_id == me["id"],
+            )
+        )
+        if fork is not None:
+            db.delete(fork)
+        db.commit()
+
+
+# ---------------- 4. 条目换源后语义不变 ----------------
 
 def test_builtin_entries_keep_yaml_manifest_semantics(client):
     with SessionLocal() as db:
