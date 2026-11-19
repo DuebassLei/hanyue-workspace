@@ -1,7 +1,10 @@
 """Skill 注册表：内置定义的加载、种子同步、自定义 Skill 生命周期与授权。
 
 单一入口原则：
-- 内置 Skill 只来自 app/resources/skills/builtin_skills.yaml，不再写在路由模块里；
+- 内置 Skill 只来自 app/resources/skills/builtin_skills.json——它是出厂数据
+  app/resources/writing_rules_factory.json 的派生文件（规则行合成回 manifest 的形态），
+  由 scripts/export_factory_to_builtin.py 生成、--check 校验，手改不生效；
+  规则的权威源是 skill_writing_rules 表（owner 为空的全局行）；
 - 所有写入路径（种子、创建、定制、编辑）共用同一个 checksum 算法；
 - 风险等级由声明工具推断，不由调用方硬编码；
 - “启用”只表示允许 Agent 自动调用，写作风格的手动选用由 resolve_visible 控制可见性。
@@ -15,7 +18,6 @@ import hashlib
 import json
 from functools import lru_cache
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import and_, case, or_, select
 
@@ -23,10 +25,10 @@ from .. import models, schemas
 from ..core import pagination
 from ..core.config import BASE_DIR
 from ..core.deps import ApiError, default_workspace, not_found
-from . import agent_policy
+from . import agent_policy, writing_rules
 from .skill_manifest import ManifestInvalid, validate_manifest
 
-BUILTIN_RESOURCE = BASE_DIR / "app" / "resources" / "skills" / "builtin_skills.yaml"
+BUILTIN_RESOURCE = BASE_DIR / "app" / "resources" / "skills" / "builtin_skills.json"
 
 # 公众号成文的统一输出契约。所有写作风格共用，只替换 {tone} 与风格规则。
 # 唯一一份：内置资源、自定义 Skill 的兜底、ai_article 都从这里取，避免提示词漂移。
@@ -51,7 +53,7 @@ DEFAULT_STYLE_RULES = [
 
 
 class BuiltinSkillSpec(BaseModel):
-    """YAML 中一条内置 Skill 的结构。"""
+    """`builtin_skills.json` 中一条内置 Skill 的结构。"""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -153,8 +155,11 @@ def _build_builtin_manifest(spec: BuiltinSkillSpec) -> dict:
 def get_builtin_specs() -> tuple[BuiltinSkillSpec, ...]:
     """加载并校验内置定义；配置错误在启动时直接失败，而不是静默少几个 Skill。"""
     if not BUILTIN_RESOURCE.exists():
-        raise RuntimeError(f"缺少内置 Skill 定义文件：{BUILTIN_RESOURCE}")
-    raw = yaml.safe_load(BUILTIN_RESOURCE.read_text(encoding="utf-8")) or {}
+        raise RuntimeError(f"缺少内置 Skill 定义文件：{BUILTIN_RESOURCE}（由 export_factory_to_builtin.py 生成）")
+    try:
+        raw = json.loads(BUILTIN_RESOURCE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{BUILTIN_RESOURCE} 不是合法 JSON：{exc}") from exc
     items = raw.get("skills") if isinstance(raw, dict) else None
     if not isinstance(items, list) or not items:
         raise RuntimeError(f"{BUILTIN_RESOURCE} 缺少 skills 列表")
@@ -532,6 +537,21 @@ def fork_builtin(db, user, skill_id: str, payload: schemas.SkillUpdateIn) -> sch
         ),
     )
     db.add(fork)
+    # 个人副本带上全局规则行（source=user）：规则表是规则型 key 的权威源，
+    # fork 只复制条目 manifest 的话，T2 之后个人副本会读不到规则。
+    for row in writing_rules.list_rule_rows(db, skill_key=entry.skill_key, owner_user_id=None):
+        db.add(
+            models.SkillWritingRule(
+                skill_key=entry.skill_key,
+                owner_user_id=user.id,
+                rule_type=row.rule_type,
+                rule_key=row.rule_key,
+                payload=dict(row.payload or {}),
+                sort_order=row.sort_order or 0,
+                enabled=bool(row.enabled),
+                source="user",
+            )
+        )
     db.commit()
     db.refresh(fork)
     return build_skill_out(fork, None, customized=True)

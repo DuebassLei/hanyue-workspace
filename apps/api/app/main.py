@@ -45,7 +45,7 @@ from .modules import (
     workspaces,
 )
 from .services import handdraw as handdraw_import
-from .services import rbac_service, scheduled_tasks, scheduler, skill_registry
+from .services import rbac_service, scheduled_tasks, scheduler, skill_registry, writing_rules_factory
 
 settings = get_settings()
 configure_logging(settings)
@@ -59,7 +59,8 @@ async def lifespan(app: FastAPI):
         # RBAC 播种：补权限点/内置角色/菜单，并保证存量用户至少有一个角色
         rbac_service.seed(session)
         handdraw_import.import_library(session)
-        # 内置 Skill 在启动时同步；读接口不再承担写库/迁移职责
+        # 出厂规则导入（缺什么建什么，R3）先于内置条目同步；读接口不再承担写库/迁移职责
+        writing_rules_factory.import_factory(session)
         skill_registry.sync_builtin_skills(session)
         # 出厂配图风格：固化封面模板，Studio 的封面模板下拉开箱即用
         image_styles.seed_factory_styles(session)
