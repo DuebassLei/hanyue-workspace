@@ -43,6 +43,7 @@ from .modules import (
     topics,
     wechat_mp,
     workspaces,
+    writing_rules,
 )
 from .services import handdraw as handdraw_import
 from .services import rbac_service, scheduled_tasks, scheduler, skill_registry, writing_rules_factory
@@ -142,6 +143,7 @@ for module in (
     script_schedules,
     schedules,
     rbac,
+    writing_rules,
 ):
     app.include_router(module.router, prefix=settings.api_prefix)
 

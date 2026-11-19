@@ -1587,3 +1587,101 @@ class RbacAuditOut(CamelModel):
     target_id: str = ""
     detail: dict = Field(default_factory=dict)
     created_at: datetime
+
+
+# ---------------------------------------------------------------- 创作规则（T4）
+
+
+class WritingRuleIn(CamelModel):
+    """规则行写入：ruleType/ruleKey/payload 由 services.writing_rules.validate_rule 校验。"""
+
+    rule_type: str
+    rule_key: str = "default"
+    payload: dict = Field(default_factory=dict)
+    sort_order: int = 0
+    enabled: bool = True
+
+
+class WritingRulesReplaceIn(CamelModel):
+    """整组替换（表单保存）；全局空数组按 R4 落「全部禁用」而不是删行。"""
+
+    rules: list[WritingRuleIn] = Field(default_factory=list)
+
+
+class WritingRulePatchIn(CamelModel):
+    """单条修改：只更新显式传入的字段。"""
+
+    payload: dict | None = None
+    enabled: bool | None = None
+    sort_order: int | None = None
+
+
+class WritingRuleOut(CamelModel):
+    id: str
+    skill_key: str
+    owner_user_id: str | None = None
+    rule_type: str
+    rule_key: str
+    payload: dict = Field(default_factory=dict)
+    sort_order: int = 0
+    enabled: bool = True
+    source: str = "user"
+
+
+class SkillRulesOut(CamelModel):
+    skill_key: str
+    scope: str
+    rules: list[WritingRuleOut] = Field(default_factory=list)
+    counts: dict = Field(default_factory=dict)
+    effective_manifest: dict = Field(default_factory=dict)
+
+
+class WritingSkillSummaryOut(CamelModel):
+    skill_key: str
+    name: str = ""
+    category: str = ""
+    global_count: int = 0
+    personal_count: int = 0
+    has_personal_copy: bool = False
+
+
+class PromptRuleOut(CamelModel):
+    key: str
+    category: str = ""
+    title: str = ""
+    description: str = ""
+    content: str = ""
+    payload: dict = Field(default_factory=dict)
+    enabled: bool = True
+    source: str = "factory"
+    version: int = 1
+
+
+class PromptRuleUpsertIn(CamelModel):
+    """提示词规则修改：只更新显式传入的字段。"""
+
+    content: str | None = None
+    payload: dict | None = None
+    enabled: bool | None = None
+    title: str | None = None
+    description: str | None = None
+
+
+class PromptRuleCreateIn(CamelModel):
+    """新增自定义提示词/词表规则（source=user，可删除）。"""
+
+    key: str
+    category: str
+    title: str = ""
+    description: str = ""
+    content: str = ""
+    payload: dict = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class RulesPreviewOut(CamelModel):
+    skill_key: str
+    scope: str
+    kind: str
+    text: str = ""
+    rule_sources: list = Field(default_factory=list)
