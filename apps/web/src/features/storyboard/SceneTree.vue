@@ -1,9 +1,11 @@
 <script setup>
+import { hasSceneStyleOverride } from './sceneStyle.js'
+
 const props = defineProps({
   scenes: { type: Array, default: () => [] },
   activeSceneId: { type: String, default: '' },
 })
-const emit = defineEmits(['select', 'create', 'delete', 'create-shot'])
+const emit = defineEmits(['select', 'create', 'delete', 'create-shot', 'style'])
 </script>
 
 <template>
@@ -19,9 +21,10 @@ const emit = defineEmits(['select', 'create', 'delete', 'create-shot'])
     <div v-for="scene in props.scenes" :key="scene.id" class="scene-node" :class="{ active: scene.id === props.activeSceneId }">
       <button class="scene-select" type="button" @click="emit('select', scene.id)">
         <span class="scene-index">{{ String(scene.sortOrder + 1).padStart(2, '0') }}</span>
-        <span class="scene-copy"><strong>{{ scene.title }}</strong><small>{{ scene.chapter }} · {{ scene.shots?.length || 0 }} 镜头</small></span>
+        <span class="scene-copy"><strong>{{ scene.title }}<span v-if="hasSceneStyleOverride(scene.styleConfig)" class="style-flag" title="该场景已单独设置画风，出图优先使用场景风格">覆盖</span></strong><small>{{ scene.chapter }} · {{ scene.shots?.length || 0 }} 镜头</small></span>
       </button>
       <div class="scene-actions">
+        <button type="button" title="场景画风" @click="emit('style', scene.id)">◈</button>
         <button type="button" title="新建镜头" @click="emit('create-shot', scene.id)">＋</button>
         <button type="button" title="删除场景" @click="emit('delete', scene.id)">×</button>
       </div>
@@ -43,6 +46,7 @@ h2 { margin:4px 0 0; font-size:18px; font-weight:650; color:var(--paper-ink); }
 .scene-index { font:11px ui-monospace, SFMono-Regular, Consolas, monospace; color:var(--paper-ink-muted); padding-top:2px; }
 .scene-copy { min-width:0; display:flex; flex-direction:column; gap:3px; }
 .scene-copy strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--paper-ink); font-size:13px; }
+.style-flag { margin-left:6px; padding:1px 4px; border:1px solid var(--paper-accent-line); background:var(--paper-accent-tint); color:var(--paper-accent); font-size:9px; font-weight:400; white-space:nowrap; }
 .scene-copy small { color:var(--paper-ink-muted); font-size:11px; }
 .scene-actions { display:flex; gap:2px; opacity:0; }
 .scene-node:hover .scene-actions, .scene-node.active .scene-actions { opacity:1; }
