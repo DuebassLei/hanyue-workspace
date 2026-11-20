@@ -696,7 +696,8 @@ def test_user_task_crud_via_api(client):
     )
     assert created.status_code == 201, created.text
     task = created.json()
-    assert task["scope"] == "user"
+    # 统一 system：不再区分系统/个人任务，所有新建定时配置都是全局的
+    assert task["scope"] == "system"
     assert task["editable"] is True
     assert task["params"] == {"tracks": ["AI 与科技"], "min_score": 70, "limit": 2, "create_drafts": True}
     assert task["scheduleLabel"] == "每天 08:30"
@@ -729,7 +730,8 @@ def test_user_task_crud_via_api(client):
     assert client.get(f"{PREFIX}/schedules/{task_id}/runs", headers=headers).status_code == 404
 
 
-def test_user_task_is_invisible_to_other_users(client):
+def test_task_created_by_one_user_is_global(client):
+    """统一 system：定时配置不再区分系统/个人，一个用户建的另一个用户也能看到、能改。"""
     owner = _login(client, "sched-owner-a")
     other = _login(client, "sched-owner-b")
     created = client.post(
@@ -740,13 +742,15 @@ def test_user_task_is_invisible_to_other_users(client):
     assert created.status_code == 201, created.text
     task_id = created.json()["id"]
 
-    assert all(
-        item["id"] != task_id
+    # 全局共享：别的用户能看到这条任务
+    assert any(
+        item["id"] == task_id
         for item in client.get(f"{PREFIX}/schedules", headers=other).json()["items"]
     )
-    # 别人的任务连存在性都不暴露
-    assert client.patch(f"{PREFIX}/schedules/{task_id}", headers=other, json={"cron": "0 6 * * *"}).status_code == 404
-    assert client.delete(f"{PREFIX}/schedules/{task_id}", headers=other).status_code == 404
+    # 开发态下 system 任务可写，别的用户也能改/删
+    patched = client.patch(f"{PREFIX}/schedules/{task_id}", headers=other, json={"cron": "0 6 * * *"})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["cron"] == "0 6 * * *"
 
 
 def test_digest_rejects_unknown_track(client):

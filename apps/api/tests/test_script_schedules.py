@@ -313,7 +313,8 @@ def test_create_user_script_schedule_defaults_params(client):
     assert response.status_code == 201, response.text
     task = response.json()
     assert task["taskType"] == f"user-script.{script['id']}"
-    assert task["scope"] == "user"
+    # 统一 system：脚本任务与内置任务同口径，都是全局定时配置
+    assert task["scope"] == "system"
     assert task["params"] == {}
 
 

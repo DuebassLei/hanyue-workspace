@@ -211,12 +211,7 @@ def list_schedules(user: CurrentUser, db: DbSession) -> dict:
         .order_by(models.ScheduledTask.last_fired_at.desc(), models.ScheduledTask.created_at.desc())
     ).all()
     return {
-        "items": [
-            _out(row, user)
-            for row in rows
-            if not row.task_type.startswith("user-script.")
-            or row.owner_user_id == user.id
-        ]
+        "items": [_out(row, user) for row in rows]
     }
 
 
@@ -269,7 +264,9 @@ def create_schedule(
             )
 
     task = models.ScheduledTask(
-        scope=spec.scope,
+        # 统一 system：不再区分系统/个人任务，所有定时配置全局共享（单租户口径）。
+        # spec.scope 仅保留内部语义：标记内置类型（决定重复检查与写权限门槛）。
+        scope="system",
         owner_user_id=user.id,
         task_type=spec.key,
         name=(payload.name or spec.title).strip()[:120] or spec.title,

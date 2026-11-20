@@ -735,7 +735,6 @@ onBeforeUnmount(() => {
           <div class="sched-main">
             <div class="sched-title-line">
               <span class="sched-name">{{ entryName(entry) }}</span>
-              <n-tag v-if="entry.kind !== 'script'" size="small" :bordered="false">内置</n-tag>
               <n-tag
                 v-if="entry.kind === 'script'"
                 size="small"

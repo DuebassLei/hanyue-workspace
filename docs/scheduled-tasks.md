@@ -310,7 +310,7 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | VARCHAR(32) | 主键 |
-| `scope` | VARCHAR(16) | `system` / `user` |
+| `scope` | VARCHAR(16) | 统一 `system`：接口创建的所有定时配置（含 user-script.*）都落 `system`，全局共享；`user` 仅剩兼容含义（历史数据 / 类型元数据标记非内置） |
 | `owner_user_id` | VARCHAR(32) | 外键 users.id。system 任务也必须有真实 owner（见 2.3③） |
 | `task_type` | VARCHAR(64) | 注册表里的 key，落库前必须存在 |
 | `name` | VARCHAR(120) | 用户可见名称 |
@@ -410,7 +410,7 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
   - 同一标题第二次运行 → `draftsCreated=0`、`draftsReused=1`，不重复建稿
   - 库里一条热点都没有 → `no_hot_data` 失败；有数据但没命中赛道 → 成功且 `total=0`（这是正常结果，不是错误）
   - 投递链：`POST /run` 的 job 落在 `topic-digest` 队列，handler 把参数原样交给 `build_digest`
-- 用户任务：别人的任务在列表里不可见，patch/delete 返回 404（不暴露存在性）
+- 任务归属已统一 system：定时配置全局共享，不再有「个人任务隐私」（一个用户建的另一个用户可见可改，写权限仍受 `SCHEDULER_SYSTEM_WRITE` 约束）；脚本（`ScheduledScript`）仍按 owner 隔离
 
 ## 7. 落地顺序
 
