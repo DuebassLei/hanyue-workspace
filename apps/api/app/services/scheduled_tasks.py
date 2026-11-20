@@ -68,17 +68,18 @@ def _zone(name: str) -> ZoneInfo:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 任务类型注册表（声明驱动：由 manifest 加载，见 services/script_registry）
+# 任务类型注册表
+#
+# 内置 manifest 类型已整体移除（定时任务只剩用户脚本一条通道），注册表
+# 机制保留：user-script.* 走 dynamic_task_type 动态生成，测试与后续扩展
+# 仍可 register() 注册自定义类型。
 # ══════════════════════════════════════════════════════════════════════
 
 
 @dataclass(frozen=True)
 class TaskType:
-    """一种可被定时的任务。类型由 manifest 声明，不是用户可编辑的数据。
-
-    `scope` 由类型决定而不是由创建者选：热点榜是全局数据（hot_items / hot_clusters
-    没有 owner_user_id），所以只能是 system，否则 N 个用户会各打一遍采集源。
-    """
+    """一种可被定时的任务。`scope` 只是类型元数据（system=内置全局语义，
+    user=按用户隔离），落库的定时配置统一 scope=system。"""
 
     key: str
     title: str
@@ -141,27 +142,6 @@ def dynamic_task_type(key: str) -> TaskType:
         description="受信任 Python 定时脚本",
         default_cron="0 8 * * *",
     )
-
-
-def load_task_types() -> int:
-    """从 manifest 装载全部任务类型。进程启动与测试 reload 时各调一次（幂等）。
-
-    延迟 import 避开循环依赖：script_registry 读本模块的 TaskType/register。
-    配置写错（未知 runner / 重复 key / 非法字段）在这里就抛，绝不留到运行期。
-    """
-    from . import script_registry
-
-    return script_registry.load_all()
-
-
-load_task_types()
-
-
-def default_params(spec: TaskType) -> dict:
-    try:
-        return spec.params_model().model_dump(exclude_none=True)
-    except ValidationError:  # 参数模型不需要必填项，理论上不会到这里
-        return {}
 
 
 def _simplify(prop: dict) -> dict:
@@ -677,55 +657,8 @@ def reconcile_runs(db, now: datetime | None = None) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 装载 / 播种
-# ══════════════════════════════════════════════════════════════════════
-
-
 def compute_next_run(task: models.ScheduledTask, now: datetime | None = None) -> None:
     previous = task.next_run_at
     task.next_run_at = next_run_after(task, previous, as_utc(now) or now_utc())
 
 
-def ensure_system_tasks(db, owner_user_id: str, timezone_name: str = "") -> int:
-    """为 system 类型播种任务，绑定到首个登录用户。
-
-    system 任务也必须有真实 owner：`background_jobs.owner_user_id` 是必填外键，
-    留空会造出「跑不起来的任务」这种半截状态。多用户环境下只有第一条会留下。
-    `SCHEDULER_SEED_SYSTEM_TASKS=false` 时整体跳过：部署方不想让内置定时脚本
-    出现在界面里，需要时再手动建。
-    """
-    if not get_settings().scheduler_seed_system_tasks:
-        return 0
-    created = 0
-    for spec in TASK_TYPES.values():
-        if spec.scope != "system":
-            continue
-        exists = db.scalar(
-            select(models.ScheduledTask).where(
-                models.ScheduledTask.task_type == spec.key,
-                models.ScheduledTask.scope == "system",
-            )
-        )
-        if exists is not None:
-            continue
-        task = models.ScheduledTask(
-            scope="system",
-            owner_user_id=owner_user_id,
-            task_type=spec.key,
-            name=spec.title,
-            params=default_params(spec),
-            schedule_kind="cron",
-            cron=spec.default_cron,
-            timezone=(timezone_name or "Asia/Shanghai"),
-            misfire_grace_seconds=get_settings().scheduler_misfire_grace,
-            enabled=True,
-        )
-        compute_next_run(task)
-        db.add(task)
-        db.commit()
-        created += 1
-        from . import scheduler as scheduler_module
-
-        scheduler_module.sync(task)
-        logger.info("已播种 system 定时任务 %s（%s）", spec.key, task.id)
-    return created

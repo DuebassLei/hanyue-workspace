@@ -2,6 +2,9 @@
 
 原则同其他用例：不等待真实时间、不打外网。调度语义靠直接调服务层函数验证，
 APScheduler 装进去的那层在 conftest 里被关掉（SCHEDULER_ENABLED=false）。
+
+内置任务类型已整体移除（定时任务只剩用户脚本一条通道）；调度机制用例通过
+`register_test_type` 自注册一个测试类型来驱动，不依赖任何真实业务类型。
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
+from pydantic import BaseModel, ConfigDict, Field
 
 PREFIX = "/api/v1"
 
@@ -38,39 +42,54 @@ def _task_of(task_id: str):
 
 @pytest.fixture(autouse=True)
 def no_dispatch(monkeypatch):
-    """让 job 停在队列里：测试自己决定什么时候执行，避免线程池抢跑。
-
-    必须是 autouse：定时任务投递的是真实的「拉热点」job，一旦被线程池捞起来
-    就会去打 7 个外部接口——CI 不该依赖外网可用性。
-    """
+    """让 job 停在队列里：测试自己决定什么时候执行，避免线程池抢跑。"""
     from app.core import queue
 
     monkeypatch.setattr(queue, "dispatch", lambda *a, **k: False)
 
 
-@pytest.fixture()
-def user_task(monkeypatch):
-    """注册一个 user 类型的测试任务类型，并在库里建一条任务。
+class _TestParams(BaseModel):
+    """测试类型的参数模型：够验证校验语义即可。"""
 
-    类型注册表是进程级全局的，用完必须摘掉——否则其他用例的 /types 会多出一项。
-    """
-    from app import models
-    from app.core.db import SessionLocal, init_db
+    model_config = ConfigDict(extra="forbid")
+
+    count: int = Field(default=1, ge=0, le=10)
+    labels: list[str] = Field(default_factory=list)
+
+
+@pytest.fixture()
+def test_type():
+    """注册一个测试任务类型（进程级全局注册表，用完摘掉）。"""
     from app.services import scheduled_tasks as st
 
-    init_db()  # 这条夹具不经过 client，自己保证表已建好
+    init_db_needed = not st.TASK_TYPES
     spec = st.TaskType(
         key="test.noop",
         title="测试任务",
         scope="user",
-        queue="hot-topics",
-        kind="hot_topics.refresh",
-        params_model=st.task_type("hot_topics.refresh").params_model,
-        build_payload=st.task_type("hot_topics.refresh").build_payload,
+        queue="test-queue",
+        kind="test.noop",
+        params_model=_TestParams,
+        build_payload=lambda params: {"count": params.count, "labels": params.labels},
         description="仅测试用",
         default_cron="0 3 * * *",
     )
+    if init_db_needed:
+        from app.core.db import init_db
+
+        init_db()
     st.TASK_TYPES[spec.key] = spec
+    yield spec
+    st.TASK_TYPES.pop(spec.key, None)
+
+
+@pytest.fixture()
+def user_task(test_type):
+    """在库里直接建一条测试任务（绕过 API，服务层用例用）。"""
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services import scheduled_tasks as st
+
     db = SessionLocal()
     try:
         # auth_subject 有唯一约束：每个用例用独立 subject，避免互相踩
@@ -78,9 +97,9 @@ def user_task(monkeypatch):
         db.add(user)
         db.commit()
         task = models.ScheduledTask(
-            scope="user",
+            scope="system",
             owner_user_id=user.id,
-            task_type=spec.key,
+            task_type=test_type.key,
             name="测试任务",
             params={},
             schedule_kind="cron",
@@ -93,8 +112,21 @@ def user_task(monkeypatch):
         db.refresh(task)
         yield task
     finally:
-        st.TASK_TYPES.pop(spec.key, None)
         db.close()
+
+
+def _create_test_task(client, headers, **overrides):
+    """经 API 建一条 test.noop 定时配置（接口链路用例用）。"""
+    payload = {
+        "taskType": "test.noop",
+        "scheduleKind": "cron",
+        "cron": "0 8 * * *",
+        "timezone": "Asia/Shanghai",
+        **overrides,
+    }
+    res = client.post(f"{PREFIX}/schedules", headers=headers, json=payload)
+    assert res.status_code == 201, res.text
+    return res.json()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -155,14 +187,14 @@ def test_next_run_strictly_advances_at_fire_point():
         assert nxt > fire_point.astimezone(timezone.utc)
 
 
-def test_params_validation_reports_field():
+def test_params_validation_reports_field(test_type):
     from app.services import scheduled_tasks as st
 
-    spec = st.task_type("hot_topics.refresh")
-    assert st.validate_params(spec, {}) == {}
-    assert st.validate_params(spec, {"platforms": ["微博"]}) == {"platforms": ["微博"]}
+    spec = st.task_type(test_type.key)
+    assert st.validate_params(spec, {}) == {"count": 1, "labels": []}
+    assert st.validate_params(spec, {"count": 3, "labels": ["a"]}) == {"count": 3, "labels": ["a"]}
     with pytest.raises(st.ScheduleError) as err:
-        st.validate_params(spec, {"platforms": "微博"})
+        st.validate_params(spec, {"count": "not-a-number"})
     assert err.value.code == "invalid_params"
 
 
@@ -170,24 +202,33 @@ def test_duplicate_type_registration_fails_loudly():
     """覆盖式注册会让「改 A 影响 B」变得无法排查，所以必须启动即报错。"""
     from app.services import scheduled_tasks as st
 
-    spec = st.TASK_TYPES["hot_topics.refresh"]
-    with pytest.raises(RuntimeError):
-        st.register(spec)
+    spec = st.TaskType(
+        key="test.dup",
+        title="重复注册",
+        scope="user",
+        queue="test-queue",
+        kind="test.dup",
+        params_model=_TestParams,
+        build_payload=lambda _params: {},
+    )
+    st.TASK_TYPES[spec.key] = spec
+    try:
+        with pytest.raises(RuntimeError):
+            st.register(spec)
+    finally:
+        st.TASK_TYPES.pop(spec.key, None)
 
 
-def test_types_endpoint_exposes_renderable_fields(client):
-    headers = _login(client)
-    res = client.get(f"{PREFIX}/schedules/types", headers=headers)
-    assert res.status_code == 200, res.text
-    body = res.json()
-    hot = next(item for item in body["items"] if item["key"] == "hot_topics.refresh")
-    assert hot["scope"] == "system"
-    field = hot["params"]["fields"][0]
-    # 前端只认这一层归一化结构，不该自己解 anyOf
-    assert field["name"] == "platforms"
-    assert field["type"] == "array"
-    assert field["items"] == "string"
-    assert field["nullable"] is True
+def test_unknown_task_type_rejected(client):
+    """类型必须注册过：拼错 key 直接 400，不静默落库一条跑不起来的任务。"""
+    headers = _login(client, "sched-unknown-type")
+    res = client.post(
+        f"{PREFIX}/schedules",
+        headers=headers,
+        json={"taskType": "no.such.type", "scheduleKind": "cron", "cron": "0 8 * * *"},
+    )
+    assert res.status_code == 400
+    assert res.json()["code"] == "unknown_task_type"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -195,35 +236,16 @@ def test_types_endpoint_exposes_renderable_fields(client):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_create_system_task_is_seeded_once_and_duplicate_rejected(client):
-    headers = _login(client, "sched-seed")
-    listing = client.get(f"{PREFIX}/schedules", headers=headers).json()["items"]
-    hot = [item for item in listing if item["taskType"] == "hot_topics.refresh"]
-    # 登录即播种：拉热点这条 system 任务应当已经存在
-    assert len(hot) == 1
-    assert hot[0]["scope"] == "system"
-    assert hot[0]["scheduleLabel"] == "每天 08:00、12:00、18:00"
-    assert hot[0]["nextRunAt"] is not None
-
-    dup = client.post(
-        f"{PREFIX}/schedules",
-        headers=headers,
-        json={"taskType": "hot_topics.refresh", "scheduleKind": "cron", "cron": "0 9 * * *"},
-    )
-    assert dup.status_code == 409, dup.text
-    assert dup.json()["code"] == "schedule_exists"
-
-
-def test_create_rejects_bad_cron_before_persisting(client):
+def test_create_rejects_bad_cron_before_persisting(client, test_type):
     headers = _login(client, "sched-bad-cron")
     before = len(client.get(f"{PREFIX}/schedules", headers=headers).json()["items"])
     res = client.post(
         f"{PREFIX}/schedules",
         headers=headers,
-        json={"taskType": "hot_topics.refresh", "scheduleKind": "cron", "cron": "bogus"},
+        json={"taskType": test_type.key, "scheduleKind": "cron", "cron": "bogus"},
     )
     assert res.status_code == 400
-    assert res.json()["code"] in {"invalid_cron", "schedule_exists"}
+    assert res.json()["code"] == "invalid_cron"
     after = len(client.get(f"{PREFIX}/schedules", headers=headers).json()["items"])
     assert after == before
 
@@ -247,13 +269,12 @@ def test_preview_endpoint(client):
     assert bad.json()["code"] == "invalid_cron"
 
 
-def test_patch_updates_next_run_and_disable_clears_it(client):
+def test_patch_updates_next_run_and_disable_clears_it(client, test_type):
     headers = _login(client, "sched-patch")
-    listing = client.get(f"{PREFIX}/schedules", headers=headers).json()["items"]
-    task_id = next(i["id"] for i in listing if i["taskType"] == "hot_topics.refresh")
+    task = _create_test_task(client, headers)
 
     res = client.patch(
-        f"{PREFIX}/schedules/{task_id}",
+        f"{PREFIX}/schedules/{task['id']}",
         headers=headers,
         json={"cron": "0 */2 * * *", "timezone": "UTC"},
     )
@@ -262,28 +283,28 @@ def test_patch_updates_next_run_and_disable_clears_it(client):
     assert res.json()["scheduleLabel"] == "每 2 小时第 00 分"
     assert res.json()["nextRunAt"] is not None
 
-    off = client.patch(f"{PREFIX}/schedules/{task_id}", headers=headers, json={"enabled": False})
+    off = client.patch(f"{PREFIX}/schedules/{task['id']}", headers=headers, json={"enabled": False})
     assert off.status_code == 200, off.text
     assert off.json()["enabled"] is False
     assert off.json()["nextRunAt"] is None
 
-    on = client.patch(f"{PREFIX}/schedules/{task_id}", headers=headers, json={"enabled": True})
+    on = client.patch(f"{PREFIX}/schedules/{task['id']}", headers=headers, json={"enabled": True})
     assert on.json()["enabled"] is True
     assert on.json()["nextRunAt"] is not None
 
 
-def test_system_task_read_only_when_configured(client, monkeypatch):
+def test_task_read_only_when_configured(client, test_type, monkeypatch):
+    """SCHEDULER_SYSTEM_WRITE=never 时定时配置一律只读（统一 system 后覆盖所有任务）。"""
     from app.modules import schedules as schedules_module
 
     headers = _login(client, "sched-readonly")
-    listing = client.get(f"{PREFIX}/schedules", headers=headers).json()["items"]
-    task_id = next(i["id"] for i in listing if i["taskType"] == "hot_topics.refresh")
+    task = _create_test_task(client, headers)
 
     monkeypatch.setattr(schedules_module, "_system_writable", lambda: False)
-    res = client.patch(f"{PREFIX}/schedules/{task_id}", headers=headers, json={"cron": "0 5 * * *"})
+    res = client.patch(f"{PREFIX}/schedules/{task['id']}", headers=headers, json={"cron": "0 5 * * *"})
     assert res.status_code == 403
     assert res.json()["code"] == "forbidden"
-    # 只读时任务本身仍然可见（热点数据是全局共享的）
+    # 只读时任务本身仍然可见
     assert client.get(f"{PREFIX}/schedules", headers=headers).json()["items"]
 
 
@@ -318,8 +339,8 @@ def test_fire_dispatches_job_and_records_run(user_task, monkeypatch):
         assert run.status == "queued"
         assert run.job_id
         job = db.get(models.BackgroundJob, run.job_id)
-        assert job.queue == "hot-topics"
-        assert job.kind == "hot_topics.refresh"
+        assert job.queue == "test-queue"
+        assert job.kind == "test.noop"
         assert job.payload["scheduledRunId"] == run.id
         # next_run_at 已推进到下一次，界面上的「下次触发」不会停在过去
         task = db.get(models.ScheduledTask, user_task.id)
@@ -334,10 +355,10 @@ def test_fire_commits_run_job_link_before_dispatch(user_task, monkeypatch):
     from app.core import queue
     from app.services import job_runner, scheduled_tasks as st
 
-    monkeypatch.setattr(
-        job_runner.hot_topics,
-        "refresh",
-        lambda db, **kwargs: {"items": 1},
+    monkeypatch.setitem(
+        job_runner.QUEUE_HANDLERS,
+        "test-queue",
+        lambda db, job: {"summary": "ok"},
     )
     monkeypatch.setattr(queue, "dispatch", lambda job_id, **kwargs: job_runner.run_job(job_id))
 
@@ -404,8 +425,8 @@ def test_zombie_run_does_not_block_forever(user_task):
     try:
         job = models.BackgroundJob(
             owner_user_id=user_task.owner_user_id,
-            queue="hot-topics",
-            kind="hot_topics.refresh",
+            queue="test-queue",
+            kind="test.noop",
             payload={},
             status="queued",
         )
@@ -465,10 +486,10 @@ def test_terminal_write_syncs_run(user_task, monkeypatch):
     from app import models
     from app.services import job_runner, scheduled_tasks as st
 
-    monkeypatch.setattr(
-        job_runner.hot_topics,
-        "refresh",
-        lambda db, **kwargs: {"day": "2026-11-16", "items": 12, "clusters": 5, "notes": []},
+    monkeypatch.setitem(
+        job_runner.QUEUE_HANDLERS,
+        "test-queue",
+        lambda db, job: {"summary": "完成"},
     )
 
     result = st.fire(user_task.id)
@@ -487,15 +508,15 @@ def test_terminal_write_syncs_run(user_task, monkeypatch):
         db.close()
 
 
-def test_hot_topics_failure_marks_job_failed(user_task, monkeypatch):
-    """全源失败必须是 failed，绝不能变成「跑完了，0 条」的假成功。"""
+def test_handler_failure_marks_job_failed(user_task, monkeypatch):
+    """handler 抛 JobFailure 必须落成 failed，绝不能变成「跑完了」的假成功。"""
     from app import models
     from app.services import job_runner, scheduled_tasks as st
 
-    def boom(db, **kwargs):
-        raise job_runner.hot_topics.HotTopicsError("all_sources_failed", "全部采集源失败")
+    def boom(db, job):
+        raise job_runner.JobFailure("all_sources_failed", "全部采集源失败")
 
-    monkeypatch.setattr(job_runner.hot_topics, "refresh", boom)
+    monkeypatch.setitem(job_runner.QUEUE_HANDLERS, "test-queue", boom)
 
     result = st.fire(user_task.id)
     job_runner.run_job(result["jobId"])
@@ -512,10 +533,9 @@ def test_hot_topics_failure_marks_job_failed(user_task, monkeypatch):
         db.close()
 
 
-def test_manual_run_does_not_consume_schedule_slot(client):
+def test_manual_run_does_not_consume_schedule_slot(client, test_type):
     headers = _login(client, "sched-manual")
-    listing = client.get(f"{PREFIX}/schedules", headers=headers).json()["items"]
-    task = next(i for i in listing if i["taskType"] == "hot_topics.refresh")
+    task = _create_test_task(client, headers)
 
     res = client.post(f"{PREFIX}/schedules/{task['id']}/run", headers=headers)
     assert res.status_code == 200, res.text
@@ -527,21 +547,11 @@ def test_manual_run_does_not_consume_schedule_slot(client):
     assert runs["items"][0]["source"] == "manual"
 
 
-def test_concurrent_manual_triggers_yield_single_dispatch(client):
+def test_concurrent_manual_triggers_yield_single_dispatch(client, test_type):
     """两个入口同时抢同一个任务：只有一次投递，其余被跳过（互斥槽位兜底）。"""
     headers = _login(client, "sched-race")
-    listing = client.get(f"{PREFIX}/schedules", headers=headers).json()["items"]
-    task_id = next(i["id"] for i in listing if i["taskType"] == "hot_topics.refresh")
-
-    # 系统任务是会话级共享的：先用例可能留下未释放的槽位，本用例只关心竞争本身。
-    db = _db()
-    try:
-        from app import models
-
-        db.get(models.ScheduledTask, task_id).active_job_id = None
-        db.commit()
-    finally:
-        db.close()
+    task = _create_test_task(client, headers)
+    task_id = task["id"]
 
     results = [client.post(f"{PREFIX}/schedules/{task_id}/run", headers=headers) for _ in range(2)]
     actions = sorted(r.json()["action"] for r in results if r.status_code == 200)
@@ -554,7 +564,7 @@ def test_concurrent_manual_triggers_yield_single_dispatch(client):
 
         from app import models
 
-        task = db.get(models.ScheduledTask, task_id)
+        task_row = db.get(models.ScheduledTask, task_id)
         queued = db.scalar(
             select(models.ScheduledTaskRun)
             .where(
@@ -563,15 +573,15 @@ def test_concurrent_manual_triggers_yield_single_dispatch(client):
                 models.ScheduledTaskRun.job_id == dispatched_job_id,
             )
         )
-        assert queued is not None and queued.job_id == task.active_job_id
+        assert queued is not None and queued.job_id == task_row.active_job_id
     finally:
         db.close()
 
 
-def test_runs_pagination_and_status_filter(client):
+def test_runs_pagination_and_status_filter(client, test_type):
     headers = _login(client, "sched-runs")
-    listing = client.get(f"{PREFIX}/schedules", headers=headers).json()["items"]
-    task_id = next(i["id"] for i in listing if i["taskType"] == "hot_topics.refresh")
+    task = _create_test_task(client, headers)
+    task_id = task["id"]
 
     for _ in range(3):
         client.post(f"{PREFIX}/schedules/{task_id}/run", headers=headers)
@@ -595,8 +605,8 @@ def test_reconcile_fixes_stuck_run(user_task):
     try:
         job = models.BackgroundJob(
             owner_user_id=user_task.owner_user_id,
-            queue="hot-topics",
-            kind="hot_topics.refresh",
+            queue="test-queue",
+            kind="test.noop",
             payload={},
             status="failed",
             error_code="all_sources_failed",
@@ -659,36 +669,20 @@ def test_reconcile_marks_missing_job(user_task):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# user 级任务：热点选题简报（界面增删改查的落脚点）
+# CRUD / 全局共享（统一 system）
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_types_endpoint_lists_system_and_user_types(client):
-    headers = _login(client, "sched-types-both")
-    body = client.get(f"{PREFIX}/schedules/types", headers=headers).json()
-    scopes = {item["key"]: item["scope"] for item in body["items"]}
-    assert scopes["hot_topics.refresh"] == "system"
-    assert scopes["hot_topics.digest"] == "user"
-
-    digest = next(item for item in body["items"] if item["key"] == "hot_topics.digest")
-    fields = {field["name"]: field for field in digest["params"]["fields"]}
-    # 赛道候选随字段下发，前端不该自己维护一份词表
-    assert fields["tracks"]["options"], "赛道路径没有下发给前端"
-    assert fields["tracks"]["type"] == "array"
-    assert fields["create_drafts"]["type"] == "boolean"
-    assert fields["limit"]["default"] == 3
-
-
-def test_user_task_crud_via_api(client):
+def test_task_crud_via_api(client, test_type):
     """界面上的「新建 / 编辑 / 删除」走的就是这三条路径。"""
     headers = _login(client, "sched-crud-user")
     created = client.post(
         f"{PREFIX}/schedules",
         headers=headers,
         json={
-            "taskType": "hot_topics.digest",
+            "taskType": test_type.key,
             "name": "AI 赛道早报",
-            "params": {"tracks": ["AI 与科技"], "min_score": 70, "limit": 2},
+            "params": {"count": 2, "labels": ["a"]},
             "scheduleKind": "cron",
             "cron": "30 8 * * *",
             "timezone": "Asia/Shanghai",
@@ -699,7 +693,7 @@ def test_user_task_crud_via_api(client):
     # 统一 system：不再区分系统/个人任务，所有新建定时配置都是全局的
     assert task["scope"] == "system"
     assert task["editable"] is True
-    assert task["params"] == {"tracks": ["AI 与科技"], "min_score": 70, "limit": 2, "create_drafts": True}
+    assert task["params"] == {"count": 2, "labels": ["a"]}
     assert task["scheduleLabel"] == "每天 08:30"
     assert task["nextRunAt"]
 
@@ -710,11 +704,11 @@ def test_user_task_crud_via_api(client):
     patched = client.patch(
         f"{PREFIX}/schedules/{task_id}",
         headers=headers,
-        json={"name": "AI 赛道早报（改）", "cron": "0 9 * * *", "params": {"tracks": ["AI 与科技"], "limit": 1}},
+        json={"name": "AI 赛道早报（改）", "cron": "0 9 * * *", "params": {"count": 1}},
     )
     assert patched.status_code == 200, patched.text
     assert patched.json()["name"] == "AI 赛道早报（改）"
-    assert patched.json()["params"]["limit"] == 1
+    assert patched.json()["params"]["count"] == 1
     assert patched.json()["nextRunAt"]
 
     ran = client.post(f"{PREFIX}/schedules/{task_id}/run", headers=headers)
@@ -730,14 +724,14 @@ def test_user_task_crud_via_api(client):
     assert client.get(f"{PREFIX}/schedules/{task_id}/runs", headers=headers).status_code == 404
 
 
-def test_task_created_by_one_user_is_global(client):
+def test_task_created_by_one_user_is_global(client, test_type):
     """统一 system：定时配置不再区分系统/个人，一个用户建的另一个用户也能看到、能改。"""
     owner = _login(client, "sched-owner-a")
     other = _login(client, "sched-owner-b")
     created = client.post(
         f"{PREFIX}/schedules",
         headers=owner,
-        json={"taskType": "hot_topics.digest", "scheduleKind": "cron", "cron": "0 7 * * *"},
+        json={"taskType": test_type.key, "scheduleKind": "cron", "cron": "0 7 * * *"},
     )
     assert created.status_code == 201, created.text
     task_id = created.json()["id"]
@@ -747,27 +741,15 @@ def test_task_created_by_one_user_is_global(client):
         item["id"] == task_id
         for item in client.get(f"{PREFIX}/schedules", headers=other).json()["items"]
     )
-    # 开发态下 system 任务可写，别的用户也能改/删
+    # 开发态下 system 任务可写，别的用户也能改
     patched = client.patch(f"{PREFIX}/schedules/{task_id}", headers=other, json={"cron": "0 6 * * *"})
     assert patched.status_code == 200, patched.text
     assert patched.json()["cron"] == "0 6 * * *"
 
 
-def test_digest_rejects_unknown_track(client):
-    headers = _login(client, "sched-bad-track")
-    res = client.post(
-        f"{PREFIX}/schedules",
-        headers=headers,
-        json={
-            "taskType": "hot_topics.digest",
-            "params": {"tracks": ["不存在的赛道"]},
-            "scheduleKind": "cron",
-            "cron": "0 8 * * *",
-        },
-    )
-    assert res.status_code == 400, res.text
-    assert res.json()["code"] == "invalid_params"
-    assert "未知赛道" in res.json()["message"]
+# ══════════════════════════════════════════════════════════════════════
+# 热点服务层（手动刷新 /hot-topics/refresh 的底层，不依赖定时调度）
+# ══════════════════════════════════════════════════════════════════════
 
 
 def _cluster(db, *, title, track, score, day):
@@ -911,96 +893,3 @@ def test_digest_without_any_hot_data_fails_loudly(monkeypatch):
         assert err.value.code == "no_hot_data"
     finally:
         db.close()
-
-
-def test_digest_job_wiring(client, monkeypatch):
-    """调度投递 → topic-digest 队列 → handler 把参数原样交给 build_digest。"""
-    from app.services import job_runner
-
-    captured: dict = {}
-
-    def fake_digest(db, user, workspace, **kwargs):
-        captured.update(kwargs)
-        captured["owner"] = user.id
-        return {"day": "2026-11-17", "total": 0, "draftsCreated": 0, "draftsReused": 0, "items": []}
-
-    monkeypatch.setattr(job_runner.hot_topics, "build_digest", fake_digest)
-
-    headers = _login(client, "sched-digest-wire")
-    created = client.post(
-        f"{PREFIX}/schedules",
-        headers=headers,
-        json={
-            "taskType": "hot_topics.digest",
-            "params": {"tracks": ["AI 与科技"], "min_score": 65, "limit": 2, "create_drafts": False},
-            "scheduleKind": "cron",
-            "cron": "0 7 * * *",
-        },
-    )
-    assert created.status_code == 201, created.text
-
-    ran = client.post(f"{PREFIX}/schedules/{created.json()['id']}/run", headers=headers)
-    assert ran.status_code == 200, ran.text
-    job_id = ran.json()["jobId"]
-
-    job_runner.run_job(job_id)
-
-    assert captured["tracks"] == ["AI 与科技"]
-    assert captured["min_score"] == 65
-    assert captured["limit"] == 2
-    assert captured["create_drafts"] is False
-
-    # 历史里要能看出「这次产出了什么」，只知道成功没有意义
-    runs = client.get(f"{PREFIX}/schedules/{created.json()['id']}/runs", headers=headers).json()
-    latest = runs["items"][0]
-    assert latest["status"] == "succeeded"
-    assert latest["resultSummary"] == "挑出 0 条 · 新建草稿 0 篇"
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 通用脚本任务：manifest 声明驱动 + 脚本执行链路
-# ══════════════════════════════════════════════════════════════════════
-
-
-def test_script_type_is_manifest_driven_and_runnable(client):
-    """manifest 里声明的脚本类型应自动出现在类型清单，且能走完整执行链路。
-
-    这验证了「加一种定时任务 = 一个脚本 + 一条 manifest」的核心承诺：
-    类型清单字段来自声明、参数被校验、脚本 function 被执行、摘要回写进历史。
-    """
-    from app.services import job_runner, scheduled_tasks as st
-
-    assert "script.health_check" in st.TASK_TYPES
-
-    headers = _login(client, "sched-script-run")
-    types = client.get(f"{PREFIX}/schedules/types", headers=headers).json()["items"]
-    script_type = next(t for t in types if t["key"] == "script.health_check")
-    field_names = [f["name"] for f in script_type["params"]["fields"]]
-    assert field_names == ["label", "verbose"]
-
-    created = client.post(
-        f"{PREFIX}/schedules",
-        headers=headers,
-        json={
-            "taskType": "script.health_check",
-            "name": "每周巡检",
-            "params": {"label": "核心链路", "verbose": True},
-            "scheduleKind": "cron",
-            "cron": "0 9 * * 1",
-        },
-    )
-    assert created.status_code == 201, created.text
-    task_id = created.json()["id"]
-
-    ran = client.post(f"{PREFIX}/schedules/{task_id}/run", headers=headers)
-    assert ran.status_code == 200, ran.text
-    job = _db().get(__import__("app").models.BackgroundJob, ran.json()["jobId"])
-    assert job.queue == "script"
-    assert job.kind == "script.health_check"
-
-    job_runner.run_job(job.id)
-
-    runs = client.get(f"{PREFIX}/schedules/{task_id}/runs", headers=headers).json()
-    latest = runs["items"][0]
-    assert latest["status"] == "succeeded"
-    assert latest["resultSummary"] == "核心链路 · 正常"

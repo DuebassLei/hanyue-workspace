@@ -24,7 +24,7 @@ from ..core.config import get_settings
 from ..core.db import SessionLocal
 from ..core.deps import default_workspace
 from ..core.security import decrypt_secret, sign_asset_url
-from . import handdraw, hot_topics, image_provider, image_service, publish_state, wechat_article
+from . import handdraw, image_provider, image_service, publish_state, wechat_article
 from . import scheduled_tasks
 
 RETRYABLE_CODES = {"provider_unreachable", "provider_error", "provider_timeout", "rate_limited"}
@@ -277,82 +277,11 @@ def _advance_publish_job_on_failure(db, publish_job: models.PublishJob, error_co
         )
 
 
-def _handle_hot_topics(db, job: models.BackgroundJob) -> dict:
-    """定时拉热点（docs/scheduled-tasks.md §2.1）。
-
-    手动刷新走 `POST /hot-topics/refresh`，定时走这里，两条路径都调同一个
-    `hot_topics.refresh()`，口径只有一份。全源失败必须标 failed——
-    返回「跑完了，0 个事件」是把失败伪装成成功。
-    """
-    payload = job.payload or {}
-    platforms = payload.get("platforms") or None
-    try:
-        return hot_topics.refresh(db, platforms=platforms)
-    except hot_topics.HotTopicsError as exc:
-        raise JobFailure(
-            exc.code,
-            exc.message,
-            retryable=exc.code in {"all_sources_failed"},
-        ) from exc
-
-
-def _handle_hot_topics_digest(db, job: models.BackgroundJob) -> dict:
-    """定时「热点选题简报」：按赛道挑高分热点，可选为每条建草稿。
-
-    只读已有榜单、不触发采集——采集是系统级任务的事，这里再采集一次就是重复打外网。
-    草稿只写进 job.owner 自己的创作空间，不碰簇的全局状态。
-    """
-    payload = job.payload or {}
-    user = db.get(models.User, job.owner_user_id)
-    if user is None:
-        raise JobFailure("owner_missing", "定时任务所属的用户已不存在")
-    workspace = default_workspace(db, user)
-    try:
-        return hot_topics.build_digest(
-            db,
-            user,
-            workspace,
-            tracks=payload.get("tracks") or None,
-            min_score=int(payload.get("min_score", 60)),
-            limit=int(payload.get("limit", 3)),
-            create_drafts=bool(payload.get("create_drafts", True)),
-        )
-    except hot_topics.HotTopicsError as exc:
-        raise JobFailure(exc.code, exc.message) from exc
-
-
-def _handle_script(db, job: models.BackgroundJob) -> dict:
-    """manifest 脚本任务：将后台上下文交给注册的 runner，并映射可预期失败。"""
-    from . import script_registry
-    from ..scheduled_scripts.base import ScriptContext, ScriptFailure
-
-    payload = job.payload or {}
-    runner = script_registry.runner_for_kind(job.kind)
-    if runner is None:
-        raise JobFailure("script_not_found", f"未找到脚本任务的 runner：{job.kind}")
-
-    # 控制字段不进脚本参数——脚本只该看到 manifest 里声明的那些参数
-    params = {k: v for k, v in payload.items() if k not in ("scheduledTaskId", "scheduledRunId")}
-    ctx = ScriptContext(
-        db=db,
-        owner_user_id=job.owner_user_id,
-        task_id=str(payload.get("scheduledTaskId") or ""),
-        run_id=str(payload.get("scheduledRunId") or ""),
-        job_id=job.id,
-        task_type=job.kind,
-    )
-    try:
-        result = runner(params, ctx)
-    except ScriptFailure as exc:
-        raise JobFailure(exc.code, exc.message, retryable=exc.retryable) from exc
-    return result if isinstance(result, dict) else {"summary": str(result)}
-
-
 def _handle_user_script(db, job: models.BackgroundJob) -> dict:
     """UI 维护脚本执行：只跑投递时锁定的发布快照，统一走进程内脚本通道。
 
-    与内置 manifest 脚本同一契约（run(params, ctx) -> dict）、同一 ScriptContext，
-    区别只在代码来源：这里执行的是用户在界面发布并按版本快照固定的代码。
+    与用户脚本同契约 run(params, ctx) -> dict、同一 ScriptContext；执行的是
+    用户在界面发布并按版本快照固定的代码。
     """
     from . import script_runtime
 
@@ -435,18 +364,7 @@ def _handle_user_script(db, job: models.BackgroundJob) -> dict:
 
 
 def _execute(db, job: models.BackgroundJob) -> dict:
-    handlers = {
-        "ai-image": _handle_ai_image,
-        "image-processing": _handle_image_processing,
-        "platform-sync": _handle_platform_sync,
-        "platform-publish": _handle_platform_publish,
-        "novel": _handle_novel,
-        "hot-topics": _handle_hot_topics,
-        "topic-digest": _handle_hot_topics_digest,
-        "script": _handle_script,
-        "user-script": _handle_user_script,
-    }
-    handler = handlers.get(job.queue)
+    handler = QUEUE_HANDLERS.get(job.queue)
     if not handler:
         raise JobFailure("unknown_queue", f"未注册的任务队列：{job.queue}")
     return handler(db, job)
@@ -1428,4 +1346,15 @@ def _handle_wechat_draft(
         "inlineImages": len(inline_urls),
         "target": "draft",
     }
+
+# 队列 → handler。放在模块末尾：handler 函数都定义完再建表（调用期才查表，
+# 前向引用没问题）；测试用 monkeypatch.setitem 注入测试队列的假 handler。
+QUEUE_HANDLERS = {
+    "ai-image": _handle_ai_image,
+    "image-processing": _handle_image_processing,
+    "platform-sync": _handle_platform_sync,
+    "platform-publish": _handle_platform_publish,
+    "novel": _handle_novel,
+    "user-script": _handle_user_script,
+}
 

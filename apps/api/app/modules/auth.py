@@ -96,23 +96,9 @@ def _has_password_user(db) -> bool:
     ) > 0
 
 
-def _seed_system_tasks(user: models.User, db) -> None:
-    """系统级定时任务（拉热点等）需要一个真实 owner 才能落 background_jobs
-    （owner_user_id 是必填外键），所以绑到首个登录用户。多用户下只有第一条会留下。
-    失败不能影响登录：调度器出问题只记日志，不把用户挡在门外。
-    """
-    try:
-        from ..services import scheduled_tasks
-
-        scheduled_tasks.ensure_system_tasks(db, user.id, user.timezone)
-    except Exception as exc:  # pragma: no cover - 兜底不影响主流程
-        logger.warning("播种系统定时任务失败（不影响登录）：%s", exc)
-
-
 def _session_response(user: models.User, db) -> schemas.LoginResponse:
     workspace = default_workspace(db, user)
     db.commit()
-    _seed_system_tasks(user, db)
     return schemas.LoginResponse(
         token=_token_for(user), user=_user_out(user), workspace_id=workspace.id
     )

@@ -5,9 +5,7 @@ from threading import Thread
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
 
-from . import models
 from .core import pagination, queue
 from .core.config import get_settings
 from .core.db import SessionLocal, init_db
@@ -107,9 +105,6 @@ def _start_scheduler() -> None:
     """
     try:
         with SessionLocal() as session:
-            first_user = session.scalar(select(models.User).order_by(models.User.created_at))
-            if first_user is not None:
-                scheduled_tasks.ensure_system_tasks(session, first_user.id, first_user.timezone)
             report = scheduled_tasks.reconcile_runs(session)
             if any(report.values()):
                 logger.info("定时任务启动对账：%s", report)

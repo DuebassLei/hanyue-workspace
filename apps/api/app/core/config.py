@@ -82,9 +82,6 @@ class Settings(BaseSettings):
     # system 任务（如拉热点）的写权限：dev=仅开发态可经接口改 / any=任何登录用户 /
     # never=一律只读，由 seed 维护。users 表没有角色字段，所以不用虚构管理员角色。
     scheduler_system_write: str = "dev"
-    # 是否在登录/启动时自动播种 system 定时任务（拉热点等）。false 时不播种，
-    # 界面上不再出现内置定时脚本；需要时可在定时脚本页对内置类型手动建任务。
-    scheduler_seed_system_tasks: bool = True
     # 单次上传硬上限（即使不带签名上传会话也生效）
     max_upload_bytes: int = 20 * 1024 * 1024
     # 运行日志：级别、落盘目录（留空则 storage/logs）、单文件上限与保留份数

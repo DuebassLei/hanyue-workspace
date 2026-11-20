@@ -240,8 +240,8 @@ def test_script_test_reports_contract_error(client):
     assert body["error"]["code"] == "script_run_missing"
 
 
-def test_schedule_test_run_for_builtin_script(client):
-    """统一测试入口：内置 manifest 脚本也能回滚试跑。"""
+def test_schedule_test_run_rejects_unknown_type(client):
+    """内置任务类型已移除：非 user-script.* 的 taskType 一律不可测试。"""
     headers = login(client, subject=f"schedule-test-{uuid.uuid4().hex[:6]}")
     response = client.post(
         f"{PREFIX}/schedules/test-run",
@@ -249,10 +249,8 @@ def test_schedule_test_run_for_builtin_script(client):
         json={"taskType": "script.health_check", "params": {"label": "测试"}},
     )
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["ok"] is True, body
-    assert "summary" in (body["result"] or {})
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "script_not_testable"
 
 
 def test_schedule_test_run_for_user_script(client):

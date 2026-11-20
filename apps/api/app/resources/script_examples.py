@@ -1,6 +1,6 @@
 """常用定时脚本示例（单一真相源）。
 
-统一契约：`def run(params, ctx) -> dict`，与内置 manifest 脚本同一执行通道
+统一契约：`def run(params, ctx) -> dict`，与用户脚本同一执行通道（进程内全依赖）
 （进程内、真实 DB、项目全部依赖可用）。ctx 是 ScriptContext：
     ctx.db             当前数据库会话
     ctx.owner_user_id  任务所属用户
