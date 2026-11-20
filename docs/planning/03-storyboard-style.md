@@ -64,7 +64,7 @@
 ```
 
 - `prompt_suffix` 不再冗余存储——手绘风格段由 activation + compose 动态决定（依赖 model_code），存静态字符串会失真；生效文本以 job payload 的 `styleSnapshot` 为准（§4.1）。
-- 备选：`StoryboardScene` 同字段做"场级覆盖"；本期先项目级，结构预留。
+- **场级覆盖（已实现，2026-11-20）**：`StoryboardScene.style_config` 同结构字段，解析链为**场级非空用场级、否则回落项目级**；场景 Create/PATCH 走同一 `_normalize_style_config` 校验（`{}`/null = 清除覆盖），`styleSnapshot` 增加 `source: scene|project` 记录实际生效来源，无风格时快照保持 None（未选风格 prompt 逐字节不变的回归断言保留）。前端在场景树上提供覆盖徽标与「场景画风」弹窗（未覆盖时明示"跟随项目风格"）。
 - 同步改 `StoryboardProjectCreate/Patch/Out`（schemas.py:1125-1134, 1228-1238）。
 
 ### 3.2 数据源（v2 重写，推翻 v1 §8 D3）
