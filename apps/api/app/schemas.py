@@ -1453,6 +1453,17 @@ class ScriptScheduleRunIn(CamelModel):
     params: dict = Field(default_factory=dict)
 
 
+class ScriptScheduleTestIn(CamelModel):
+    """脚本测试验证：不落库回滚执行（测 draft 代码）。"""
+    params: dict = Field(default_factory=dict)
+
+
+class ScheduleTestRunIn(CamelModel):
+    """定时任务统一测试验证入口：内置脚本与 user-script.* 都走这里。"""
+    task_type: str
+    params: dict = Field(default_factory=dict)
+
+
 # ---------- RBAC ----------
 
 

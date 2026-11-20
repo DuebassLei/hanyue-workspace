@@ -1,8 +1,9 @@
-"""受信任 Python 定时脚本 CRUD、发布与手动运行。"""
+"""受信任 Python 定时脚本 CRUD、发布、测试验证与手动运行。"""
 
 from __future__ import annotations
 
 import hashlib
+import time
 
 from fastapi import APIRouter
 from sqlalchemy import select
@@ -98,6 +99,14 @@ def list_scripts(user: CurrentUser, db: DbSession) -> dict:
         )
     ).all()
     return {"items": [_out(script) for script in rows]}
+
+
+@router.get("/examples")
+def list_examples(user: CurrentUser, db: DbSession) -> dict:
+    """常用脚本示例：前端「插入示例」直接取这里的代码。"""
+    from ..resources.script_examples import EXAMPLES
+
+    return {"items": EXAMPLES}
 
 
 @router.get("/{script_id}")
@@ -211,9 +220,82 @@ def publish_script(
     return _out(script)
 
 
-@router.post("/{script_id}/run")
-def run_script_now(
+def run_user_script_test(
+    db,
+    script: models.ScheduledScript,
+    params: dict,
+    *,
+    code: str | None = None,
+    timeout_seconds: int | None = None,
+) -> dict:
+    """脚本测试验证：默认测 draft（发布前验证），回滚执行，不留任何数据。
+
+    返回 {ok, result, stdout, stderr, durationMs, error}；校验失败与执行失败
+    都折进 error（{code, message}），不让前端猜。
+    """
+    source = code if code is not None else (script.draft_code or script.published_code or "")
+    if not source.strip():
+        raise ApiError("script_empty", "脚本代码为空，无法测试")
+    resolved_timeout = int(timeout_seconds or script.timeout_seconds or 30)
+    started = time.perf_counter()
+    ok = True
+    result: dict | None = None
+    stdout = ""
+    stderr = ""
+    error: dict | None = None
+    try:
+        with script_runtime.script_test_session() as test_db:
+            output = script_runtime.run_script(
+                code=source,
+                params=params,
+                context={
+                    "scriptId": script.id,
+                    "scriptName": script.name,
+                    "userId": script.owner_user_id,
+                    "testRun": True,
+                    "taskType": f"user-script.{script.id}",
+                },
+                timeout_seconds=resolved_timeout,
+                db=test_db,
+                owner_user_id=script.owner_user_id,
+                task_type=f"user-script.{script.id}",
+            )
+            result = output["result"]
+            stdout = output["stdout"]
+            stderr = output["stderr"]
+    except script_runtime.ScriptValidationError as exc:
+        ok = False
+        error = {"code": exc.code, "message": exc.message}
+    except script_runtime.ScriptExecutionError as exc:
+        ok = False
+        error = {"code": exc.code, "message": exc.message}
+    return {
+        "ok": ok,
+        "result": result,
+        "stdout": stdout,
+        "stderr": stderr,
+        "durationMs": int((time.perf_counter() - started) * 1000),
+        "error": error,
+    }
+
+
+@router.post("/{script_id}/test")
+def test_script(
     script_id: str,
+    payload: schemas.ScriptScheduleTestIn | None,
+    user: CurrentUser,
+    db: DbSession,
+) -> dict:
+    """测试验证脚本（不落库）：测 draft 代码，验证契约与逻辑后再发布。"""
+    script = _require(script_id, user, db)
+    params = (payload.params if payload is not None else None) or {}
+    if not isinstance(params, dict):
+        raise ApiError("invalid_params", "params 必须是 JSON 对象")
+    return run_user_script_test(db, script, params)
+
+
+@router.post("/{script_id}/run")
+def run_script_now(    script_id: str,
     payload: schemas.ScriptScheduleRunIn | None,
     user: CurrentUser,
     db: DbSession,

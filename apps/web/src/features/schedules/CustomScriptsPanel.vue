@@ -9,6 +9,7 @@ import {
   NInput,
   NInputNumber,
   NModal,
+  NSelect,
   NSpin,
   NSwitch,
   NTag,
@@ -43,6 +44,7 @@ const form = reactive({
   name: '',
   description: '',
   draftCode: '',
+  testParamsText: '{}',
   timeoutSeconds: 30,
   enabled: true,
   publishedVersion: null,
@@ -50,10 +52,27 @@ const form = reactive({
   publishedAt: '',
 })
 
+const examples = ref([])
+const testing = ref(false)
+
+const DEFAULT_CODE = `def run(params, ctx):
+    """统一契约：run(params, ctx) -> dict，界面摘要优先取返回值里的 summary。"""
+    log('params', params)
+    return {"summary": "脚本已执行"}
+`
+
 function fmtTime(value) {
   if (!value) return '—'
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function formatJson(value) {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
 }
 
 function scriptStatus(row) {
@@ -68,6 +87,7 @@ function resetForm(row = null) {
   form.name = row?.name || ''
   form.description = row?.description || ''
   form.draftCode = row?.draftCode || ''
+  form.testParamsText = '{}'
   form.timeoutSeconds = Number(row?.timeoutSeconds || 30)
   form.enabled = row?.enabled ?? true
   form.publishedVersion = row?.publishedVersion ?? null
@@ -92,8 +112,9 @@ function openCreate() {
   editingId.value = ''
   formError.value = ''
   resetForm()
-  form.draftCode = 'def run():\n    return {"summary": "自定义脚本已执行"}\n'
+  form.draftCode = DEFAULT_CODE
   showEditor.value = true
+  loadExamples()
 }
 
 function openEdit(row) {
@@ -101,6 +122,7 @@ function openEdit(row) {
   formError.value = ''
   resetForm(row)
   showEditor.value = true
+  loadExamples()
 }
 
 function validateForm() {
@@ -123,6 +145,65 @@ function payload() {
     draftCode: form.draftCode,
     timeoutSeconds: Number(form.timeoutSeconds),
     enabled: form.enabled,
+  }
+}
+
+async function loadExamples() {
+  if (examples.value.length) return
+  try {
+    const data = await api.get('/schedules/scripts/examples')
+    examples.value = data.items || []
+  } catch (err) {
+    // 示例加载失败不阻塞编辑器，静默降级
+    examples.value = []
+  }
+}
+
+function applyExample(key) {
+  const example = examples.value.find((item) => item.key === key)
+  if (!example) return
+  if (form.draftCode.trim() && !window.confirm(`用「${example.title}」替换当前代码？`)) return
+  form.draftCode = example.code
+  if (!form.name.trim()) form.name = example.title
+  if (!form.description.trim()) form.description = example.description
+}
+
+async function runTest() {
+  formError.value = ''
+  if (!validateForm()) return
+  testing.value = true
+  try {
+    // 测试验证测的是草稿代码；新建脚本先落草稿拿到 id
+    if (!editingId.value) await saveDraft()
+    if (!editingId.value) return
+    const saved = editingId.value
+    let params = {}
+    try {
+      params = JSON.parse(form.testParamsText || '{}')
+    } catch {
+      formError.value = '测试参数 JSON 解析失败，请检查格式'
+      return
+    }
+    result.value = null
+    resultError.value = ''
+    showResult.value = true
+    const data = await api.post(`/schedules/scripts/${saved}/test`, { params })
+    if (data.ok) {
+      result.value = {
+        summary: data.result?.summary || '（脚本未返回 summary）',
+        result: data.result,
+        stdout: data.stdout,
+        stderr: data.stderr,
+        durationMs: data.durationMs,
+      }
+    } else {
+      resultError.value = `${data.error?.code || 'script_failed'}: ${data.error?.message || '执行失败'}`
+    }
+  } catch (err) {
+    resultError.value = err.message
+    showResult.value = true
+  } finally {
+    testing.value = false
   }
 }
 
@@ -270,9 +351,10 @@ defineExpose({ load })
   <section class="scripts-panel">
     <div class="scripts-head">
       <div>
-        <h2 class="scripts-title">自定义脚本</h2>
+        <h2 class="scripts-title">脚本</h2>
         <p class="scripts-sub">
-          保存草稿后发布成「自定义脚本 · 名称」定时任务类型；运行参数由脚本通过 get_params() 读取。
+          与内置任务同一契约：def run(params, ctx) → dict，进程内执行、项目全部依赖可用；
+          发布后可在上方「新建任务」里作为脚本选择并配置时间。
         </p>
       </div>
       <n-button
@@ -322,7 +404,7 @@ defineExpose({ load })
             <n-button size="tiny" tertiary :loading="busyId === row.id" :disabled="!canManage" @click="publishRow(row)">
               发布
             </n-button>
-            <n-button size="tiny" tertiary :loading="busyId === row.id" @click="runNow(row)">试运行</n-button>
+            <n-button size="tiny" tertiary :loading="busyId === row.id" @click="runNow(row)">运行</n-button>
             <n-button
               size="tiny"
               tertiary
@@ -342,7 +424,7 @@ defineExpose({ load })
       v-model:show="showEditor"
       preset="card"
       class="scripts-modal"
-      :title="editingId ? '编辑自定义脚本' : '新建自定义脚本'"
+      :title="editingId ? '编辑脚本' : '新建脚本'"
     >
       <n-form label-placement="top" :show-feedback="false">
         <div class="scripts-form-grid">
@@ -356,13 +438,30 @@ defineExpose({ load })
         <n-form-item label="描述">
           <n-input v-model:value="form.description" type="textarea" :rows="2" placeholder="说明脚本用途" />
         </n-form-item>
+        <n-form-item label="插入常用示例">
+          <n-select
+            :options="examples.map((item) => ({ label: item.title, value: item.key }))"
+            placeholder="从示例开始（会替换当前代码）"
+            :value="null"
+            @update:value="applyExample"
+          />
+        </n-form-item>
         <n-form-item label="Python 代码">
           <n-input
             v-model:value="form.draftCode"
             type="textarea"
             class="code-input"
             :rows="14"
-            placeholder="def run(): ..."
+            placeholder="def run(params, ctx): ..."
+          />
+        </n-form-item>
+        <n-form-item label="测试参数（JSON，测试验证时传给 params）">
+          <n-input
+            v-model:value="form.testParamsText"
+            type="textarea"
+            class="code-input"
+            :rows="2"
+            placeholder="{}"
           />
         </n-form-item>
         <n-form-item label="启用">
@@ -377,26 +476,46 @@ defineExpose({ load })
       </n-form>
       <template #footer>
         <div class="scripts-modal-footer">
-          <n-button :disabled="saving || publishing" @click="showEditor = false">取消</n-button>
-          <n-button :loading="saving" :disabled="publishing" @click="saveDraft">保存草稿</n-button>
-          <n-button type="primary" :loading="publishing" :disabled="saving" @click="publish">
+          <n-button :disabled="saving || publishing || testing" @click="showEditor = false">取消</n-button>
+          <n-button
+            tertiary
+            :loading="testing"
+            :disabled="saving || publishing"
+            @click="runTest"
+          >
+            测试验证
+          </n-button>
+          <n-button :loading="saving" :disabled="publishing || testing" @click="saveDraft">保存草稿</n-button>
+          <n-button
+            type="primary"
+            :loading="publishing"
+            :disabled="saving || testing"
+            @click="publish"
+          >
             保存并发布
           </n-button>
         </div>
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showResult" preset="card" class="scripts-result-modal" title="试运行结果">
+    <n-modal v-model:show="showResult" preset="card" class="scripts-result-modal" title="执行结果">
       <n-alert v-if="resultError" type="error">{{ resultError }}</n-alert>
       <template v-else-if="result">
         <div class="result-meta">
           <span>summary：{{ result.summary || '—' }}</span>
-          <span>exitCode：{{ result.exitCode ?? '—' }}</span>
+          <span v-if="result.exitCode !== undefined && result.exitCode !== null">
+            exitCode：{{ result.exitCode }}
+          </span>
+          <span v-if="result.durationMs !== undefined && result.durationMs !== null">
+            耗时：{{ (result.durationMs / 1000).toFixed(2) }}s
+          </span>
         </div>
+        <p v-if="result.result" class="log-text">result</p>
+        <pre v-if="result.result" class="log-body">{{ formatJson(result.result) }}</pre>
         <p v-if="result.stdout" class="log-text">stdout</p>
-        <p v-if="result.stdout" class="log-body">{{ result.stdout }}</p>
+        <pre v-if="result.stdout" class="log-body">{{ result.stdout }}</pre>
         <p v-if="result.stderr" class="log-text">stderr</p>
-        <p v-if="result.stderr" class="log-body">{{ result.stderr }}</p>
+        <pre v-if="result.stderr" class="log-body">{{ result.stderr }}</pre>
       </template>
       <n-spin v-else :show="true" />
     </n-modal>

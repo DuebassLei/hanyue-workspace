@@ -422,3 +422,64 @@ def preview_schedule(payload: schemas.SchedulePreviewIn, user: CurrentUser) -> d
     except ScheduleError as exc:
         raise _translate(exc) from exc
     return {"timezone": timezone_name, "times": times}
+
+
+@router.post("/test-run")
+def test_run(payload: schemas.ScheduleTestRunIn, user: CurrentUser, db: DbSession) -> dict:
+    """脚本测试验证（统一入口，不落库）：内置脚本与 user-script.* 都回滚执行。
+
+    与「立即执行」的区别：这里挂 savepoint 会话，脚本对数据的任何改动都不落库，
+    也不写 run 账本、不投 job——纯粹验证「参数 + 代码」能不能跑出结果。
+    """
+    import time as _time
+
+    from ..scheduled_scripts.base import ScriptContext, ScriptFailure
+    from ..services import script_registry, script_runtime
+    from .script_schedules import run_user_script_test
+
+    key = (payload.task_type or "").strip()
+    if key.startswith("user-script."):
+        script = db.get(models.ScheduledScript, key.removeprefix("user-script."))
+        if script is None or script.owner_user_id != user.id:
+            raise not_found("脚本")
+        # 任务实际执行的是发布版；测试入口同样以发布版为准（draft 测试走脚本编辑器）
+        return run_user_script_test(
+            db, script, payload.params or {}, code=script.published_code or ""
+        )
+
+    try:
+        spec = scheduled_tasks.task_type(key)
+    except ScheduleError as exc:
+        raise _translate(exc) from exc
+    try:
+        params = scheduled_tasks.validate_params(spec, payload.params or {})
+    except ScheduleError as exc:
+        raise _translate(exc) from exc
+
+    runner = script_registry.runner_for_key(spec.key)
+    if runner is None:
+        raise ApiError("script_not_testable", "该任务类型没有可测试的脚本", status_code=400)
+
+    started = _time.perf_counter()
+    ok = True
+    result: dict | None = None
+    error: dict | None = None
+    with script_runtime.script_test_session() as test_db:
+        ctx = ScriptContext(db=test_db, owner_user_id=user.id, task_type=spec.key)
+        try:
+            raw = runner(params, ctx)
+            result = raw if isinstance(raw, dict) else {"summary": str(raw)}
+        except ScriptFailure as exc:
+            ok = False
+            error = {"code": exc.code, "message": exc.message}
+        except Exception as exc:  # 脚本内部异常原样转述，不让测试 500
+            ok = False
+            error = {"code": "script_failed", "message": f"{type(exc).__name__}: {exc}"}
+    return {
+        "ok": ok,
+        "result": result,
+        "stdout": "",
+        "stderr": "",
+        "durationMs": int((_time.perf_counter() - started) * 1000),
+        "error": error,
+    }

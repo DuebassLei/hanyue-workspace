@@ -9,7 +9,6 @@ import asyncio
 import hashlib
 import logging
 import re
-import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
@@ -350,8 +349,11 @@ def _handle_script(db, job: models.BackgroundJob) -> dict:
 
 
 def _handle_user_script(db, job: models.BackgroundJob) -> dict:
-    """UI 维护脚本执行：只跑投递时锁定的发布快照，并隔离到预装 SDK 的子进程。"""
-    from ..core.security import create_token, epoch_seconds
+    """UI 维护脚本执行：只跑投递时锁定的发布快照，统一走进程内脚本通道。
+
+    与内置 manifest 脚本同一契约（run(params, ctx) -> dict）、同一 ScriptContext，
+    区别只在代码来源：这里执行的是用户在界面发布并按版本快照固定的代码。
+    """
     from . import script_runtime
 
     payload = job.payload or {}
@@ -388,28 +390,16 @@ def _handle_user_script(db, job: models.BackgroundJob) -> dict:
     if not published_code:
         raise JobFailure("script_not_published", "脚本尚未发布")
 
-    try:
-        script_runtime.compile_script(published_code)
-    except script_runtime.ScriptValidationError as exc:
-        raise JobFailure(exc.code, exc.message, retryable=False) from exc
-
     raw_params = payload.get("scriptParams")
     params = raw_params if isinstance(raw_params, dict) else {}
     user = db.get(models.User, job.owner_user_id)
     if user is None:
         raise JobFailure("owner_missing", "定时任务所属的用户已不存在")
-    workspace = default_workspace(db, user)
-    settings = get_settings()
-    token = create_token(
-        user.id,
-        ttl_seconds=settings.script_sdk_token_ttl_seconds,
-        pwd_epoch=epoch_seconds(user.password_changed_at),
-    )
+
     context = {
         "scriptId": script.id,
         "scriptName": script.name,
         "userId": user.id,
-        "workspaceId": workspace.id,
         "scheduledTaskId": str(payload.get("scheduledTaskId") or ""),
         "scheduledRunId": str(payload.get("scheduledRunId") or ""),
         "jobId": job.id,
@@ -421,23 +411,24 @@ def _handle_user_script(db, job: models.BackgroundJob) -> dict:
             params=params,
             context=context,
             timeout_seconds=timeout_seconds,
-            base_url=settings.script_sdk_base_url,
-            token=token,
+            owner_user_id=job.owner_user_id,
+            task_id=str(payload.get("scheduledTaskId") or ""),
+            run_id=str(payload.get("scheduledRunId") or ""),
+            job_id=job.id,
+            task_type=job.kind,
         )
     except script_runtime.ScriptExecutionError as exc:
         raise JobFailure(exc.code, exc.message, retryable=exc.retryable) from exc
-    except subprocess.TimeoutExpired as exc:
-        stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
-        raise JobFailure(
-            "script_timeout",
-            f"脚本执行超时（{timeout_seconds} 秒）{stderr[:1000]}",
-            retryable=True,
-        ) from exc
+    except script_runtime.ScriptValidationError as exc:
+        raise JobFailure(exc.code, exc.message, retryable=False) from exc
+
+    result = output["result"]
+    summary = str(result.get("summary") or "脚本执行完成")[:300]
     return {
-        "summary": "脚本执行完成",
+        **result,
+        "summary": summary,
         "stdout": output["stdout"],
         "stderr": output["stderr"],
-        "exitCode": output["exitCode"],
         "scriptId": script.id,
         "scriptVersion": snapshot_version,
     }

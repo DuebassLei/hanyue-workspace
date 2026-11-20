@@ -1,8 +1,7 @@
-"""受信任 Python 定时脚本：CRUD、静态校验、动态任务类型与子进程执行契约。"""
+"""受信任 Python 定时脚本：CRUD、发布契约校验、测试验证与进程内执行。"""
 
 from __future__ import annotations
 
-import ast
 import uuid
 
 import pytest
@@ -14,7 +13,12 @@ PREFIX = "/api/v1"
 
 
 def _script_code() -> str:
-    return "log('params', get_params())\nlog('ctx', get_context())\n"
+    return (
+        "def run(params, ctx):\n"
+        "    log('params', get_params())\n"
+        "    log('ctx', get_context())\n"
+        "    return {'summary': 'ok'}\n"
+    )
 
 
 def _create_script(client, headers, name: str, *, code: str | None = None):
@@ -66,7 +70,6 @@ def _job(job_id: str):
         return job
 
 
-
 def test_member_is_denied_script_management(client):
     headers = login(client, subject="script-member", role="member")
     response = client.get(f"{PREFIX}/schedules/scripts", headers=headers)
@@ -112,40 +115,45 @@ def test_script_crud_roundtrip(client):
     )
 
 
-@pytest.mark.parametrize(
-    ("code", "error_code"),
-    [
-        ("import os\n", "script_import_forbidden"),
-        ("value = open('x')\n", "script_function_forbidden"),
-        ("value = getattr(log, 'write', None)\n", "script_function_forbidden"),
-        ("__import__('os')\n", "script_import_forbidden"),
-        ("from requests import get\n", "script_import_forbidden"),
-    ],
-)
-def test_publish_rejects_forbidden_code(client, code, error_code):
-    headers = login(client, subject=f"script-static-{uuid.uuid4().hex[:6]}")
-    script = _create_script(client, headers, "静态校验拒绝", code=code)
+def test_publish_rejects_syntax_error(client):
+    headers = login(client, subject=f"script-syntax-{uuid.uuid4().hex[:6]}")
+    script = _create_script(client, headers, "语法错误", code="def run(:\n")
 
     response = client.post(
         f"{PREFIX}/schedules/scripts/{script['id']}/publish", headers=headers, json={}
     )
 
     assert response.status_code == 400, response.text
-    body = response.json()
-    assert body["code"] == error_code
+    assert response.json()["code"] == "script_compile_failed"
+
+
+def test_publish_requires_run_contract(client):
+    """统一契约：脚本必须定义顶层 run；不再做 import/名称白名单。"""
+    headers = login(client, subject=f"script-contract-{uuid.uuid4().hex[:6]}")
+    script = _create_script(
+        client, headers, "缺 run", code="log('顶层代码直接执行也不行')\n"
+    )
+
+    response = client.post(
+        f"{PREFIX}/schedules/scripts/{script['id']}/publish", headers=headers, json={}
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "script_run_missing"
 
 
 @pytest.mark.parametrize(
     "code",
     [
-        "from datetime import datetime\n",
-        "from collections import defaultdict\n",
-        _script_code() + "from datetime import datetime\n",
+        # 进程内全依赖通道：任意 import 都允许（含第三方与 app 自身）
+        "import requests\n\ndef run(params, ctx):\n    return {}\n",
+        "from datetime import datetime\n\ndef run(params, ctx):\n    return {}\n",
+        "from app import models\n\n\ndef run(params, ctx):\n    return {}\n",
     ],
 )
-def test_publish_allows_whitelisted_imports(client, code):
+def test_publish_allows_full_dependency_imports(client, code):
     headers = login(client, subject=f"script-allow-{uuid.uuid4().hex[:6]}")
-    script = _create_script(client, headers, "静态校验允许", code=code)
+    script = _create_script(client, headers, "全依赖 import", code=code)
 
     response = client.post(
         f"{PREFIX}/schedules/scripts/{script['id']}/publish", headers=headers, json={}
@@ -158,15 +166,109 @@ def test_publish_increments_version_and_snapshot(client):
     headers = login(client, subject=f"script-version-{uuid.uuid4().hex[:6]}")
     script = _create_script(client, headers, "版本快照")
 
-    first = _publish_script(client, headers, script["id"], code="log(1)\n")
-    second = _publish_script(client, headers, script["id"], code="log(2)\n")
+    first = _publish_script(client, headers, script["id"], code=_run_log_code("v1"))
+    second = _publish_script(client, headers, script["id"], code=_run_log_code("v2"))
 
     assert first["publishedVersion"] == 1
-    assert first["publishedCode"] == "log(1)\n"
+    assert first["publishedCode"] == _run_log_code("v1")
     assert first["publishedHash"]
     assert second["publishedVersion"] == 2
-    assert second["publishedCode"] == "log(2)\n"
+    assert second["publishedCode"] == _run_log_code("v2")
     assert second["publishedHash"] != first["publishedHash"]
+
+
+def _run_log_code(text: str) -> str:
+    return f"def run(params, ctx):\n    log({text!r})\n    return {{'summary': {text!r}}}\n"
+
+
+def test_script_examples_endpoint(client):
+    headers = login(client, subject=f"script-examples-{uuid.uuid4().hex[:6]}")
+    response = client.get(f"{PREFIX}/schedules/scripts/examples", headers=headers)
+
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    assert len(items) >= 5
+    for item in items:
+        assert item["key"] and item["title"] and "def run(" in item["code"]
+
+
+def test_script_test_runs_draft_and_rolls_back(client):
+    """测试验证：测 draft 代码；脚本里建的数据回滚不落库。"""
+    from app import models
+    from app.core.db import SessionLocal
+
+    headers = login(client, subject=f"script-test-{uuid.uuid4().hex[:6]}")
+    good = _create_script(
+        client,
+        headers,
+        "回滚验证",
+        code=(
+            "def run(params, ctx):\n"
+            "    created = create_draft('测试回滚稿件', '正文')\n"
+            "    return {'summary': 'created', 'created': created}\n"
+        ),
+    )
+
+    response = client.post(
+        f"{PREFIX}/schedules/scripts/{good['id']}/test", headers=headers, json={}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is True, body
+    assert body["result"]["summary"] == "created"
+    assert body["result"]["created"]["contentItemId"]
+
+    with SessionLocal() as db:
+        count = db.scalar(
+            select(models.ContentItem.id).where(models.ContentItem.title == "测试回滚稿件")
+        )
+    assert count is None, "测试验证建的数据必须回滚，不能落库"
+
+
+def test_script_test_reports_contract_error(client):
+    headers = login(client, subject=f"script-test-err-{uuid.uuid4().hex[:6]}")
+    script = _create_script(client, headers, "契约报错", code="value = 1\n")
+
+    response = client.post(
+        f"{PREFIX}/schedules/scripts/{script['id']}/test", headers=headers, json={}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "script_run_missing"
+
+
+def test_schedule_test_run_for_builtin_script(client):
+    """统一测试入口：内置 manifest 脚本也能回滚试跑。"""
+    headers = login(client, subject=f"schedule-test-{uuid.uuid4().hex[:6]}")
+    response = client.post(
+        f"{PREFIX}/schedules/test-run",
+        headers=headers,
+        json={"taskType": "script.health_check", "params": {"label": "测试"}},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is True, body
+    assert "summary" in (body["result"] or {})
+
+
+def test_schedule_test_run_for_user_script(client):
+    headers = login(client, subject=f"schedule-test-user-{uuid.uuid4().hex[:6]}")
+    script = _publish_script(client, headers, _create_script(client, headers, "任务级测试")["id"])
+
+    response = client.post(
+        f"{PREFIX}/schedules/test-run",
+        headers=headers,
+        json={"taskType": f"user-script.{script['id']}", "params": {}},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is True, body
+    assert body["result"]["summary"] == "ok"
 
 
 def test_types_injects_only_published_enabled_scripts(client):
@@ -237,8 +339,8 @@ def test_queued_script_run_keeps_published_version_after_republish(client, monke
     script = _publish_script(
         client,
         headers,
-        _create_script(client, headers, "固定版本") ["id"],
-        code="log('v1')\n",
+        _create_script(client, headers, "固定版本")["id"],
+        code=_run_log_code("v1"),
     )
 
     from app.core import queue
@@ -254,7 +356,7 @@ def test_queued_script_run_keeps_published_version_after_republish(client, monke
     assert queued.status_code == 200, queued.text
     job_id = queued.json()["jobId"]
 
-    _publish_script(client, headers, script["id"], code="log('v2')\n")
+    _publish_script(client, headers, script["id"], code=_run_log_code("v2"))
 
     from app import models
     from app.core.db import SessionLocal
@@ -264,11 +366,12 @@ def test_queued_script_run_keeps_published_version_after_republish(client, monke
     monkeypatch.setattr(
         script_runtime,
         "run_script",
-        lambda **kwargs: observed.update(kwargs) or {"stdout": "ok", "stderr": "", "exitCode": 0},
+        lambda **kwargs: observed.update(kwargs)
+        or {"result": {"summary": "ok"}, "stdout": "ok", "stderr": ""},
     )
     job_runner.run_job(job_id)
 
-    assert observed["code"] == "log('v1')\n"
+    assert observed["code"] == _run_log_code("v1")
     with SessionLocal() as db:
         job = db.get(models.BackgroundJob, job_id)
         assert job.payload["scriptVersion"] == 1
@@ -308,8 +411,9 @@ def test_manual_run_keeps_job_when_dispatch_blocked(client, monkeypatch):
 
 
 def test_handle_user_script_executes_published_snapshot(client, monkeypatch):
+    """统一通道：用户脚本在服务端进程内执行，结果契约与内置脚本一致。"""
     headers = login(client, subject=f"script-run-{uuid.uuid4().hex[:6]}")
-    script = _publish_script(client, headers, _create_script(client, headers, "子进程")["id"])
+    script = _publish_script(client, headers, _create_script(client, headers, "进程内执行")["id"])
 
     from app.core import queue
 
@@ -329,38 +433,26 @@ def test_handle_user_script_executes_published_snapshot(client, monkeypatch):
     job = _job(run_response.json()["jobId"])
     assert job.status == "succeeded"
     result = job.result
-    assert result["exitCode"] == 0
-    assert result["summary"] == "脚本执行完成"
+    assert result["summary"] == "ok"
     assert "params" in result["stdout"]
     assert "hello" in result["stdout"]
     assert "ctx" in result["stdout"]
     assert result["stderr"] == ""
+    assert result["scriptVersion"] == 1
 
 
-def test_validate_script_rejects_manually_constructed_name():
-    from app.services import script_runtime
-
-    tree = ast.Module(
-        body=[ast.Expr(value=ast.Name(id="open", ctx=ast.Load()))],
-        type_ignores=[],
-    )
-    ast.fix_missing_locations(tree)
-    source = ast.unparse(tree)
-
-    with pytest.raises(script_runtime.ScriptValidationError) as error:
-        script_runtime.validate_script(source)
-
-    assert error.value.code == "script_function_forbidden"
-
-
-def test_validate_script_rejects_non_object_runtime_params():
+def test_validate_published_contract_and_param_validation():
     from app.services import scheduled_tasks, script_runtime
 
-    assert script_runtime.validate_published("log(get_params())\n") is None
+    # 契约：必须定义 run
+    assert script_runtime.validate_published(_script_code()) is None
+    with pytest.raises(script_runtime.ScriptValidationError) as error:
+        script_runtime.validate_published("value = 1\n")
+    assert error.value.code == "script_run_missing"
+
+    # 参数校验：params 必须是 JSON 对象
     spec = scheduled_tasks.dynamic_task_type("user-script.test")
     assert scheduled_tasks.validate_params(spec, None) == {}
-
     with pytest.raises(scheduled_tasks.ScheduleError) as error:
         scheduled_tasks.validate_params(spec, [])
-
     assert error.value.code == "invalid_params"

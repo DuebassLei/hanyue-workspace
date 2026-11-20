@@ -142,13 +142,23 @@ def run(params: dict, ctx: ScriptContext) -> dict:
 
 ### 2.1.1 用户自定义脚本（`/schedules/scripts/*`）
 
-与 manifest 受控脚本不同，用户自定义脚本（`ScheduledScript`）由用户在界面上编写、保存草稿、发布后成为
-`user-script.{scriptId}` 类型的定时任务。执行隔离在子进程（`services/script_runtime.py`）：
-发布前 AST 校验（禁 import / global / 危险名）、独立 Python 进程跑、父进程不传 DB 会话，
-通过短期 token 回调 SDK 接口。
+用户脚本（`ScheduledScript`）由用户在界面上编写、保存草稿、发布后成为
+`user-script.{scriptId}` 类型的定时任务。**统一执行通道（2026-11）**：与内置 manifest 脚本
+完全一致——服务端进程内执行、真实 DB 会话、项目全部依赖可用（httpx / jieba / app.services
+都可以直接 import）。没有独立沙箱进程、没有 import 白名单、没有 SDK 子进程回调。
+
+- **发布校验（契约制）**：`services/script_runtime.py` 只做两件事——能编译、顶层定义了
+  `run(params, ctx)`（`run()` / `run(params)` 可省参）。校验失败返回
+  `script_compile_failed` / `script_run_missing`。
+- **统一契约**：内置脚本与用户脚本同签名 `run(params, ctx) -> dict`，同一 `ScriptContext`
+  （`ctx.db` / `ctx.owner_user_id` / `ctx.task_id` / `ctx.run_id` / `ctx.job_id` / `ctx.task_type`）。
+  帮助函数（`get_params` / `get_context` / `get_workspaces` / `create_draft` / `log`）直接注入
+  命名空间，不再走环境变量 + HTTP 的旧 SDK（`script_runtime_sdk.py` 已删除）。
+- **超时**：工作线程等待实现，超时任务按 `script_timeout` 失败（可重试）。线程无法强杀，
+  只能等脚本自然结束——不要写死循环。
 
 **版本快照（执行一致性）**：每次发布都写一条 `ScheduledScriptVersion`（version 递增 + 代码全量），
-并在 `published_version` / `published_hash` 上留指针。投递（定时触发或手动「试运行」）时把
+并在 `published_version` / `published_hash` 上留指针。投递（定时触发或手动「运行」）时把
 `scriptVersion` / `scriptHash` / `scriptCode` **锁进 job payload**：
 
 - 排队期间脚本被修改、停用、重新发布，都不影响已入队的这次执行——worker 只按 payload 里的
@@ -158,9 +168,41 @@ def run(params: dict, ctx: ScriptContext) -> dict:
 - 停用只影响之后的触发，不追溯已入队的执行。快照路径不做 `enabled` 检查（投递时准入已校验过）；
   旧 payload（升级前投递、无快照字段）回退读当前发布版并保留停用检查。
 
-**手动试运行**：`POST /schedules/scripts/{id}/run` 只返回 `{jobId}` 入队回执；前端轮询
-`GET /jobs/{jobId}` 到终态后再展示 `result` 里的 stdout/stderr/exitCode。直接把入队回执当
-执行结果是试运行「看起来不行」的常见根因。
+**测试验证（不落库回滚执行）**：发布/定时之前先验证「参数 + 代码」能不能跑出结果。
+
+| 入口 | 测什么 |
+|---|---|
+| `POST /schedules/scripts/{id}/test` | 脚本编辑器用：测 **draft** 代码（发布前验证），可传 `params` |
+| `POST /schedules/test-run` | 任务级统一入口：内置脚本与 `user-script.*` 都走这里，测**发布版**（用户脚本）/ manifest 声明参数校验后的内置 runner |
+
+两个入口共享 `script_runtime.script_test_session()`：独立连接 + 外部事务 + savepoint 会话，
+脚本里的 commit 只释放 savepoint、退出统一回滚——**对数据的任何改动都不落库**，也不写 run
+账本、不投 job。返回 `{ok, result, stdout, stderr, durationMs, error}`，契约/执行失败都折进
+`error: {code, message}`。
+
+> 实现注意：SQLite 的 pysqlite 驱动默认破坏 SAVEPOINT（隐式提交），测试会话走专用引擎
+> （`script_runtime._get_test_session_factory`，显式事务配方 + WAL + busy_timeout）。
+> 该配方**不能**套在主引擎上——显式 BEGIN 会让读事务持快照，与并发写者相撞时产生
+> 立即的 `SQLITE_BUSY_SNAPSHOT`（等不动，直接 locked）。主引擎保持隐式事务语义。
+
+**手动运行**：`POST /schedules/scripts/{id}/run` 只返回 `{jobId}` 入队回执；前端轮询
+`GET /jobs/{jobId}` 到终态后再展示 `result`（summary / stdout / stderr / scriptVersion）。
+直接把入队回执当执行结果是「看起来不行」的常见根因。
+
+#### 常用脚本示例
+
+`app/resources/script_examples.py` 是示例的唯一真相源，`GET /schedules/scripts/examples` 下发，
+前端脚本编辑器「插入常用示例」直接取用。每个示例都被 `tests/test_script_examples.py`
+逐个「编译 + 契约 + 回滚执行」验证——改示例请同步跑测试。
+
+| key | 用途 | 演示点 |
+|---|---|---|
+| `content_stats` | 按状态统计我的稿件数量 | `ctx.db` + SQLAlchemy 聚合 |
+| `content_weekly` | 最近 N 天更新的稿件清单 | 时间窗口查询 + summary |
+| `hot_snapshot` | 当前热榜 Top N | 读系统级数据 `hot_items` |
+| `http_fetch` | GET 外部 JSON 接口带回结果 | requests 全依赖可用 + 参数校验 |
+| `batch_drafts` | 按标题清单批量建稿（同名跳过） | 写业务数据（ContentItem + 版本） |
+
 
 
 ### 2.2 调度器装配（`services/scheduler.py`）
@@ -245,6 +287,9 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
 | POST | `/schedules/{id}/run` | 登录 | 立即执行一次，走同一条投递路径，`source="manual"` |
 | GET | `/schedules/{id}/runs` | 登录 | keyset 分页，复用 `core/pagination`，`status` 可筛 |
 | POST | `/schedules/preview` | 登录 | 传表达式 + 时区，返回**未来 3 次触发时间**或明确的解析错误 |
+| POST | `/schedules/test-run` | 登录 | 脚本测试验证（统一入口）：内置脚本 + `user-script.*`，回滚执行不落库 |
+| GET | `/schedules/scripts/examples` | 登录 | 常用脚本示例清单（前端「插入示例」数据源） |
+| POST | `/schedules/scripts/{id}/test` | `scheduled-script.admin` | 脚本编辑器测试验证：测 draft 代码，回滚执行不落库 |
 
 `preview` 存在的理由：cron 表达式最容易配错，让用户在保存前就看见「下一次是明天 8:00」比存进去之后猜要便宜得多。
 
@@ -415,7 +460,8 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
 | 不做任务依赖 | 无法表达「A 成功后再跑 B」 | 那是工作流引擎，会把这层薄触发器变成重框架 |
 | 失败只标红不通知 | 用户可能几天后才发现坏了 | 项目没有通知渠道，假装有会比没有更糟。连续失败自动暂停把「持续烧配额」压到 3 次内 |
 | system 任务生产环境只读 | 改频率要动 seed 脚本 | 没有角色字段时不虚构管理员；单租户部署可显式设 `SCHEDULER_SYSTEM_WRITE=any` |
-| 脚本是进程内受控扩展，非在线代码执行 | 加任务要改 manifest + 重启，终端用户不能自建脚本 | 脚本持数据库会话且有 RCE 风险；用户表无角色字段，做不到安全多租户隔离，只信任部署方 |
+| 用户脚本进程内全信任执行 | 脚本持有 DB 会话与全部依赖，等于服务端 RCE | `scheduled-script.admin` 本身就是高信任角色（可建定时任务打任意源）；单租户自部署场景下，能力收益（真实 DB / 全依赖）大于隔离损失。多租户 SaaS 化前必须重新评估这条 |
+| 脚本超时用线程等待实现 | 超时后线程无法强杀，只能等脚本自然结束 | 子进程强杀通道已随统一执行通道退役；可信脚本 + 明确文档化（别写死循环）是可接受代价 |
 
 ## 11. 实施记录
 
@@ -433,10 +479,13 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
 | 事务内建 job | `queue.create_job`（只 flush；`enqueue` = create + commit + dispatch） |
 | 拉热点 handler | `job_runner._handle_hot_topics`（queue=`hot-topics`） |
 | 选题简报 handler | `job_runner._handle_hot_topics_digest`（queue=`topic-digest`） |
-| 用户脚本 handler / 快照执行 | `job_runner._handle_user_script`（payload 快照优先，旧 payload 回退） |
-| 用户脚本接口 / 发布快照 | `modules/script_schedules.py`（publish 写版本行，run 锁快照进 payload） |
+| 用户脚本 handler / 快照执行 | `job_runner._handle_user_script`（payload 快照优先，旧 payload 回退；统一进程内通道） |
+| 用户脚本接口 / 发布快照 / 测试验证 | `modules/script_schedules.py`（publish 写版本行，run 锁快照进 payload，test 回滚执行） |
+| 脚本运行时（契约校验 + 进程内执行 + 测试会话） | `services/script_runtime.py`（`validate_published` / `run_script` / `script_test_session`） |
+| 脚本测试统一入口 | `modules/schedules.py` 的 `POST /schedules/test-run` |
+| 常用脚本示例 | `app/resources/script_examples.py` + `tests/test_script_examples.py` |
 | 页面 | `apps/web/src/views/SchedulesView.vue` + `router.js` |
-| 测试 | `apps/api/tests/test_scheduled_tasks.py`（30 项） |
+| 测试 | `apps/api/tests/test_scheduled_tasks.py`（30 项）+ `test_script_schedules.py` + `test_script_examples.py` |
 
 实现过程中被实测推翻或补充的三处：
 

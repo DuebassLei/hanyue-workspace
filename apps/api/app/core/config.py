@@ -72,8 +72,6 @@ class Settings(BaseSettings):
     # 任务租约：running 超过该秒数仍未推进即视为进程崩溃，启动时回收。
     # 判活看 started_at——长任务须自行周期心跳刷新。
     job_lease_seconds: int = 300
-    script_sdk_token_ttl_seconds: int = 120
-    script_sdk_base_url: str = "http://api:8000"
     # ── 定时任务（docs/scheduled-tasks.md §8）──────────────────────────
     # 总开关。false 时完全不装载调度器，接口与表照常存在，用于排障。
     scheduler_enabled: bool = True

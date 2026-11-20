@@ -72,6 +72,11 @@ const scripts = ref([])
 const scriptsPanel = ref(null)
 const expandedRunId = ref('')
 
+const showTest = ref(false)
+const testing = ref(false)
+const testResult = ref(null)
+const testError = ref('')
+
 const form = reactive({
   taskType: '',
   name: '',
@@ -358,6 +363,28 @@ async function runNow(row) {
   }
 }
 
+async function testRun() {
+  formError.value = ''
+  const params = paramsPayload()
+  if (params === null) return
+  testing.value = true
+  testResult.value = null
+  testError.value = ''
+  showTest.value = true
+  try {
+    const data = await api.post('/schedules/test-run', { taskType: form.taskType, params })
+    if (data.ok) {
+      testResult.value = data
+    } else {
+      testError.value = `${data.error?.code || 'script_failed'}: ${data.error?.message || '执行失败'}`
+    }
+  } catch (err) {
+    testError.value = err.message
+  } finally {
+    testing.value = false
+  }
+}
+
 async function remove(row) {
   // 二次确认放在按钮上（同提示词库的删除），避免误删掉一条配好参数的任务
   if (confirmingId.value !== row.id) {
@@ -420,7 +447,8 @@ onBeforeUnmount(() => {
       <div>
         <h1 class="page-title">定时任务</h1>
         <p class="page-sub">
-          到点自动执行的动作。任务类型由后端注册，这里只管时间与参数；执行仍走统一任务队列，可查历史、可取消。
+          到点自动执行的脚本。一切任务都是脚本（内置脚本 + 你自己写的脚本），这里只管选脚本、配参数与时间；
+          执行走统一任务队列，可查历史、可测试验证。
         </p>
       </div>
       <n-tooltip :disabled="creatableTypes.length > 0">
@@ -517,7 +545,7 @@ onBeforeUnmount(() => {
     <!-- 新建 / 编辑 -->
     <n-modal v-model:show="showEditor" preset="card" class="sched-modal" :title="editingId ? '编辑定时任务' : '新建定时任务'">
       <n-form label-placement="top" :show-feedback="false">
-        <n-form-item label="任务类型">
+        <n-form-item label="脚本">
           <n-select
             v-model:value="form.taskType"
             :options="taskTypeOptions"
@@ -628,9 +656,24 @@ onBeforeUnmount(() => {
       <template #footer>
         <div class="sched-modal-footer">
           <n-button :disabled="saving" @click="showEditor = false">取消</n-button>
+          <n-button tertiary :loading="testing" :disabled="saving" @click="testRun">测试运行</n-button>
           <n-button type="primary" :loading="saving" @click="save">保存</n-button>
         </div>
       </template>
+    </n-modal>
+
+    <!-- 测试运行结果（不落库回滚执行） -->
+    <n-modal v-model:show="showTest" preset="card" class="sched-test-modal" title="测试运行结果">
+      <n-alert v-if="testError" type="error">{{ testError }}</n-alert>
+      <template v-else-if="testResult">
+        <div class="sched-test-meta">
+          <span>summary：{{ testResult.result?.summary || '—' }}</span>
+          <span>耗时：{{ ((testResult.durationMs || 0) / 1000).toFixed(2) }}s（本次执行已回滚，不落库）</span>
+        </div>
+        <pre v-if="testResult.result" class="sched-test-log">{{ formatOutput(testResult.result) }}</pre>
+        <pre v-else-if="testResult.stdout" class="sched-test-log">{{ testResult.stdout }}</pre>
+      </template>
+      <n-spin v-else :show="true" />
     </n-modal>
 
     <!-- 运行历史 -->
@@ -807,6 +850,36 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-2);
+}
+.sched-test-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-sm);
+  color: var(--color-text-secondary);
+}
+.sched-test-log {
+  margin: var(--space-2) 0 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md, 8px);
+  background: var(--color-surface-muted);
+  color: var(--color-text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+:global(.sched-test-modal) {
+  width: min(640px, 94vw);
+  max-height: 88vh;
+}
+:global(.sched-test-modal .n-card-content) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 /* naive-ui 的 modal 走 teleport 渲染到 body，scoped 的 [data-v-*] 属性挂不上去，
    所以这两个类必须写在 :global 里——写进普通 scoped 规则里是静默失效的
