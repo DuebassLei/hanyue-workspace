@@ -157,18 +157,19 @@ def _assert_workflow_tools(db, skill_key: str, owner: str | None, rules: list[di
 
 @router.get("/writing-rules/skills", response_model=list[schemas.WritingSkillSummaryOut])
 def list_rule_skills(user: CurrentUser, db: DbSession) -> list[schemas.WritingSkillSummaryOut]:
-    """可编辑的 Skill 列表（内置全局 + 我的个人副本），带两侧规则计数。"""
+    """可编辑的 Skill 列表（全局条目：内置 + 管理员新建的全局自定义），带两侧规则计数。"""
     entries = db.scalars(
         select(models.SkillRegistryEntry)
         .where(models.SkillRegistryEntry.owner_user_id.is_(None))
         .order_by(models.SkillRegistryEntry.skill_key)
     ).all()
-    categories = {}
+    # 分组来源优先取落库的 category（自定义行没有出厂定义）；旧行缺列值时回退出厂 spec
+    builtin_categories = {}
     try:
         for spec in skill_registry.get_builtin_specs():
-            categories[spec.key] = spec.category
+            builtin_categories[spec.key] = spec.category
     except RuntimeError:
-        categories = {}
+        builtin_categories = {}
 
     def _counts(owner_user_id: str | None) -> dict[str, int]:
         stmt = (
@@ -191,13 +192,92 @@ def list_rule_skills(user: CurrentUser, db: DbSession) -> list[schemas.WritingSk
         schemas.WritingSkillSummaryOut(
             skill_key=entry.skill_key,
             name=entry.display_name,
-            category=categories.get(entry.skill_key, ""),
+            description=entry.description or "",
+            category=entry.category or builtin_categories.get(entry.skill_key, ""),
             global_count=global_counts.get(entry.skill_key, 0),
             personal_count=personal_counts.get(entry.skill_key, 0),
             has_personal_copy=entry.skill_key in personal_keys,
+            source=entry.source or "builtin",
         )
         for entry in entries
     ]
+
+
+@router.post("/writing-rules/skills", response_model=schemas.WritingSkillSummaryOut, status_code=201)
+def create_global_skill(
+    payload: schemas.GlobalSkillCreateIn,
+    user: CurrentUser,
+    db: DbSession,
+    access: AccessDep,
+) -> schemas.WritingSkillSummaryOut:
+    """新增全局 Skill（左侧列表可维护）：全员可见，规则行保存后下一次生成即生效。"""
+    if not access.can("writing_rules.manage"):
+        raise ApiError("permission_denied", "新增全局 Skill 需要「创作规则管理」权限", status_code=403)
+    entry = _translate(skill_registry.create_global_skill, db, payload)
+    return schemas.WritingSkillSummaryOut(
+        skill_key=entry.skill_key,
+        name=entry.display_name,
+        description=entry.description or "",
+        category=entry.category,
+        global_count=0,
+        personal_count=0,
+        has_personal_copy=False,
+        source=entry.source,
+    )
+
+
+@router.patch("/writing-rules/skills/{skill_key}", response_model=schemas.WritingSkillSummaryOut)
+def update_global_skill(
+    skill_key: str,
+    payload: schemas.GlobalSkillUpdateIn,
+    user: CurrentUser,
+    db: DbSession,
+    access: AccessDep,
+) -> schemas.WritingSkillSummaryOut:
+    """改全局自定义 Skill 的名称/描述/语气；内置条目 403。"""
+    if not access.can("writing_rules.manage"):
+        raise ApiError("permission_denied", "修改全局 Skill 需要「创作规则管理」权限", status_code=403)
+    entry = _translate(skill_registry.update_global_skill, db, skill_key, payload)
+    global_count = db.scalar(
+        select(func.count())
+        .select_from(models.SkillWritingRule)
+        .where(
+            models.SkillWritingRule.skill_key == skill_key,
+            models.SkillWritingRule.owner_user_id.is_(None),
+        )
+    )
+    personal_count = db.scalar(
+        select(func.count())
+        .select_from(models.SkillWritingRule)
+        .where(
+            models.SkillWritingRule.skill_key == skill_key,
+            models.SkillWritingRule.owner_user_id == user.id,
+        )
+    )
+    return schemas.WritingSkillSummaryOut(
+        skill_key=entry.skill_key,
+        name=entry.display_name,
+        description=entry.description or "",
+        category=entry.category,
+        global_count=global_count or 0,
+        personal_count=personal_count or 0,
+        has_personal_copy=bool(personal_count),
+        source=entry.source,
+    )
+
+
+@router.delete("/writing-rules/skills/{skill_key}", status_code=204)
+def delete_global_skill(
+    skill_key: str,
+    user: CurrentUser,
+    db: DbSession,
+    access: AccessDep,
+) -> None:
+    """删除全局自定义 Skill（连规则行与授权）；内置条目 403。"""
+    if not access.can("writing_rules.manage"):
+        raise ApiError("permission_denied", "删除全局 Skill 需要「创作规则管理」权限", status_code=403)
+    _translate(skill_registry.delete_global_skill, db, skill_key)
+    prompt_rules.invalidate_cache(db)
 
 
 @router.get("/writing-rules/skills/{skill_key}", response_model=schemas.SkillRulesOut)

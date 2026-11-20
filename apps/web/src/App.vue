@@ -22,7 +22,7 @@ import { useSessionStore } from './stores/session'
 import { useRbacStore } from './stores/rbac'
 import { accentKey, bindShellAppearance, fontKey, setAccent, setFontSize, useNaiveTheme } from './ui/theme'
 import { syncFeedbackTheme } from './ui/feedback'
-import { NAV_GROUPS, breadcrumbsFor, findNav, navEntries } from './ui/nav'
+import { NAV_GROUPS, breadcrumbsFor, findNav, flattenWorkspaceMenus, navEntries } from './ui/nav'
 import { usePageTabs } from './ui/shell'
 import PageTabs from './features/shell/PageTabs.vue'
 import CommandPalette from './features/shell/CommandPalette.vue'
@@ -226,7 +226,8 @@ const itemIcons = {
 
 // 菜单以服务端为准（管理员可在「菜单管理」调整）；拉取失败时回退静态表，
 // 保证后端不可达也能看到骨架，而不是空白侧栏。
-const navGroups = computed(() => (rbac.menus.length ? rbac.menus : NAV_GROUPS))
+// 工作区仅改变展示层级，不改服务端菜单管理与权限配置；兼容已有的分类菜单。
+const navGroups = computed(() => flattenWorkspaceMenus(rbac.menus.length ? rbac.menus : NAV_GROUPS))
 
 /** 叶子页面项（带祖先链），选中态、移动端底栏和展开定位共用 */
 const navPages = computed(() => navEntries(navGroups.value))
@@ -563,10 +564,35 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.main-content {
+/* Naive Layout 自带 scroll-container。只让内容区的这一层负责滚动，
+   外层不能再设 height:100% + auto，否则页头高度会额外撑出第二根滚动条。 */
+.main {
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.main > :deep(.n-layout-scroll-container) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.main-content {
+  flex: 1 1 0;
+  min-height: 0;
+  height: auto;
+  overflow: hidden;
+}
+.main-content > :deep(.n-layout-scroll-container) {
+  height: 100%;
+  overflow-x: hidden;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-y: contain;
+}
+.desktop-tabs,
+.session-alert {
+  flex-shrink: 0;
 }
 
 .topbar {

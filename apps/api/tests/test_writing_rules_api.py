@@ -444,3 +444,151 @@ def test_batch_replace_with_unallowed_tool_rejected_and_db_unchanged(client):
     assert res.json()["code"] == "tool_not_in_skill"
     after = _get_rules(client, headers, key).json()["rules"]
     assert len(after) == len(current), "校验失败不得落库"
+
+
+# ---------------- 全局 Skill 生命周期（左侧列表可维护） ----------------
+
+
+def test_manage_can_create_rename_delete_global_skill(client):
+    headers = login(client)
+
+    # 新增：风格型全局 Skill
+    res = client.post(
+        "/api/v1/writing-rules/skills",
+        headers=headers,
+        json={
+            "skillKey": "team-review-style",
+            "displayName": "团队评审体",
+            "description": "内部评审文风",
+            "category": "style",
+        },
+    )
+    assert res.status_code == 201, res.text
+    created = res.json()
+    assert created["skillKey"] == "team-review-style"
+    assert created["source"] == "custom"
+    assert created["category"] == "style"
+
+    # 列表可见，且带默认 manifest（语气、输出契约）——生成侧开箱即用
+    listed = client.get("/api/v1/writing-rules/skills", headers=headers).json()
+    item = next(row for row in listed if row["skillKey"] == "team-review-style")
+    assert item["source"] == "custom"
+    with SessionLocal() as db:
+        from app.services import skill_registry
+
+        entry = db.scalar(
+            select(models.SkillRegistryEntry).where(
+                models.SkillRegistryEntry.skill_key == "team-review-style"
+            )
+        )
+        assert entry is not None and entry.category == "style"
+        manifest = skill_registry.validate_manifest(dict(entry.manifest or {}))
+        assert manifest.get("tone")
+        assert manifest.get("promptTemplate")
+
+    # 改名
+    res = client.patch(
+        "/api/v1/writing-rules/skills/team-review-style",
+        headers=headers,
+        json={"displayName": "团队评审体 2.0"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["name"] == "团队评审体 2.0"
+
+    # 规则行可写可读（本页主链路对新条目同样成立）
+    res = _put_rules(client, headers, "team-review-style", [_tone_rule("评审语气")])
+    assert res.status_code == 200, res.text
+    assert res.json()["effectiveManifest"]["tone"] == "评审语气"
+
+    # 删除：条目与规则行一起消失
+    assert client.delete("/api/v1/writing-rules/skills/team-review-style", headers=headers).status_code == 204
+    assert _get_rules(client, headers, "team-review-style").status_code == 404
+    listed = client.get("/api/v1/writing-rules/skills", headers=headers).json()
+    assert all(row["skillKey"] != "team-review-style" for row in listed)
+
+
+def test_create_global_skill_rejects_builtin_and_duplicate_keys(client):
+    headers = login(client)
+
+    # 内置 key 冲突：启动同步会把撞 key 的非内置行清掉，必须从入口拒绝
+    res = client.post(
+        "/api/v1/writing-rules/skills",
+        headers=headers,
+        json={"skillKey": "article-drafting", "displayName": "撞内置", "category": "style"},
+    )
+    assert res.status_code == 409
+    assert res.json()["code"] == "skill_key_exists"
+
+    ok = client.post(
+        "/api/v1/writing-rules/skills",
+        headers=headers,
+        json={"skillKey": "dup-check-key", "displayName": "第一个", "category": "style"},
+    )
+    assert ok.status_code == 201, ok.text
+
+    dup = client.post(
+        "/api/v1/writing-rules/skills",
+        headers=headers,
+        json={"skillKey": "dup-check-key", "displayName": "第二个", "category": "style"},
+    )
+    assert dup.status_code == 409
+
+    bad = client.post(
+        "/api/v1/writing-rules/skills",
+        headers=headers,
+        json={"skillKey": "bad key", "displayName": "空白标识", "category": "style"},
+    )
+    assert bad.status_code == 422
+
+    client.delete("/api/v1/writing-rules/skills/dup-check-key", headers=headers)
+
+
+def test_member_cannot_maintain_global_skills(client):
+    headers = login(client, subject="rules-member-2", role="member")
+    res = client.post(
+        "/api/v1/writing-rules/skills",
+        headers=headers,
+        json={"skillKey": "member-skill", "displayName": "越权新增", "category": "style"},
+    )
+    assert res.status_code == 403
+    assert res.json()["code"] == "permission_denied"
+
+    res = client.patch(
+        "/api/v1/writing-rules/skills/article-drafting",
+        headers=headers,
+        json={"displayName": "越权改名"},
+    )
+    assert res.status_code == 403
+    assert client.delete("/api/v1/writing-rules/skills/article-drafting", headers=headers).status_code == 403
+
+
+def test_builtin_skill_resists_rename_delete_and_sync_overwrite(client):
+    """内置条目不可改名/删除；启动同步也不会冲掉全局自定义条目。"""
+    headers = login(client)
+    res = client.patch(
+        "/api/v1/writing-rules/skills/article-drafting",
+        headers=headers,
+        json={"displayName": "改内置"},
+    )
+    assert res.status_code == 403
+    assert client.delete("/api/v1/writing-rules/skills/article-drafting", headers=headers).status_code == 403
+
+    created = client.post(
+        "/api/v1/writing-rules/skills",
+        headers=headers,
+        json={"skillKey": "survive-sync", "displayName": "同步幸存者", "category": "flow"},
+    )
+    assert created.status_code == 201, created.text
+
+    from app.services import skill_registry
+
+    with SessionLocal() as db:
+        result = skill_registry.sync_builtin_skills(db)
+    # 启动夹具已同步过一次，这里幂等重跑即可；关键是自定义条目不被冲掉
+    assert result["removed"] == 0
+
+    listed = client.get("/api/v1/writing-rules/skills", headers=headers).json()
+    item = next(row for row in listed if row["skillKey"] == "survive-sync")
+    assert item["name"] == "同步幸存者", "启动同步不得覆盖全局自定义条目"
+    assert item["category"] == "flow"
+    client.delete("/api/v1/writing-rules/skills/survive-sync", headers=headers)

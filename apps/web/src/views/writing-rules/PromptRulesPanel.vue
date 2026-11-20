@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   NAlert, NButton, NDrawer, NDrawerContent, NEmpty, NForm, NFormItem,
   NInput, NSelect, NSwitch, NTag,
@@ -9,6 +9,8 @@ import { confirm, toast } from '../../ui/feedback'
 
 const props = defineProps({
   canManage: Boolean,
+  // 创作空间「流程」面板 deep-link：分类 key（如 tone_lexicon），进入后滚动定位并高亮
+  focusType: { type: String, default: '' },
 })
 
 // 分类顺序即界面分组顺序；未识别的分类会落到末尾「未分类」。
@@ -58,6 +60,27 @@ const groups = computed(() => {
 })
 const editorTitle = computed(() => (editingKey.value ? '编辑规则' : '新增规则'))
 const isContract = computed(() => form.category === 'contract')
+
+// deep-link 定位：数据加载完成、分组渲染出来之后再滚动，避免空列表时找不到锚点
+const focusFlash = ref('')
+let focusTimer = null
+
+function applyFocus() {
+  if (!props.focusType) return
+  const el = document.getElementById(`prompt-group-${props.focusType}`)
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  focusFlash.value = props.focusType
+  clearTimeout(focusTimer)
+  focusTimer = setTimeout(() => {
+    focusFlash.value = ''
+  }, 2400)
+}
+
+watch(loading, (busy, was) => {
+  if (was && !busy) nextTick(applyFocus)
+})
+onBeforeUnmount(() => clearTimeout(focusTimer))
 
 async function load() {
   loading.value = true
@@ -270,7 +293,13 @@ onMounted(load)
       </template>
     </n-empty>
 
-    <section v-for="group in groups" :key="group.key" class="rule-group">
+    <section
+      v-for="group in groups"
+      :id="`prompt-group-${group.key}`"
+      :key="group.key"
+      class="rule-group"
+      :class="{ 'is-focus': focusFlash === group.key }"
+    >
       <header class="group-head">
         <h3 class="group-title">{{ group.label }}</h3>
         <span class="field-hint">{{ group.items.length }} 条</span>
@@ -420,6 +449,11 @@ onMounted(load)
   border-radius: var(--radius-md);
   background: var(--color-surface-raised);
   overflow: hidden;
+}
+.rule-group.is-focus {
+  border-color: var(--color-primary, #6a5cff);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary, #6a5cff) 22%, transparent);
+  transition: box-shadow 250ms ease, border-color 250ms ease;
 }
 .group-head {
   display: flex;

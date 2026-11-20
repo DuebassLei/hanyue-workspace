@@ -48,7 +48,7 @@ FREE_BLOCKS = {"card", "follow", "sign", "lead", "quote-card"}
 FENCE_BLOCKS = ROW_BLOCKS.keys() | FREE_BLOCKS
 
 #: 小组件注册表：排版页「组件库」与发布抽屉的区块按钮都从这里取。
-#: id 必须与 FENCE_BLOCKS 一一对应（tests/test_wechat_layout.py 有漂移守卫）；
+#: id 对应可插入的 FENCE_BLOCKS；已下架组件仅保留解析和渲染，兼容旧稿件；
 #: snippet 为作者视角的插入语法，sampleBody 为可直接渲染的完整示例（必须零告警）。
 LAYOUT_COMPONENTS: tuple[dict, ...] = (
     {
@@ -70,7 +70,7 @@ LAYOUT_COMPONENTS: tuple[dict, ...] = (
     {
         "id": "stat",
         "label": "数据",
-        "description": "大号数字 + 灰色说明，每行 `数字 | 说明`",
+        "description": "大号数字在上、灰色说明在下，窄屏自动换行，每行 `数字 | 说明`",
         "category": "数据与对比",
         "snippet": "\n\n:::stat\n12% | 说明\n:::\n",
         "sampleBody": ":::stat\n42% | 平均打开率提升\n3.1 倍 | 转发数增长\n:::",
@@ -116,36 +116,12 @@ LAYOUT_COMPONENTS: tuple[dict, ...] = (
         "sampleBody": ":::quote-card 一位资深编辑\n公众号排版的尽头，是把读者的注意力当回事。\n:::",
     },
     {
-        "id": "follow",
-        "label": "引导关注",
-        "description": "文末关注签：主题色标记、关注提示与读者互动文案",
-        "category": "互动",
-        "snippet": "\n\n:::follow\n点个关注，后续更新就不会错过。\n:::\n",
-        "sampleBody": ":::follow\n喜欢这样的内容，就点个关注。\n后续更新与实用技巧，我们会继续整理分享。\n:::",
-    },
-    {
-        "id": "sign",
-        "label": "文末署名",
-        "description": "细分割线 + 灰色小字，落在最后一屏",
-        "category": "互动",
-        "snippet": "\n\n:::sign\n作者 | 你的公众号名\n:::\n",
-        "sampleBody": ":::sign\n狸知 · 公众号排版样文\n:::",
-    },
-    {
-        "id": "support",
-        "label": "支持一下",
-        "description": "文末互动卡：主色圆图标在左，动作名与说明各占一行，长句也不会拆成孤字。围栏名后写 `标题 / 副标题`，每行 `动作 | 说明`",
-        "category": "互动",
-        "snippet": "\n\n:::support 喜欢就支持一下吧 / 你的每一次互动，都是我持续创作的动力\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::\n",
-        "sampleBody": ":::support 喜欢就支持一下吧 / 你的每一次互动，都是我持续创作的动力\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::",
-    },
-    {
         "id": "cheer",
         "label": "暖心支持卡",
-        "description": "手绘暖色支持卡：爱心徽章主视觉 + 主标/胶囊副标 + 三色互动行 + 落款气泡。围栏名后写 `标题 / 副标题 / 气泡`（副标题建议 18 字内，胶囊不换行），每行 `动作 | 说明`，可选 `插图 | {{image1}}`",
+        "description": "手绘暖色支持卡：爱心徽章 + 主标题 + 胶囊副标题。围栏名后写 `标题 / 副标题`，可选 `插图 | {{image1}}`",
         "category": "互动",
-        "snippet": "\n\n:::cheer 喜欢就支持一下吧！ / 你的每一次互动，都是我持续创作的动力～ / 有你真好！\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::\n",
-        "sampleBody": ":::cheer 喜欢就支持一下吧！ / 你的每一次互动，都是我持续创作的动力～ / 有你真好！\n点赞 | 喜欢就点个赞吧，感谢你的支持\n转发 | 分享给更多朋友，让美好一起传递\n推荐 | 推荐给身边的人，让更多人看到\n:::",
+        "snippet": "\n\n:::cheer 喜欢就支持一下吧！ / 你的每一次互动，都是我持续创作的动力～\n:::\n",
+        "sampleBody": ":::cheer 喜欢就支持一下吧！ / 你的每一次互动，都是我持续创作的动力～\n:::",
     },
     {
         "id": "mini-support",
@@ -1023,7 +999,7 @@ def _parse_rows(body_text: str, columns: int, name: str, warnings: list[dict]) -
         elif len(parts) > columns:
             parts = parts[: columns - 1] + [" | ".join(parts[columns - 1 :])]
         rows.append(parts)
-    if not rows:
+    if not rows and name != "cheer":
         warnings.append(
             {"field": "body", "level": "warning", "message": f":::{name} 没有可渲染的行"}
         )
@@ -1360,15 +1336,27 @@ def _cell(text: str, tokens: dict, warnings: list[dict]) -> str:
 
 
 def _render_stat(block: Block, tokens: dict, warnings: list[dict]) -> str:
+    # 数字和说明各占整行，不依赖 flex / 媒体查询，微信窄屏也不会挤出孤字行。
+    # word-wrap 兼容旧 WebView；overflow-wrap 覆盖连续长数字与英文说明。
+    wrap = {"word-wrap": "break-word", "overflow-wrap": "anywhere"}
     rows = "".join(
         _section(
             {
-                "display": "flex",
-                "align-items": "baseline",
-                "margin": "0 0 10px",
+                "margin": "0 0 12px",
+                "padding": "12px 14px",
+                "background": tokens["quoteBg"],
+                "border-radius": 8,
+                "box-sizing": "border-box",
+                "text-align": "left",
             },
-            f'<span style="{_style({"min-width": 96, "font-size": 30, "font-weight": 800, "line-height": 1.1, "color": tokens["primaryColor"], "font-variant-numeric": "tabular-nums", "margin-right": 12})}">{_cell(cols[0], tokens, warnings)}</span>'
-            f'<span style="{_style({"font-size": 14, "line-height": 1.5, "color": tokens["mutedColor"]})}">{_cell(cols[1], tokens, warnings)}</span>',
+            _section(
+                {**wrap, "font-size": 30, "font-weight": 800, "line-height": 1.25, "color": tokens["primaryColor"], "font-variant-numeric": "tabular-nums", "margin": "0 0 6px"},
+                _cell(cols[0], tokens, warnings),
+            )
+            + _section(
+                {**wrap, "font-size": 14, "line-height": 1.6, "color": tokens["mutedColor"]},
+                _cell(cols[1], tokens, warnings),
+            ),
         )
         for cols in block.rows
     )
@@ -1509,11 +1497,10 @@ def _render_cheer(
     image_urls: list[str] | None = None,
     used: set[int] | None = None,
 ) -> str:
-    """暖色支持卡：爱心标题 + 胶囊副标题 + 三色互动卡，可附一张正文图作插画。"""
+    """暖色支持卡：仅保留爱心标题与胶囊副标题，可附一张正文图作插画。"""
     heads = [part.strip() for part in block.meta.split("/", 2)] if block.meta else []
     title = heads[0] if heads else ""
     subtitle = heads[1] if len(heads) > 1 else ""
-    bubble = heads[2] if len(heads) > 2 else ""
 
     # 主视觉徽章：红花作焦点，两侧小花点缀，延续参考图的手绘暖色调。
     hero = (
@@ -1535,9 +1522,9 @@ def _render_cheer(
             f'<span style="{_style({"display": "inline-block", "margin": "12px 0 0", "padding": "5px 14px", "background": "#FFF1CC", "border-radius": 999, "font-size": 12, "line-height": 1.7, "color": "#9C663C"})}">{escape_text(subtitle)}</span>'
         )
 
-    cards: list[str] = []
     art = ""
-    for index, cols in enumerate(block.rows):
+    # 兼容旧稿中的动作行和第三段落款，但不再展示；插图仍按原规则消费。
+    for cols in block.rows:
         if cols[0].strip() in {"插图", "插画"}:
             placeholder = _IMAGE_PLACEHOLDER.fullmatch(cols[1].strip())
             if not placeholder:
@@ -1565,31 +1552,6 @@ def _render_cheer(
                     }
                 )
             continue
-        circle, tag, ink = _CHEER_COLORS[index % len(_CHEER_COLORS)]
-        cards.append(
-            _section(
-                {"display": "flex", "align-items": "flex-start", "margin": "0 0 10px"},
-                f'<span style="{_style({"flex": "0 0 44px", "width": 44, "height": 44, "line-height": "44px", "border-radius": 999, "background": circle, "border": f"1px solid {tag}", "font-size": 22, "text-align": "center", "margin-right": 12})}">{escape_text(_cheer_glyph(cols[0]))}</span>'
-                f'<span style="{_style({"flex": "1", "min-width": "0"})}">'
-                f'<strong style="{_style({"display": "block", "font-size": 14.5, "font-weight": 700, "letter-spacing": 0.5, "line-height": 1.5, "color": ink})}">{_cell(cols[0], tokens, warnings)}</strong>'
-                f'<span style="{_style({"display": "block", "margin": "1px 0 0", "font-size": 12.5, "line-height": 1.6, "color": "#8C735F"})}">{_cell(cols[1], tokens, warnings)}</span>'
-                f"</span>",
-            )
-        )
-
-    body = (
-        # 外层卡片是居中排版（徽章/主标/副标/落款），互动行必须显式左对齐
-        f'<span style="{_style({"display": "block", "margin": "18px 0 0", "text-align": "left"})}">{"".join(cards)}</span>'
-        if cards
-        else ""
-    )
-    footer = (
-        f'<span style="{_style({"display": "block", "margin": "16px 0 0", "text-align": "center"})}">'
-        f'<span style="{_style({"display": "inline-block", "padding": "4px 16px", "background": "#FDEEE9", "border-radius": 999, "font-size": 12, "letter-spacing": 1, "line-height": 1.6, "color": "#C77B69"})}">{escape_text(bubble)}</span>'
-        f"</span>"
-        if bubble
-        else ""
-    )
     return _section(
         {
             "margin": "1.6em 0 1em",
@@ -1599,7 +1561,7 @@ def _render_cheer(
             "border-radius": 22,
             "text-align": "center",
         },
-        head + body + art + footer,
+        head + art,
     )
 
 

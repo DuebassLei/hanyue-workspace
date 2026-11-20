@@ -191,6 +191,15 @@ class DraftPatch(CamelModel):
     body: str | None = None
 
 
+class WritingFlowCheckIn(CamelModel):
+    """流程面板实时检查：携带编辑器当前内容（可含未保存草稿）。
+    body 缺省 = 回退到最新版本，与 GET writing-flow 同口径。"""
+    skill_key: str | None = None
+    title: str | None = None
+    body: str | None = None
+    summary: str | None = None
+
+
 class ContentDetail(CamelModel):
     item: ContentOut
     versions: list[VersionOut]
@@ -704,6 +713,22 @@ class SkillUpdateIn(CamelModel):
     description: str | None = None
     version: str | None = None
     manifest: dict[str, Any] | None = None
+
+
+class GlobalSkillCreateIn(CamelModel):
+    """管理员新增全局 Skill（「创作规则」页左侧列表）；全员可见。"""
+    skill_key: str = Field(min_length=3, max_length=120)
+    display_name: str = Field(min_length=1, max_length=160)
+    description: str = ""
+    category: str = "style"
+    tone: str = ""
+
+
+class GlobalSkillUpdateIn(CamelModel):
+    """改全局自定义 Skill 的显示信息；内置条目不可改。"""
+    display_name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = None
+    tone: str | None = None
 
 
 # ---------- dashboard ----------
@@ -1589,6 +1614,173 @@ class RbacAuditOut(CamelModel):
     created_at: datetime
 
 
+# ---------- originality analysis ----------
+class OriginalityAnalysisRequest(CamelModel):
+    """文章原创度检测请求。"""
+    
+    content_version_id: str
+    compare_scope: str = "all"  # all | own | public
+    detailed: bool = True  # 是否返回相似片段详情
+    use_cache: bool = True  # 是否使用缓存
+
+
+class ScoreboardOut(CamelModel):
+    """五维度评分。
+
+    口径：`similarity` **越高越像**（0-100，与语料库内最像的一篇），其余四维越高越好。
+    `corpusSize` 为 0 时 similarity 无意义，前端应标「样本不足」而不是显示 0%。
+    """
+
+    similarity: int  # 0-100，越高越像
+    originality: int  # 观点独特性
+    structure: int  # 结构创新度
+    data_accuracy: int  # 数据真实度
+    style_uniqueness: int  # 语言风格独特性
+
+
+class SimilarArticleOut(CamelModel):
+    """相似文章摘要。"""
+
+    id: str
+    title: str
+    similarity: float  # 0.0-1.0
+    matching_snippets: list[dict] = Field(default_factory=list)
+
+
+class KeyPointOut(CamelModel):
+    """关键观点分析。"""
+
+    point: str
+    novelty: int  # 创新度 0-100
+    sources: int  # 已有多少篇稿件提过
+
+
+class RiskFlagOut(CamelModel):
+    """风险标记。"""
+
+    type: str  # high_similarity_paragraph | missing_data | etc
+    position: str  # 位置描述
+    severity: str  # warning | error
+    reason: str
+
+
+class AnalysisDetailsOut(CamelModel):
+    """检测详情。"""
+
+    similar_articles: list[SimilarArticleOut] = Field(default_factory=list)
+    key_points: list[KeyPointOut] = Field(default_factory=list)
+    risk_flags: list[RiskFlagOut] = Field(default_factory=list)
+
+
+class OriginalityAnalysisOut(CamelModel):
+    """文章原创度检测结果。"""
+
+    analysis_id: str
+    content_version_id: str
+    analyzed_at: datetime
+    total_score: int  # 0-100
+    level: str  # excellent | good | fair | poor
+    scoreboard: ScoreboardOut
+    details: AnalysisDetailsOut
+    recommendations: list[str] = Field(default_factory=list)
+    model_version: str
+    processing_time_ms: int = 0
+    # v3.0：一句话结论 + 语料规模 + 是否命中缓存
+    summary: str = ""
+    corpus_size: int = 0
+    self_version_count: int = 0
+    cached: bool = False
+
+
+# ═══════════════════════════════════════════════════════════════
+# Phase 2 & 3：高级功能 Schema
+# ═══════════════════════════════════════════════════════════════
+
+
+class BatchAnalysisRequest(CamelModel):
+    """批量检测请求 (Phase 3)"""
+    
+    content_version_ids: list[str] = Field(min_items=1, max_items=100)
+    compare_scope: str = Field(default="all", pattern="^(all|own|public)$")
+    use_advanced_analysis: bool = Field(default=True)
+    priority: str = Field(default="normal", pattern="^(low|normal|high)$")
+
+
+class TextEmbeddingOut(CamelModel):
+    """文本向量输出 (Phase 3)"""
+    
+    content_version_id: str
+    embedding_dim: int
+    model_version: str
+    created_at: datetime
+    is_deprecated: bool = False
+
+
+class KeywordAnalysisOut(CamelModel):
+    """关键词分析结果 (Phase 2)"""
+    
+    keyword: str
+    weight: float  # TF-IDF 权重
+    frequency: int
+    is_novel: bool  # 是否为原创词
+
+
+class StructureAnalysisOut(CamelModel):
+    """结构分析结果 (Phase 2)"""
+    
+    outline_depth: int  # 大纲深度
+    section_count: int  # 章节数
+    diversity_score: float  # 结构多样性 (0-100)
+    balance_score: float  # 结构平衡度 (0-100)
+    suggestions: list[str] = Field(default_factory=list)
+
+
+class SemanticSimilarityOut(CamelModel):
+    """语义相似度 (Phase 3)"""
+    
+    text1_id: str
+    text2_id: str
+    similarity: float  # 0-1
+    similarity_type: str  # "semantic" | "tfidf"
+    matching_concepts: list[str] = Field(default_factory=list)
+
+
+class AnalysisReportOut(CamelModel):
+    """检测报告 (Phase 3)"""
+    
+    report_id: str
+    analysis_id: str
+    title: str
+    export_formats: dict = Field(default_factory=dict)  # {"pdf": "url", "excel": "url"}
+    status: str  # "generating" | "ready" | "failed"
+    generated_at: datetime
+    expires_at: datetime | None = None
+
+
+class BatchTaskStatusOut(CamelModel):
+    """批量任务状态 (Phase 3)"""
+    
+    task_id: str
+    status: str  # "pending" | "running" | "completed" | "failed"
+    progress: int  # 0-100
+    total_items: int
+    completed_items: int
+    failed_items: int = 0
+    estimated_completion_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class AnalysisHistoryItemOut(CamelModel):
+    """检测历史记录 (Phase 3)"""
+    
+    revision: int
+    score: int
+    score_change: int | None = None
+    improvements: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+
 # ---------------------------------------------------------------- 创作规则（T4）
 
 
@@ -1639,10 +1831,13 @@ class SkillRulesOut(CamelModel):
 class WritingSkillSummaryOut(CamelModel):
     skill_key: str
     name: str = ""
+    description: str = ""
     category: str = ""
     global_count: int = 0
     personal_count: int = 0
     has_personal_copy: bool = False
+    # builtin=出厂条目（不可改名/删除）；custom=管理员新建的全局 Skill（可维护）
+    source: str = "builtin"
 
 
 class PromptRuleOut(CamelModel):

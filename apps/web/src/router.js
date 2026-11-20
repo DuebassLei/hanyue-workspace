@@ -15,6 +15,7 @@ const routes = [
   { path: '/schedules', name: 'schedules', component: () => import('./views/SchedulesView.vue'), meta: { title: '定时任务', icon: '⏱', permission: 'schedules.use' } },
   { path: '/calendar', name: 'calendar', component: () => import('./views/CalendarView.vue'), meta: { title: '内容日历', icon: '▦', permission: 'calendar.view' } },
   { path: '/studio', name: 'studio', component: () => import('./views/StudioView.vue'), meta: { title: '创作空间', icon: '✎', permission: 'studio.use' } },
+  { path: '/originality', name: 'originality', component: () => import('./views/OriginalityView.vue'), meta: { title: '原创检测', icon: '◈', permission: 'studio.use' } },
   { path: '/articles', name: 'articles', component: () => import('./views/ArticlesView.vue'), meta: { title: '文章管理', icon: '▤', permission: 'studio.use' } },
   { path: '/cards', name: 'cards', component: () => import('./views/CardsView.vue'), meta: { title: '图文卡片', icon: '▤', permission: 'cards.use' } },
   { path: '/images', name: 'images', component: () => import('./views/ImageGenView.vue'), meta: { title: '图片生成', icon: '✦', permission: 'images.use' } },

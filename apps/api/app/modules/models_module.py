@@ -497,7 +497,12 @@ async def text_generation(
         else None
     )
     system_prompt = (
-        ai_article.build_system_prompt(selected_skill, db=db, owner_user_id=user.id)
+        ai_article.build_system_prompt(
+            selected_skill,
+            db=db,
+            owner_user_id=user.id,
+            use_layout_components=payload.constraints.get("useLayoutComponents") is True,
+        )
         if payload.task_type in style_tasks
         else None
     )

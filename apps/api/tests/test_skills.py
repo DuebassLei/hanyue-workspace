@@ -257,8 +257,10 @@ def test_article_resolution_ignores_untrusted_and_other_users(client):
         assert fallback is None or fallback.skill_key == "article-drafting"
 
 
-def test_legacy_ownerless_custom_skill_is_hidden(client):
-    """旧版创建路径留下的无归属行不再展示，也解析不到（等待 repair 脚本清理）。"""
+def test_ownerless_custom_skill_visible_but_untrusted_is_unresolvable(client):
+    """无归属 custom 行现在是「全局自定义 Skill」（创作规则页可维护）：
+    列表可见，但 untrusted 的不能启用，也解析不到（回退内置默认）。
+    """
     headers = login(client, "skill-legacy")
     with SessionLocal() as db:
         db.add(
@@ -278,7 +280,7 @@ def test_legacy_ownerless_custom_skill_is_hidden(client):
 
     try:
         keys = [s["skillKey"] for s in client.get("/api/v1/skills", headers=headers).json()]
-        assert "legacy-global-style" not in keys
+        assert "legacy-global-style" in keys, "全局自定义 Skill 应对成员可见"
         with SessionLocal() as db:
             resolved = ai_article.resolve_skill(db, "any-user", "legacy-global-style")
             assert resolved is None or resolved.skill_key == "article-drafting"

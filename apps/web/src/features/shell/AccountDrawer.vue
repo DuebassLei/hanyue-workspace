@@ -81,6 +81,13 @@ const dirty = computed(
 )
 const minPasswordLength = computed(() => session.authConfig?.passwordMinLength || 8)
 
+// 外观与主题：从「设置」页移入个人抽屉，主题属于个人偏好，跟随账号入口
+const THEMES = [
+  { value: 'system', label: '跟随系统' },
+  { value: 'light', label: '浅色' },
+  { value: 'dark', label: '暗色' },
+]
+
 function resetForm() {
   form.displayName = session.user?.displayName || ''
   form.timezone = session.user?.timezone || 'Asia/Shanghai'
@@ -234,6 +241,29 @@ onBeforeUnmount(() => {
               <span class="identity-sub">{{ providerLabel }}</span>
             </div>
           </div>
+
+          <section class="block">
+            <h3 class="block-title">外观与主题</h3>
+            <div class="theme-row">
+              <n-button
+                v-for="item in THEMES"
+                :key="item.value"
+                size="small"
+                :type="session.theme === item.value ? 'primary' : 'default'"
+                :secondary="session.theme !== item.value"
+                @click="session.setTheme(item.value)"
+              >
+                {{ item.label }}
+              </n-button>
+            </div>
+            <p class="field-hint">选择后立即生效并跨会话保存；首次加载遵循系统偏好。</p>
+            <div class="theme-preview">
+              <span class="theme-dot" style="--dot: var(--color-warning)">主色</span>
+              <span class="theme-dot" style="--dot: var(--color-success)">成功</span>
+              <span class="theme-dot" style="--dot: var(--color-info)">信息</span>
+              <span class="theme-dot" style="--dot: var(--color-danger)">错误</span>
+            </div>
+          </section>
 
           <section class="block">
             <h3 class="block-title">可编辑</h3>
@@ -458,6 +488,34 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.theme-row {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.theme-preview {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.theme-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--font-xs);
+  color: var(--color-text-secondary);
+}
+
+.theme-dot::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dot);
 }
 
 .block-value {

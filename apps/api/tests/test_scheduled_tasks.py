@@ -328,6 +328,30 @@ def test_fire_dispatches_job_and_records_run(user_task, monkeypatch):
         db.close()
 
 
+def test_fire_commits_run_job_link_before_dispatch(user_task, monkeypatch):
+    """A fast worker may finish inside dispatch; the run must already be linked."""
+    from app import models
+    from app.core import queue
+    from app.services import job_runner, scheduled_tasks as st
+
+    monkeypatch.setattr(
+        job_runner.hot_topics,
+        "refresh",
+        lambda db, **kwargs: {"items": 1},
+    )
+    monkeypatch.setattr(queue, "dispatch", lambda job_id, **kwargs: job_runner.run_job(job_id))
+
+    result = st.fire(user_task.id)
+
+    db = _db()
+    try:
+        run = db.get(models.ScheduledTaskRun, result["runId"])
+        assert run.job_id == result["jobId"]
+        assert run.status == "succeeded"
+    finally:
+        db.close()
+
+
 def test_cas_rejects_stale_token(user_task):
     """两个副本读到同一个触发点：只有第一个 CAS 成功，第二个必须放弃。"""
     from app.services import scheduled_tasks as st
@@ -350,6 +374,8 @@ def test_fire_skips_when_previous_run_still_running(user_task):
 
     db = _db()
     try:
+        task = db.get(models.ScheduledTask, user_task.id)
+        task.active_job_id = "legacy-running"  # 模拟上一轮已占用互斥槽位
         db.add(
             models.ScheduledTaskRun(
                 task_id=user_task.id,
@@ -499,6 +525,47 @@ def test_manual_run_does_not_consume_schedule_slot(client):
 
     runs = client.get(f"{PREFIX}/schedules/{task['id']}/runs", headers=headers).json()
     assert runs["items"][0]["source"] == "manual"
+
+
+def test_concurrent_manual_triggers_yield_single_dispatch(client):
+    """两个入口同时抢同一个任务：只有一次投递，其余被跳过（互斥槽位兜底）。"""
+    headers = _login(client, "sched-race")
+    listing = client.get(f"{PREFIX}/schedules", headers=headers).json()["items"]
+    task_id = next(i["id"] for i in listing if i["taskType"] == "hot_topics.refresh")
+
+    # 系统任务是会话级共享的：先用例可能留下未释放的槽位，本用例只关心竞争本身。
+    db = _db()
+    try:
+        from app import models
+
+        db.get(models.ScheduledTask, task_id).active_job_id = None
+        db.commit()
+    finally:
+        db.close()
+
+    results = [client.post(f"{PREFIX}/schedules/{task_id}/run", headers=headers) for _ in range(2)]
+    actions = sorted(r.json()["action"] for r in results if r.status_code == 200)
+    assert actions == ["dispatched", "skipped"], [r.text for r in results]
+    dispatched_job_id = next(r.json()["jobId"] for r in results if r.json()["action"] == "dispatched")
+
+    db = _db()
+    try:
+        from sqlalchemy import select
+
+        from app import models
+
+        task = db.get(models.ScheduledTask, task_id)
+        queued = db.scalar(
+            select(models.ScheduledTaskRun)
+            .where(
+                models.ScheduledTaskRun.task_id == task_id,
+                models.ScheduledTaskRun.status == "queued",
+                models.ScheduledTaskRun.job_id == dispatched_job_id,
+            )
+        )
+        assert queued is not None and queued.job_id == task.active_job_id
+    finally:
+        db.close()
 
 
 def test_runs_pagination_and_status_filter(client):

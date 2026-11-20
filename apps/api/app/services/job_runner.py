@@ -350,7 +350,7 @@ def _handle_script(db, job: models.BackgroundJob) -> dict:
 
 
 def _handle_user_script(db, job: models.BackgroundJob) -> dict:
-    """UI 维护脚本执行：只跑发布快照，并隔离到预装 SDK 的子进程。"""
+    """UI 维护脚本执行：只跑投递时锁定的发布快照，并隔离到预装 SDK 的子进程。"""
     from ..core.security import create_token, epoch_seconds
     from . import script_runtime
 
@@ -361,9 +361,30 @@ def _handle_user_script(db, job: models.BackgroundJob) -> dict:
         raise JobFailure("script_not_found", "脚本不存在或已被删除")
     if script.owner_user_id != job.owner_user_id:
         raise JobFailure("script_not_found", "脚本不存在或无权访问")
-    if not script.enabled:
-        raise JobFailure("script_disabled", "脚本已停用")
-    published_code = script.published_code or ""
+
+    # 快照优先：排队期间脚本被改/停用/重新发布，都不影响已入队的这一次执行。
+    # 旧 payload（升级前投递的）没有快照字段，回退读当前发布版。
+    snapshot_version = payload.get("scriptVersion")
+    if snapshot_version is not None:
+        version = db.scalar(
+            select(models.ScheduledScriptVersion).where(
+                models.ScheduledScriptVersion.script_id == script_id,
+                models.ScheduledScriptVersion.version == int(snapshot_version),
+            )
+        )
+        if version is None:
+            raise JobFailure(
+                "script_snapshot_missing",
+                f"执行快照（v{snapshot_version}）缺失，可能已被清理",
+            )
+        published_code = version.code
+        timeout_seconds = int(payload.get("scriptTimeoutSeconds") or script.timeout_seconds)
+        # 快照路径不做 enabled 检查：投递时准入已校验，停用只影响之后的触发。
+    else:
+        if not script.enabled:
+            raise JobFailure("script_disabled", "脚本已停用")
+        published_code = script.published_code or ""
+        timeout_seconds = script.timeout_seconds
     if not published_code:
         raise JobFailure("script_not_published", "脚本尚未发布")
 
@@ -399,7 +420,7 @@ def _handle_user_script(db, job: models.BackgroundJob) -> dict:
             code=published_code,
             params=params,
             context=context,
-            timeout_seconds=script.timeout_seconds,
+            timeout_seconds=timeout_seconds,
             base_url=settings.script_sdk_base_url,
             token=token,
         )
@@ -409,7 +430,7 @@ def _handle_user_script(db, job: models.BackgroundJob) -> dict:
         stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
         raise JobFailure(
             "script_timeout",
-            f"脚本执行超时（{script.timeout_seconds} 秒）{stderr[:1000]}",
+            f"脚本执行超时（{timeout_seconds} 秒）{stderr[:1000]}",
             retryable=True,
         ) from exc
     return {
@@ -418,6 +439,7 @@ def _handle_user_script(db, job: models.BackgroundJob) -> dict:
         "stderr": output["stderr"],
         "exitCode": output["exitCode"],
         "scriptId": script.id,
+        "scriptVersion": snapshot_version,
     }
 
 

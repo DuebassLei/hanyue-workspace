@@ -191,7 +191,25 @@ async function runNow(row) {
   resultError.value = ''
   showResult.value = true
   try {
-    result.value = await api.post(`/schedules/scripts/${row.id}/run`)
+    // /run 只是入队回执（jobId）；真正的执行结果要轮询 jobs 接口到终态。
+    const { jobId } = await api.post(`/schedules/scripts/${row.id}/run`)
+    if (!jobId) throw new Error('入队失败：未返回 jobId')
+    const deadline = Date.now() + 120_000
+    let job = null
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      job = await api.get(`/jobs/${jobId}`)
+      if (['succeeded', 'failed', 'cancelled', 'stopped'].includes(job.status)) break
+    }
+    if (!job || !['succeeded', 'failed', 'cancelled', 'stopped'].includes(job.status)) {
+      throw new Error('执行超时：任务仍在队列中，请稍后在执行历史里查看结果')
+    }
+    if (job.status !== 'succeeded') {
+      resultError.value = job.errorMessage || `执行失败（${job.errorCode || job.status}）`
+      result.value = job.result || null
+      return
+    }
+    result.value = job.result || {}
   } catch (err) {
     resultError.value = err.message
   } finally {

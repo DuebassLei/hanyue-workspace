@@ -110,7 +110,7 @@ async function doLogout() {
               stroke-linecap="round"
             />
           </svg>
-          外观与设置
+          设置
         </button>
         <div class="account-divider" role="separator" />
         <button type="button" class="account-item is-danger" role="menuitem" @click="confirming = true">

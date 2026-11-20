@@ -143,11 +143,15 @@ Docker 装在 WSL Ubuntu 里（无 Docker Desktop）时，daemon 需手动启动
 
 ### 验证与测试
 
+开发中走增量：后端只跑改动对应的测试文件（`pytest tests/test_<模块>.py -q` 或 `-k "关键词"`），前端靠 `npm run dev` 的热更新看效果，不要每次改动都全量编译。完整约定见 [`AGENT.md`](AGENT.md) 的「测试与验证节奏」。
+
+全量回归留给交付前（提交 / 合并 / 发版）跑一次：
+
 ```bash
 cd apps/api
-./.venv/Scripts/python.exe -m pytest -q                  # 当前 629 passed
+./.venv/Scripts/python.exe -m pytest -q                  # 全量回归
 ./.venv/Scripts/python.exe -m compileall -q app
-cd ../web && npm run build                               # 前端构建
+cd ../web && npm run build                               # 前端生产构建
 ```
 
 首次启动自检：打开 `/docs` → 用 `POST /api/v1/auth/login`（body `{"subject":"user-a"}`，**仅开发态可用**）取 token → 打开前端任一页面确认数据加载。未配置模型连接时生成接口会明确返回 `provider_unavailable`，这是预期行为。

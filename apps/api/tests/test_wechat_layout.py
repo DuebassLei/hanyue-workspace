@@ -365,11 +365,13 @@ def test_render_endpoint_rejects_unknown_theme(client):
 # ---------- 小组件注册表与 token schema ----------
 
 
-def test_layout_components_cover_all_fences():
+def test_layout_components_cover_active_fences():
     from app.services import wechat_layout
 
     ids = {item["id"] for item in wechat_layout.LAYOUT_COMPONENTS}
-    assert ids == set(wechat_layout.FENCE_BLOCKS)
+    retired = {"follow", "sign", "support"}
+    assert ids.isdisjoint(retired)
+    assert ids == set(wechat_layout.FENCE_BLOCKS) - retired
     for item in wechat_layout.LAYOUT_COMPONENTS:
         assert item["label"] and item["snippet"] and item["sampleBody"]
         # snippet 是正文中间插入的围栏块：前后空行包裹，以 ::: 开头的围栏合法
@@ -387,7 +389,7 @@ def test_components_endpoint(client):
     components = res.json()["components"]
     assert {item["id"] for item in components} == {
         "lead", "card", "stat", "steps", "compare", "layers", "checklist",
-        "quote-card", "follow", "sign", "support", "cheer", "mini-support",
+        "quote-card", "cheer", "mini-support",
     }
 
 
@@ -406,8 +408,11 @@ def test_cheer_component_renders_warm_card_and_optional_art():
     html = result["html"]
     assert result["warnings"] == [], result["warnings"]
     assert "喜欢就支持一下吧！" in html
-    assert "有你真好！" in html
-    assert "点赞" in html and "转发" in html and "推荐" in html
+    assert "你的每一次互动，都是我持续创作的动力～" in html
+    assert "❤️" in html and "🌼" in html
+    assert "有你真好！" not in html
+    assert "点赞" not in html and "转发" not in html and "推荐" not in html
+    assert "喜欢就点个赞吧，感谢你的支持" not in html
     assert "https://mmbiz.qpic.cn/cat.jpg" in html
     assert html.count("https://mmbiz.qpic.cn/cat.jpg") == 1  # 插图占位已消费，不再追加到文末
     assert wechat_layout.lint_html(html) == []
@@ -474,6 +479,28 @@ def test_style_appends_px_only_to_absolute_line_heights():
     # 已写单位的字符串不重复加工
     assert wechat_layout._style({"line-height": "58px"}) == "line-height:58px"
     assert wechat_layout._style({"font-size": 14}) == "font-size:14px"
+
+
+def test_stat_stacks_values_and_descriptions_and_wraps_long_content():
+    from app.services import wechat_layout
+
+    value = "123456789012345678901234567890"
+    description = "这是一段较长的数据说明，用于确认手机窄屏不会挤成孤字行。"
+    result = wechat_layout.render_document(
+        f":::stat\n{value} | {description}\n3.1 倍 | **增长** <说明>\n:::",
+    )
+    html = result["html"]
+    assert result["warnings"] == []
+    assert wechat_layout.lint_html(html) == []
+    assert "display:flex" not in html and "min-width" not in html
+    collector = _StyleNodeCollector(lambda props: "overflow-wrap" in props)
+    collector.feed(html)
+    assert [text for _, text in collector.matches] == [value, description, "3.1 倍", "增长 <说明>"]
+    for props, _ in collector.matches:
+        assert props["overflow-wrap"] == "anywhere"
+        assert props["word-wrap"] == "break-word"
+        assert "width" not in props  # 不给数字或说明分配固定窄列
+    assert "<strong" in html and "&lt;说明&gt;" in html
 
 
 def test_no_component_renders_an_absurd_line_height():
@@ -594,10 +621,10 @@ def test_narrow_columns_hold_only_short_labels():
 
 
 def test_interaction_cards_render_action_rows_not_columns():
-    """support / cheer 的互动区是「图标在左 + 动作名/说明各一行」，不再用百分比多列。"""
+    """旧版 support 的互动区保持行式；cheer 已精简为仅头部。"""
     from app.services import wechat_layout
 
-    for fence, desc in (("support", "喜欢就点个赞吧，感谢你的支持"), ("cheer", "分享给更多朋友，让美好一起传递")):
+    for fence, desc in (("support", "喜欢就点个赞吧，感谢你的支持"),):
         html = wechat_layout.render_document(
             f":::{fence} 标题 / 副标题\n点赞 | {desc}\n转发 | {desc}\n:::", None, []
         )["html"]

@@ -56,15 +56,15 @@ def _redis_client():
     return redis.Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
 
 
-def enqueue(
+def create_job(
     db,
     *,
     owner_user_id: str,
     queue: str,
     kind: str,
     payload: dict,
-) -> str:
-    """创建任务并投递；返回 jobId。调用方负责在此之前已 commit 业务实体。"""
+) -> models.BackgroundJob:
+    """Add a queued job to the caller's transaction without committing or dispatching."""
     job = models.BackgroundJob(
         owner_user_id=owner_user_id,
         queue=queue,
@@ -73,6 +73,26 @@ def enqueue(
         status="queued",
     )
     db.add(job)
+    db.flush()
+    return job
+
+
+def enqueue(
+    db,
+    *,
+    owner_user_id: str,
+    queue: str,
+    kind: str,
+    payload: dict,
+) -> str:
+    """Create and dispatch a job; callers must commit related business state first."""
+    job = create_job(
+        db,
+        owner_user_id=owner_user_id,
+        queue=queue,
+        kind=kind,
+        payload=payload,
+    )
     db.commit()
     dispatch(job.id)
     return job.id

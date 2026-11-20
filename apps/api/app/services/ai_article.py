@@ -149,6 +149,7 @@ def build_system_prompt(
     *,
     db=None,
     owner_user_id: str | None = None,
+    use_layout_components: bool | None = None,
 ) -> str:
     """构建受保护的文章输出契约，并附加 Skill 写作风格与流程约束。
 
@@ -158,6 +159,8 @@ def build_system_prompt(
 
     factPolicy / imagePolicy 只在这份 manifest 自己写了时才追加。
     没有 workflow 的文风 Skill 不注入这两段。
+    use_layout_components 是本次生成选项：None 保持原行为，False 禁用小组件，
+    True 仅允许当前组件库中的组件；优先级高于 Skill 中的组件建议。
     """
     manifest = writing_rules.effective_manifest(db, skill, owner_user_id)
     prompt_template, tone, style_rules, _ = _style_from_manifest(manifest, skill)
@@ -182,6 +185,22 @@ def build_system_prompt(
     image_text = _image_policy_text(manifest.get("imagePolicy"))
     if image_text:
         parts.append(image_text)
+    if use_layout_components is not None:
+        # 本次生成选项优先于输出契约/Skill 中的组件建议，不改变其它调用方。
+        if use_layout_components:
+            available = "、".join(f":::{item['id']}" for item in wechat_layout.LAYOUT_COMPONENTS)
+            parts.append(
+                "本次生成的排版小组件开关：开启。此设置优先于前文所有组件建议。"
+                f"仅可按内容需要选用以下组件：{available}，不要为使用而堆砌。"
+                "禁止使用已下架的 :::follow、:::sign、:::support。"
+            )
+        else:
+            parts.append(
+                "本次生成的排版小组件开关：关闭。此设置优先于前文输出契约和所有 Skill 风格中的组件建议。"
+                "正文禁止使用任何 ::: 小组件区块（包括已有素材中的组件语法），"
+                "改用普通 Markdown 段落、标题、引用和列表表达其内容。"
+                "仍须遵守 JSON 输出结构和 {{imageN}} 图片占位符约定。"
+            )
     return "\n\n".join(parts)
 
 

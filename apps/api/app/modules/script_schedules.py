@@ -226,6 +226,7 @@ def run_script_now(
     params = (payload.params if payload is not None else None) or {}
     if not isinstance(params, dict):
         raise ApiError("invalid_params", "params 必须是 JSON 对象")
+    # 锁定当前发布版本的快照：入队后再发布新版本不影响这次执行。
     job_id = enqueue(
         db,
         owner_user_id=user.id,
@@ -233,6 +234,9 @@ def run_script_now(
         kind=f"user-script.{script.id}",
         payload={
             "scriptId": script.id,
+            "scriptVersion": script.published_version,
+            "scriptHash": script.published_hash,
+            "scriptCode": script.published_code,
             "scriptParams": params,
             "scriptTimeoutSeconds": script.timeout_seconds,
         },

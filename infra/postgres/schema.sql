@@ -246,12 +246,26 @@ CREATE TABLE IF NOT EXISTS roles (
 	CONSTRAINT ck_roles_sort CHECK (sort >= 0)
 );
 
+-- similarity_cache
+CREATE TABLE IF NOT EXISTS similarity_cache (
+	id VARCHAR(32) NOT NULL, 
+	source_version_id VARCHAR(32) NOT NULL, 
+	target_version_id VARCHAR(32) NOT NULL, 
+	similarity_score FLOAT NOT NULL, 
+	matching_segments JSONB NOT NULL, 
+	tfidf_vector TEXT NOT NULL, 
+	expires_at TIMESTAMP WITH TIME ZONE, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id)
+);
+
 -- skill_registry_entries
 CREATE TABLE IF NOT EXISTS skill_registry_entries (
 	id VARCHAR(32) NOT NULL, 
 	source VARCHAR(120) NOT NULL, 
 	owner_user_id VARCHAR(32), 
 	skill_key VARCHAR(120) NOT NULL, 
+	category VARCHAR(24) NOT NULL, 
 	version VARCHAR(32) NOT NULL, 
 	display_name VARCHAR(160) NOT NULL, 
 	description TEXT NOT NULL, 
@@ -544,6 +558,7 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
 	last_status VARCHAR(24) NOT NULL, 
 	consecutive_failures INTEGER NOT NULL, 
 	paused_reason VARCHAR(300) NOT NULL, 
+	active_job_id VARCHAR(32), 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
@@ -611,6 +626,27 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 	PRIMARY KEY (id), 
 	FOREIGN KEY(owner_user_id) REFERENCES users (id), 
 	FOREIGN KEY(workspace_id) REFERENCES workspaces (id)
+);
+
+-- analysis_tasks
+CREATE TABLE IF NOT EXISTS analysis_tasks (
+	id VARCHAR(32) NOT NULL, 
+	workspace_id VARCHAR(32) NOT NULL, 
+	created_by_user_id VARCHAR(32), 
+	task_type VARCHAR(16) NOT NULL, 
+	target_ids JSONB NOT NULL, 
+	analysis_params JSONB NOT NULL, 
+	status VARCHAR(16) NOT NULL, 
+	progress INTEGER NOT NULL, 
+	completed_analysis_ids JSONB NOT NULL, 
+	error_message TEXT, 
+	estimated_completion_at TIMESTAMP WITH TIME ZONE, 
+	completed_at TIMESTAMP WITH TIME ZONE, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(workspace_id) REFERENCES workspaces (id), 
+	FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE SET NULL
 );
 
 -- assets
@@ -1112,6 +1148,50 @@ CREATE TABLE IF NOT EXISTS content_assets (
 	FOREIGN KEY(asset_id) REFERENCES assets (id)
 );
 
+-- content_embeddings
+CREATE TABLE IF NOT EXISTS content_embeddings (
+	id VARCHAR(32) NOT NULL, 
+	content_version_id VARCHAR(32) NOT NULL, 
+	model_version VARCHAR(32) NOT NULL, 
+	embedding_vector TEXT NOT NULL, 
+	embedding_dim INTEGER NOT NULL, 
+	deprecated BOOLEAN NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(content_version_id) REFERENCES content_versions (id)
+);
+
+-- originality_analyses
+CREATE TABLE IF NOT EXISTS originality_analyses (
+	id VARCHAR(32) NOT NULL, 
+	content_version_id VARCHAR(32) NOT NULL, 
+	workspace_id VARCHAR(32) NOT NULL, 
+	analyzed_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	similarity_score INTEGER NOT NULL, 
+	originality_score INTEGER NOT NULL, 
+	structure_score INTEGER NOT NULL, 
+	data_accuracy_score INTEGER NOT NULL, 
+	style_uniqueness_score INTEGER NOT NULL, 
+	total_score INTEGER NOT NULL, 
+	level VARCHAR(20) NOT NULL, 
+	similar_articles JSONB NOT NULL, 
+	key_points JSONB NOT NULL, 
+	risk_flags JSONB NOT NULL, 
+	recommendations TEXT NOT NULL, 
+	compare_scope VARCHAR(20) NOT NULL, 
+	model_version VARCHAR(50) NOT NULL, 
+	body_hash VARCHAR(64) DEFAULT '' NOT NULL, 
+	corpus_size INTEGER DEFAULT '0' NOT NULL, 
+	self_version_count INTEGER DEFAULT '0' NOT NULL, 
+	summary TEXT DEFAULT '' NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(content_version_id) REFERENCES content_versions (id), 
+	FOREIGN KEY(workspace_id) REFERENCES workspaces (id)
+);
+
 -- storyboard_shots
 CREATE TABLE IF NOT EXISTS storyboard_shots (
 	id VARCHAR(32) NOT NULL, 
@@ -1140,6 +1220,55 @@ CREATE TABLE IF NOT EXISTS storyboard_shots (
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(scene_id) REFERENCES storyboard_scenes (id)
+);
+
+-- analysis_history
+CREATE TABLE IF NOT EXISTS analysis_history (
+	id VARCHAR(32) NOT NULL, 
+	content_version_id VARCHAR(32) NOT NULL, 
+	analysis_id VARCHAR(32) NOT NULL, 
+	revision INTEGER NOT NULL, 
+	score_snapshot FLOAT NOT NULL, 
+	score_change FLOAT, 
+	improvements JSONB NOT NULL, 
+	new_similarities JSONB NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(content_version_id) REFERENCES content_versions (id), 
+	FOREIGN KEY(analysis_id) REFERENCES originality_analyses (id)
+);
+
+-- analysis_keywords
+CREATE TABLE IF NOT EXISTS analysis_keywords (
+	id VARCHAR(32) NOT NULL, 
+	analysis_id VARCHAR(32) NOT NULL, 
+	keyword VARCHAR(100) NOT NULL, 
+	frequency INTEGER NOT NULL, 
+	importance FLOAT NOT NULL, 
+	source VARCHAR(16) NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(analysis_id) REFERENCES originality_analyses (id)
+);
+
+-- originality_reports
+CREATE TABLE IF NOT EXISTS originality_reports (
+	id VARCHAR(32) NOT NULL, 
+	content_version_id VARCHAR(32) NOT NULL, 
+	analysis_id VARCHAR(32) NOT NULL, 
+	title VARCHAR(200) NOT NULL, 
+	summary TEXT NOT NULL, 
+	export_formats JSONB NOT NULL, 
+	pdf_url VARCHAR(500), 
+	excel_url VARCHAR(500), 
+	report_data JSONB NOT NULL, 
+	status VARCHAR(16) NOT NULL, 
+	error_message TEXT, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	completed_at TIMESTAMP WITH TIME ZONE, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(content_version_id) REFERENCES content_versions (id), 
+	FOREIGN KEY(analysis_id) REFERENCES originality_analyses (id)
 );
 
 -- ---------- 模型内索引 ----------
@@ -1224,6 +1353,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_roles_role_key ON roles (role_key);
 
 -- roles.ix_roles_sort
 CREATE INDEX IF NOT EXISTS ix_roles_sort ON roles (sort);
+
+-- similarity_cache.ix_similarity_cache_created_at
+CREATE INDEX IF NOT EXISTS ix_similarity_cache_created_at ON similarity_cache (created_at);
+
+-- similarity_cache.ix_similarity_cache_pair
+CREATE INDEX IF NOT EXISTS ix_similarity_cache_pair ON similarity_cache (source_version_id, target_version_id);
+
+-- similarity_cache.ix_similarity_cache_source_version_id
+CREATE INDEX IF NOT EXISTS ix_similarity_cache_source_version_id ON similarity_cache (source_version_id);
+
+-- similarity_cache.ix_similarity_cache_target_version_id
+CREATE INDEX IF NOT EXISTS ix_similarity_cache_target_version_id ON similarity_cache (target_version_id);
 
 -- skill_registry_entries.ix_skill_registry_entries_owner_user_id
 CREATE INDEX IF NOT EXISTS ix_skill_registry_entries_owner_user_id ON skill_registry_entries (owner_user_id);
@@ -1318,6 +1459,9 @@ CREATE INDEX IF NOT EXISTS ix_rbac_audit_target ON rbac_audit_logs (target_type,
 -- scheduled_scripts.ix_scheduled_scripts_owner_user_id
 CREATE INDEX IF NOT EXISTS ix_scheduled_scripts_owner_user_id ON scheduled_scripts (owner_user_id);
 
+-- scheduled_tasks.ix_scheduled_tasks_active_job_id
+CREATE INDEX IF NOT EXISTS ix_scheduled_tasks_active_job_id ON scheduled_tasks (active_job_id);
+
 -- scheduled_tasks.ix_scheduled_tasks_enabled
 CREATE INDEX IF NOT EXISTS ix_scheduled_tasks_enabled ON scheduled_tasks (enabled);
 
@@ -1344,6 +1488,15 @@ CREATE INDEX IF NOT EXISTS ix_agent_sessions_owner_user_id ON agent_sessions (ow
 
 -- agent_sessions.ix_agent_sessions_workspace_id
 CREATE INDEX IF NOT EXISTS ix_agent_sessions_workspace_id ON agent_sessions (workspace_id);
+
+-- analysis_tasks.ix_analysis_task_status
+CREATE INDEX IF NOT EXISTS ix_analysis_task_status ON analysis_tasks (status, created_at);
+
+-- analysis_tasks.ix_analysis_tasks_status
+CREATE INDEX IF NOT EXISTS ix_analysis_tasks_status ON analysis_tasks (status);
+
+-- analysis_tasks.ix_analysis_tasks_workspace_id
+CREATE INDEX IF NOT EXISTS ix_analysis_tasks_workspace_id ON analysis_tasks (workspace_id);
 
 -- assets.ix_assets_owner_user_id
 CREATE INDEX IF NOT EXISTS ix_assets_owner_user_id ON assets (owner_user_id);
@@ -1522,6 +1675,15 @@ CREATE INDEX IF NOT EXISTS ix_agent_events_run_id ON agent_events (run_id);
 -- agent_tool_calls.ix_agent_tool_calls_run_id
 CREATE INDEX IF NOT EXISTS ix_agent_tool_calls_run_id ON agent_tool_calls (run_id);
 
+-- content_embeddings.ix_content_embeddings_content_version_id
+CREATE INDEX IF NOT EXISTS ix_content_embeddings_content_version_id ON content_embeddings (content_version_id);
+
+-- originality_analyses.ix_originality_analyses_content_version_id
+CREATE INDEX IF NOT EXISTS ix_originality_analyses_content_version_id ON originality_analyses (content_version_id);
+
+-- originality_analyses.ix_originality_analyses_workspace_id
+CREATE INDEX IF NOT EXISTS ix_originality_analyses_workspace_id ON originality_analyses (workspace_id);
+
 -- storyboard_shots.ix_storyboard_shots_deleted_at
 CREATE INDEX IF NOT EXISTS ix_storyboard_shots_deleted_at ON storyboard_shots (deleted_at);
 
@@ -1533,6 +1695,21 @@ CREATE INDEX IF NOT EXISTS ix_storyboard_shots_scene_id ON storyboard_shots (sce
 
 -- storyboard_shots.ix_storyboard_shots_sketch_job_id
 CREATE INDEX IF NOT EXISTS ix_storyboard_shots_sketch_job_id ON storyboard_shots (sketch_job_id);
+
+-- analysis_history.ix_analysis_history_content
+CREATE INDEX IF NOT EXISTS ix_analysis_history_content ON analysis_history (content_version_id);
+
+-- analysis_history.ix_analysis_history_content_version_id
+CREATE INDEX IF NOT EXISTS ix_analysis_history_content_version_id ON analysis_history (content_version_id);
+
+-- analysis_keywords.ix_analysis_keywords_analysis_id
+CREATE INDEX IF NOT EXISTS ix_analysis_keywords_analysis_id ON analysis_keywords (analysis_id);
+
+-- originality_reports.ix_originality_report_version
+CREATE INDEX IF NOT EXISTS ix_originality_report_version ON originality_reports (content_version_id);
+
+-- originality_reports.ix_originality_reports_content_version_id
+CREATE INDEX IF NOT EXISTS ix_originality_reports_content_version_id ON originality_reports (content_version_id);
 
 -- ---------- 补充索引（apps/api/app/core/db.py::_INDEXES） ----------
 

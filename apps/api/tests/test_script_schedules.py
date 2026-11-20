@@ -232,6 +232,48 @@ def test_run_disabled_script_returns_conflict(client):
     assert response.json()["code"] == "script_disabled"
 
 
+def test_queued_script_run_keeps_published_version_after_republish(client, monkeypatch):
+    headers = login(client, subject=f"script-snapshot-{uuid.uuid4().hex[:6]}")
+    script = _publish_script(
+        client,
+        headers,
+        _create_script(client, headers, "固定版本") ["id"],
+        code="log('v1')\n",
+    )
+
+    from app.core import queue
+
+    monkeypatch.setattr(queue, "dispatch", lambda *args, **kwargs: False)
+    task = client.post(
+        f"{PREFIX}/schedules",
+        headers=headers,
+        json={"taskType": f"user-script.{script['id']}", "scheduleKind": "interval", "intervalSeconds": 1800},
+    )
+    assert task.status_code == 201, task.text
+    queued = client.post(f"{PREFIX}/schedules/{task.json()['id']}/run", headers=headers)
+    assert queued.status_code == 200, queued.text
+    job_id = queued.json()["jobId"]
+
+    _publish_script(client, headers, script["id"], code="log('v2')\n")
+
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services import job_runner, script_runtime
+
+    observed = {}
+    monkeypatch.setattr(
+        script_runtime,
+        "run_script",
+        lambda **kwargs: observed.update(kwargs) or {"stdout": "ok", "stderr": "", "exitCode": 0},
+    )
+    job_runner.run_job(job_id)
+
+    assert observed["code"] == "log('v1')\n"
+    with SessionLocal() as db:
+        job = db.get(models.BackgroundJob, job_id)
+        assert job.payload["scriptVersion"] == 1
+
+
 def test_manual_run_keeps_job_when_dispatch_blocked(client, monkeypatch):
     headers = login(client, subject=f"script-dispatch-{uuid.uuid4().hex[:6]}")
     script = _publish_script(client, headers, _create_script(client, headers, "阻断投递")["id"])

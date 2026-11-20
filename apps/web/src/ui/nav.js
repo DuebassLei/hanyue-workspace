@@ -23,41 +23,18 @@ export const NAV_GROUPS = [
     key: 'workspace',
     label: '工作区',
     items: [
-      // 跨类型入口留在顶级：创作空间是编辑枢纽，提示词库被文章/图片共用
+      // 工作区功能直接平铺，不再按内容类型折叠。
       { name: 'studio', label: '创作空间', short: '创作', permission: 'studio.use' },
+      { name: 'originality', label: '原创检测', short: '检测', permission: 'studio.use' },
       { name: 'prompts', label: '提示词库', short: '提示词', permission: 'prompts.use', aliases: ['handdraw'] },
-      {
-        name: 'group-articles',
-        label: '文章',
-        short: '文章',
-        icon: 'articles',
-        children: [
-          { name: 'articles', label: '文章管理', short: '文章', permission: 'studio.use' },
-          { name: 'cards', label: '图文卡片', short: '卡片', permission: 'cards.use' },
-        ],
-      },
-      {
-        name: 'group-images',
-        label: '图片',
-        short: '图片',
-        icon: 'images',
-        children: [
-          { name: 'images', label: '图片生成', short: '图片', permission: 'images.use' },
-          { name: 'stickers', label: '贴图创作', short: '贴图', permission: 'stickers.use' },
-          { name: 'storyboards', label: '漫画分镜', short: '分镜', permission: 'storyboards.use' },
-          { name: 'assets', label: '素材图库', short: '图库', permission: 'assets.use' },
-        ],
-      },
-      {
-        name: 'group-novels',
-        label: '小说',
-        short: '小说',
-        icon: 'novels',
-        children: [
-          { name: 'novels', label: '小说创作', short: '小说', permission: 'novels.use' },
-          { name: 'characters', label: '角色库', short: '角色', permission: 'characters.use' },
-        ],
-      },
+      { name: 'articles', label: '文章管理', short: '文章', permission: 'studio.use' },
+      { name: 'cards', label: '图文卡片', short: '卡片', permission: 'cards.use' },
+      { name: 'images', label: '图片生成', short: '图片', permission: 'images.use' },
+      { name: 'stickers', label: '贴图创作', short: '贴图', permission: 'stickers.use' },
+      { name: 'storyboards', label: '漫画分镜', short: '分镜', permission: 'storyboards.use' },
+      { name: 'assets', label: '素材图库', short: '图库', permission: 'assets.use' },
+      { name: 'novels', label: '小说创作', short: '小说', permission: 'novels.use' },
+      { name: 'characters', label: '角色库', short: '角色', permission: 'characters.use' },
     ],
   },
   {
@@ -90,6 +67,17 @@ export const NAV_GROUPS = [
     ],
   },
 ]
+
+/** 仅将工作区的分类展开为页面；保留服务端已过滤的可见项、顺序和权限信息。 */
+export function flattenWorkspaceMenus(groups) {
+  const leaves = (items) => (items || []).flatMap((item) =>
+    item.children?.length ? leaves(item.children) : [item],
+  )
+  return groups.map((group) => group.key === 'workspace'
+    ? { ...group, items: leaves(group.items) }
+    : group,
+  )
+}
 
 /**
  * 把「分组 → 分类 → 页面」摊平成带所属分组与祖先链的页面列表。

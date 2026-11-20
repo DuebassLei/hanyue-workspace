@@ -512,12 +512,31 @@ curl -s -X POST localhost:8000/api/v1/wechat-mp/drafts/render \
 
 ## 6. 自检与回归
 
+开发过程中**不要每改一次就全量跑**。全量 `pytest -q`（600+ 项）和 `npm run build`（Vite 生产打包）都是分钟级，留给交付前的一次完整回归；日常改动用下表的增量检查，秒级确认即可。
+
+| 改了什么 | 增量检查 | 说明 |
+|---|---|---|
+| 后端单个模块 / 服务 | `pytest tests/test_<对应文件>.py -q` | 跨模块时加 `-q -k "关键词"` 收窄 |
+| 后端 import / 语法改动 | `python -m py_compile <改过的文件>` | 不要 `compileall` 整棵 `app` |
+| 前端 `.vue` / `.js` | 不跑命令 | `npm run dev` 的 HMR 即改即见，看终端与浏览器控制台报错 |
+| 前端构建配置 | `npm run build` | 只有动到 `vite.config`、依赖时才需要 |
+| 只改文档 | 不跑 | — |
+
 ```bash
 cd apps/api
-./.venv/Scripts/python.exe -m pytest -q              # 当前 484 passed
+./.venv/Scripts/python.exe -m pytest tests/test_writing_rules_api.py -q   # 只跑受影响的文件
+./.venv/Scripts/python.exe -m pytest -q -k "writing_rules or skill"       # 按关键字收窄
+./.venv/Scripts/python.exe -m py_compile app/modules/writing_rules.py     # 单文件编译检查
+```
+
+**交付前跑一次全量**（提交 / 合并 / 发版前）：
+
+```bash
+cd apps/api
+./.venv/Scripts/python.exe -m pytest -q              # 全量回归
 ./.venv/Scripts/python.exe -m compileall -q app ../worker/worker.py
-cd ../web && npm run build                           # 前端构建
-cd ../../infra && docker compose config             # 容器配置校验
+cd ../web && npm run build                           # 前端生产构建
+cd ../../infra && docker compose config             # 容器配置校验（仅改过 infra 时需要）
 ```
 
 ## 6.1 定时任务

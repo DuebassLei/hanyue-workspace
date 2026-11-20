@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from threading import Thread
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,8 @@ from .modules import (
     jobs,
     logs,
     models_module,
+    originality,
+    originality_reports,
     platform_auth,
     preferences,
     prompts,
@@ -46,6 +49,7 @@ from .modules import (
     writing_rules,
 )
 from .services import handdraw as handdraw_import
+from .services import originality_service
 from .services import rbac_service, scheduled_tasks, scheduler, skill_registry, writing_rules_factory
 
 settings = get_settings()
@@ -74,8 +78,24 @@ async def lifespan(app: FastAPI):
         if stale or recovered:
             logger.info("API 启动恢复：崩溃遗留 %s 个、未开始 %s 个", stale, recovered)
     _start_scheduler()
+    _warmup_originality()
     yield
     scheduler.stop()
+
+
+def _warmup_originality() -> None:
+    """后台预热原创度分析器。
+
+    jieba 首次调用要加载约 1s 的词典，落点如果正好是用户第一次点「检测」，
+    会表现成莫名卡顿。丢到后台线程里，API 一起来就开始加载，不拖慢启动。
+    """
+    def run() -> None:
+        try:
+            originality_service.warmup()
+        except Exception:  # 预热失败不影响功能，首次检测时再加载一次即可
+            logger.debug("原创度分析器预热失败", exc_info=True)
+
+    Thread(target=run, name="originality-warmup", daemon=True).start()
 
 
 def _start_scheduler() -> None:
@@ -146,6 +166,11 @@ for module in (
     writing_rules,
 ):
     app.include_router(module.router, prefix=settings.api_prefix)
+
+# 原创度检测（嵌套在 content 路由下）
+app.include_router(originality.router, prefix=f"{settings.api_prefix}/content")
+# 原创度检测的历史记录与报告导出（/api/v1/originality/...）
+app.include_router(originality_reports.router, prefix=settings.api_prefix)
 
 
 @app.exception_handler(ApiError)

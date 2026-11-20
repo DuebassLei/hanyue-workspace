@@ -10,6 +10,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -474,6 +475,9 @@ class SkillRegistryEntry(Base, TimestampMixin):
     # 自定义 Skill 归属用户；内置 Skill 为 NULL，全员可见
     owner_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     skill_key: Mapped[str] = mapped_column(String(120), index=True)
+    # 分组用：flow=流程型，style=风格型；内置行由启动同步从出厂定义回填，
+    # 自定义行在创建时写入，之后不可改（改分组会牵动 manifest 形态）
+    category: Mapped[str] = mapped_column(String(24), default="style")
     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
     display_name: Mapped[str] = mapped_column(String(160), default="")
     description: Mapped[str] = mapped_column(Text, default="")
@@ -1078,6 +1082,8 @@ class ScheduledTask(Base, TimestampMixin):
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     # 自动暂停原因；手动停用时为空（两者在界面上要能区分开）
     paused_reason: Mapped[str] = mapped_column(String(300), default="")
+    # 原子占用槽位：同一任务的手动与定时入口不得并发创建执行。
+    active_job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
 
 class ScheduledTaskRun(Base):
@@ -1281,6 +1287,53 @@ class UserRole(Base):
     )
 
 
+class OriginalityAnalysis(Base, TimestampMixin):
+    """文章原创度检测结果历史。
+    
+    存储检测分析结果，支持历史查询与对比。
+    """
+
+    __tablename__ = "originality_analyses"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # 五个维度评分（0-100）
+    similarity_score: Mapped[int] = mapped_column(Integer, default=0)
+    originality_score: Mapped[int] = mapped_column(Integer, default=0)
+    structure_score: Mapped[int] = mapped_column(Integer, default=0)
+    data_accuracy_score: Mapped[int] = mapped_column(Integer, default=0)
+    style_uniqueness_score: Mapped[int] = mapped_column(Integer, default=0)
+
+    # 综合评分与等级
+    total_score: Mapped[int] = mapped_column(Integer, default=0)
+    level: Mapped[str] = mapped_column(String(20), default="fair")  # excellent/good/fair/poor
+
+    # 详情存储（JSONB）
+    similar_articles: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    key_points: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    risk_flags: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    recommendations: Mapped[str] = mapped_column(Text, default="")
+
+    # 检测参数
+    compare_scope: Mapped[str] = mapped_column(String(20), default="all")  # all/own/public
+    model_version: Mapped[str] = mapped_column(String(50), default="v1.0-tfidf")
+
+    # ── 口径与缓存（v3.0）─────────────────────────────────────────
+    # 正文指纹：同一版本正文没改时直接复用上次结果，避免每次全量重算
+    body_hash: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    # 本次参与比对的其它稿件数量；0 表示「无从判断相似度」，不是「完全原创」
+    corpus_size: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # 同一篇稿件的历史版本数（不计入比对，只在结论里提示）
+    self_version_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # 一句话中文结论，界面和报告首屏用它
+    summary: Mapped[str] = mapped_column(Text, default="", server_default="")
+
+
 class RbacAuditLog(Base):
     """权限变更审计。改角色、改菜单、给别人授权，都必须留一条。
 
@@ -1302,4 +1355,164 @@ class RbacAuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
     )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Phase 2：高级分析引擎（NLP + 结构对比 + 缓存）
+# ─────────────────────────────────────────────────────────────────
+
+
+class SimilarityCache(Base):
+    """相似度检测缓存表 — 加速后续查询"""
+
+    __tablename__ = "similarity_cache"
+    __table_args__ = (Index("ix_similarity_cache_pair", "source_version_id", "target_version_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 源稿件版本 ID
+    source_version_id: Mapped[str] = mapped_column(String(32), index=True)
+    # 目标稿件版本 ID
+    target_version_id: Mapped[str] = mapped_column(String(32), index=True)
+    # 相似度分数（0-1）
+    similarity_score: Mapped[float] = mapped_column(Float)
+    # 匹配的文本片段（JSON 数组）
+    matching_segments: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # TF-IDF 向量（序列化存储）
+    tfidf_vector: Mapped[str] = mapped_column(Text, default="")
+    # 缓存过期时间
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class ContentEmbeddings(Base):
+    """内容向量存储表 — 用于语义相似度计算"""
+
+    __tablename__ = "content_embeddings"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 稿件版本 ID
+    content_version_id: Mapped[str] = mapped_column(String(32), ForeignKey("content_versions.id"), index=True)
+    # 向量模型版本
+    model_version: Mapped[str] = mapped_column(String(32), default="sentence-bert-v1")
+    # 向量数据（JSON 序列化的浮点数组）
+    embedding_vector: Mapped[str] = mapped_column(Text)
+    # 向量维度
+    embedding_dim: Mapped[int] = mapped_column(Integer, default=384)
+    # 是否已过时（模型升级时置 true）
+    deprecated: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class AnalysisKeywords(Base):
+    """检测结果关键词提取表 — 用于观点独特性分析"""
+
+    __tablename__ = "analysis_keywords"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 检测 ID
+    analysis_id: Mapped[str] = mapped_column(String(32), ForeignKey("originality_analyses.id"), index=True)
+    # 关键词
+    keyword: Mapped[str] = mapped_column(String(100))
+    # 词频
+    frequency: Mapped[int] = mapped_column(Integer, default=1)
+    # 相对重要性（0-1）
+    importance: Mapped[float] = mapped_column(Float, default=0.5)
+    # 来源：source（原文） | reference（参考文献）
+    source: Mapped[str] = mapped_column(String(16), default="source")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Phase 3：向量模型与报告系统
+# ─────────────────────────────────────────────────────────────────
+
+
+class OriginalityReport(Base):
+    """检测报告表 — 支持 PDF 与 Excel 导出"""
+
+    __tablename__ = "originality_reports"
+    __table_args__ = (Index("ix_originality_report_version", "content_version_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 稿件版本 ID
+    content_version_id: Mapped[str] = mapped_column(String(32), ForeignKey("content_versions.id"), index=True)
+    # 关联的检测结果 ID
+    analysis_id: Mapped[str] = mapped_column(String(32), ForeignKey("originality_analyses.id"))
+    # 报告标题
+    title: Mapped[str] = mapped_column(String(200))
+    # 报告摘要
+    summary: Mapped[str] = mapped_column(Text, default="")
+    # 导出格式：pdf | excel | json
+    export_formats: Mapped[dict] = mapped_column(JSONBDoc, default=dict)  # {"pdf": "url", "excel": "url"}
+    # 报告存储位置（文件 URL）
+    pdf_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    excel_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 报告生成的详细数据（JSON）
+    report_data: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 报告状态：generating | ready | failed
+    status: Mapped[str] = mapped_column(String(16), default="generating")
+    # 错误信息（失败时）
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AnalysisHistory(Base):
+    """检测历史与对比表 — 追踪版本变化"""
+
+    __tablename__ = "analysis_history"
+    __table_args__ = (Index("ix_analysis_history_content", "content_version_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 稿件版本 ID
+    content_version_id: Mapped[str] = mapped_column(String(32), ForeignKey("content_versions.id"), index=True)
+    # 检测 ID
+    analysis_id: Mapped[str] = mapped_column(String(32), ForeignKey("originality_analyses.id"))
+    # 版本序号（第几次检测）
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    # 本次检测的总分
+    score_snapshot: Mapped[float] = mapped_column(Float)
+    # 与前一次检测的分数变化
+    score_change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 主要改进点（JSON）
+    improvements: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 新增相似内容
+    new_similarities: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AnalysisTask(Base):
+    """后台检测任务队列 — 支持批量检测"""
+
+    __tablename__ = "analysis_tasks"
+    __table_args__ = (Index("ix_analysis_task_status", "status", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 工作空间 ID
+    workspace_id: Mapped[str] = mapped_column(String(32), ForeignKey("workspaces.id"), index=True)
+    # 创建人 ID
+    created_by_user_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # 任务类型：single | batch | compare
+    task_type: Mapped[str] = mapped_column(String(16), default="single")
+    # 单个检测：稿件版本 ID；批量检测：版本 ID 列表
+    target_ids: Mapped[list] = mapped_column(JSONBDoc, default=list)
+    # 检测参数
+    analysis_params: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 任务状态：pending | running | completed | failed
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    # 进度百分比（0-100）
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    # 已完成的检测 ID 列表
+    completed_analysis_ids: Mapped[list] = mapped_column(JSONBDoc, default=list)
+    # 错误消息（失败时）
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 预计完成时间
+    estimated_completion_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 实际完成时间
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

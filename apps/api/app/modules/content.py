@@ -394,34 +394,30 @@ def _resolve_flow_skill(user, db: DbSession, skill_key: str | None):
     return entry
 
 
-@router.get("/content/{content_id}/writing-flow")
-def get_writing_flow(
-    content_id: str, user: CurrentUser, db: DbSession, skillKey: str | None = None
+def _flow_report(
+    entry, user, db: DbSession, markdown: str, title: str, summary: str, source: str, version_id
 ) -> dict:
-    """当前稿件对应的写作流程步骤，以及基于最新正文的检查结果。
+    """合成流程面板数据：生成类步骤只列定义，检查类步骤按生效规则实时跑本地检查。
 
-    不调用模型、不改正文。生成类步骤只展示定义；检查类步骤直接跑本地规则。
+    source="draft" 表示检查的是请求携带的编辑器内容（可含未保存草稿），
+    "saved" 表示最新版本；rules/lexicon/policy 字段把「依据哪条配置」透出给前端。
     """
-    item = _owned_item(content_id, user, db)
-    entry = _resolve_flow_skill(user, db, skillKey)
-    version = _latest_version(item, db)
-    markdown = version.body if version else ""
-    title = version.title if version else item.title
-    summary = version.summary if version else ""
     # 生效 manifest：规则表合成（个人副本覆盖全局），条目 manifest 只剩元数据兜底
     manifest = writing_rules.effective_manifest(db, entry, user.id)
+    draft = {"title": title or "", "markdown": markdown or "", "summary": summary or ""}
+    rules = manifest.get("reviewRules") or []
+    review = article_workflow.review_article(draft, rules)
+    review["rules"] = article_workflow.review_rule_reports(draft, rules)
+    lexicon = article_workflow.load_lexicon(db)
+    tone = article_workflow.check_ai_tone(markdown or "", lexicon)
+    tone["lexicon"] = article_workflow.lexicon_overview(lexicon)
+    images = article_workflow.plan_images(markdown or "", [], None, manifest.get("imagePolicy"))
+    images["policy"] = manifest.get("imagePolicy") or {}
     checks = {
-        "review_article": article_workflow.review_article(
-            {"title": title or "", "markdown": markdown or "", "summary": summary or ""},
-            manifest.get("reviewRules") or [],
-        ),
-        "check_ai_tone": article_workflow.check_ai_tone(
-            markdown or "", article_workflow.load_lexicon(db)
-        ),
+        "review_article": review,
+        "check_ai_tone": tone,
         "extract_facts": article_workflow.extract_facts(markdown or ""),
-        "plan_images": article_workflow.plan_images(
-            markdown or "", [], None, manifest.get("imagePolicy")
-        ),
+        "plan_images": images,
     }
     steps = []
     for index, step in enumerate(manifest.get("workflow") or [], start=1):
@@ -441,10 +437,59 @@ def get_writing_flow(
         "skillKey": entry.skill_key,
         "skillName": entry.display_name,
         "description": entry.description or "",
-        "versionId": version.id if version else None,
+        "versionId": version_id,
+        "source": source,
         "hasBody": bool((markdown or "").strip()),
         "steps": steps,
     }
+
+
+def _flow_from_latest(item: models.ContentItem, entry, user, db: DbSession) -> dict:
+    version = _latest_version(item, db)
+    return _flow_report(
+        entry,
+        user,
+        db,
+        version.body if version else "",
+        version.title if version else item.title,
+        version.summary if version else "",
+        "saved",
+        version.id if version else None,
+    )
+
+
+@router.get("/content/{content_id}/writing-flow")
+def get_writing_flow(
+    content_id: str, user: CurrentUser, db: DbSession, skillKey: str | None = None
+) -> dict:
+    """当前稿件对应的写作流程步骤，以及基于最新已保存正文的检查结果。
+
+    不调用模型、不改正文。编辑器实时内容请走 POST 同名接口。
+    """
+    item = _owned_item(content_id, user, db)
+    entry = _resolve_flow_skill(user, db, skillKey)
+    return _flow_from_latest(item, entry, user, db)
+
+
+@router.post("/content/{content_id}/writing-flow")
+def check_writing_flow(
+    content_id: str, payload: schemas.WritingFlowCheckIn, user: CurrentUser, db: DbSession
+) -> dict:
+    """按请求携带的编辑器内容跑同一套检查（含未保存草稿），供流程面板实时跟随。"""
+    item = _owned_item(content_id, user, db)
+    entry = _resolve_flow_skill(user, db, payload.skill_key)
+    if payload.body is None:
+        return _flow_from_latest(item, entry, user, db)
+    return _flow_report(
+        entry,
+        user,
+        db,
+        payload.body,
+        payload.title if payload.title is not None else item.title,
+        payload.summary or "",
+        "draft",
+        None,
+    )
 
 
 @router.patch("/content/{content_id}/draft", response_model=schemas.ContentOut)

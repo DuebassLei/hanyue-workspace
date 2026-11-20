@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -389,24 +390,31 @@ def _new_run(db, task, *, source: str, status: str, skip_reason: str = "") -> mo
 
 
 def _launch(db, task, *, source: str) -> dict:
-    """并发判定 + 投递。定时与手动两条路径共用，保证互斥语义一致。"""
+    """Atomically admit one execution, commit its run/job link, then notify workers."""
     now = now_utc()
-    pending = db.scalars(
-        select(models.ScheduledTaskRun)
+    locked = db.execute(
+        update(models.ScheduledTask)
         .where(
-            models.ScheduledTaskRun.task_id == task.id,
-            models.ScheduledTaskRun.status.in_(("queued", "running")),
+            models.ScheduledTask.id == task.id,
+            models.ScheduledTask.active_job_id.is_(None),
         )
-        .order_by(models.ScheduledTaskRun.triggered_at.desc())
-    ).all()
-    blocking = next((row for row in pending if _run_alive(db, row, now)), None)
-    if blocking is not None:
+        .values(active_job_id="__claiming__")
+    )
+    if locked.rowcount != 1:
+        blocking = db.scalar(
+            select(models.ScheduledTaskRun)
+            .where(
+                models.ScheduledTaskRun.task_id == task.id,
+                models.ScheduledTaskRun.status.in_(("queued", "running")),
+            )
+            .order_by(models.ScheduledTaskRun.triggered_at.desc())
+        )
         run = _new_run(
             db,
             task,
             source=source,
             status="skipped",
-            skip_reason=f"上一次仍在执行（runId={blocking.id}）",
+            skip_reason=f"上一次仍在执行（runId={blocking.id if blocking else 'unknown'}）",
         )
         run.finished_at = now
         task.last_status = "skipped"
@@ -424,10 +432,23 @@ def _launch(db, task, *, source: str) -> dict:
             or not script.enabled
             or not script.published_code
         ):
+            db.rollback()
             raise ScheduleError("script_unavailable", "关联脚本不可用或未发布")
     if script is not None:
+        snapshot = db.scalar(
+            select(models.ScheduledScriptVersion).where(
+                models.ScheduledScriptVersion.script_id == script.id,
+                models.ScheduledScriptVersion.version == script.published_version,
+            )
+        )
+        if snapshot is None or hashlib.sha256(snapshot.code.encode("utf-8")).hexdigest() != script.published_hash:
+            db.rollback()
+            raise ScheduleError("script_snapshot_missing", "当前发布版本快照缺失或校验失败")
         payload = {
             "scriptId": script.id,
+            "scriptVersion": snapshot.version,
+            "scriptHash": script.published_hash,
+            "scriptCode": snapshot.code,
             "scriptParams": task.params or {},
             "scriptTimeoutSeconds": script.timeout_seconds,
         }
@@ -436,18 +457,20 @@ def _launch(db, task, *, source: str) -> dict:
     run = _new_run(db, task, source=source, status="queued")
     payload["scheduledTaskId"] = task.id
     payload["scheduledRunId"] = run.id
-    job_id = queue.enqueue(
+    job = queue.create_job(
         db,
         owner_user_id=task.owner_user_id,
         queue=spec.queue,
         kind=spec.kind,
         payload=payload,
     )
-    run.job_id = job_id
+    run.job_id = job.id
+    task.active_job_id = job.id
     task.last_status = "queued"
     task.last_fired_at = now
     db.commit()
-    return {"action": "dispatched", "runId": run.id, "jobId": job_id}
+    queue.dispatch(job.id)
+    return {"action": "dispatched", "runId": run.id, "jobId": job.id}
 
 
 def claim_trigger(db, task_id: str, observed, next_run_at) -> bool:
@@ -556,6 +579,9 @@ def sync_run_from_job(
     task = db.get(models.ScheduledTask, run.task_id)
     if task is not None:
         _apply_task_outcome(db, task, status)
+        # 释放互斥槽位：终态之后才允许下一次手动/定时触发。
+        if task.active_job_id == job_id:
+            task.active_job_id = None
     db.commit()
     return True
 
@@ -627,6 +653,9 @@ def reconcile_runs(db, now: datetime | None = None) -> dict:
                 run.error_code = run.error_code or job.error_code
                 run.error_message = run.error_message or job.error_message
                 fixed += 1
+            task = db.get(models.ScheduledTask, run.task_id)
+            if task is not None and task.active_job_id == run.job_id:
+                task.active_job_id = None  # 对账把悬空槽位一并释放
             continue
         if job is not None:
             age = (now - (as_utc(job.started_at) or as_utc(run.triggered_at) or now)).total_seconds()

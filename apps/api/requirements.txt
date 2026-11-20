@@ -13,3 +13,17 @@ requests==2.34.2
 # 不用 4.x：作者声明该系列为预发布且无迁移路径，本文件全量锁定版本，不能钉 a 版。
 apscheduler==3.11.3
 pytest==9.2.0
+# 原创度检测依赖
+scikit-learn==1.4.2
+jieba==0.42.1
+# Phase 2: NLP + 结构分析 + 缓存
+transformers==4.36.2          # BERT 等预训练模型用于关键词提取
+torch==2.1.2                   # transformers 依赖（重型库）
+networkx==3.2.1                # 结构对比与图论
+nltk==3.8.1                    # NLP 工具包
+redis==5.0.1                   # 缓存后端
+# Phase 3: 向量嵌入 + 报告导出 + 批量任务
+sentence-transformers==2.2.2   # 语义相似度（轻量级向量模型）
+reportlab==4.0.7               # PDF 生成
+openpyxl==3.11.0               # Excel 生成
+celery==5.3.4                  # 后台任务队列

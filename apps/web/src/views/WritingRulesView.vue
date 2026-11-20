@@ -11,17 +11,19 @@
  * R4 语义提醒：全局规则「清空后保存」在后端落成全部禁用而不是删行——
  * 删掉的行下次启动会被出厂导入重新补齐，所以界面上的「清空」等于「全部关掉」。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   NAlert,
   NButton,
   NEmpty,
+  NForm,
+  NFormItem,
   NInput,
+  NModal,
   NRadio,
   NRadioGroup,
   NSpin,
-  NTab,
-  NTabs,
   NTag,
 } from 'naive-ui'
 import { api } from '../api/client'
@@ -33,6 +35,8 @@ import SkillRulesPanel from './writing-rules/SkillRulesPanel.vue'
 
 const { can } = usePermission()
 const canManage = computed(() => can('writing_rules.manage'))
+const route = useRoute()
+const router = useRouter()
 
 // ---------------------------------------------------------------- 列表与作用域
 
@@ -44,8 +48,21 @@ const selectedKey = ref('')
 const scope = ref('global')
 const tab = ref('rules')
 
-const flowSkills = computed(() => skills.value.filter((item) => item.category === 'flow'))
-const styleSkills = computed(() => skills.value.filter((item) => item.category !== 'flow'))
+// 创作空间「流程」面板的 deep-link：?skill=&tab=rules|prompts&focus=&from=studio&item=
+// focus 在 rules 页签下是 ruleType（review_rule / image_policy…），在 prompts 页签下是分类 key（tone_lexicon）。
+const deepSkill = typeof route.query.skill === 'string' ? route.query.skill : ''
+const focusType = typeof route.query.focus === 'string' ? route.query.focus : ''
+const backFromStudio = route.query.from === 'studio'
+if (route.query.tab === 'prompts' || route.query.tab === 'rules') tab.value = route.query.tab
+if (route.query.scope === 'personal') scope.value = 'personal'
+
+function goBackToStudio() {
+  const query = { tab: 'flow' }
+  if (typeof route.query.item === 'string' && route.query.item) query.id = route.query.item
+  router.push({ name: 'studio', query })
+}
+
+// 分类仅保留为后端执行元数据，编辑入口统一展示所有 Skill。
 
 function matchKeyword(item) {
   const q = keyword.value.trim().toLowerCase()
@@ -56,14 +73,16 @@ function matchKeyword(item) {
   )
 }
 
-const visibleFlow = computed(() => flowSkills.value.filter(matchKeyword))
-const visibleStyle = computed(() => styleSkills.value.filter(matchKeyword))
+const visibleSkills = computed(() => skills.value.filter(matchKeyword))
 
 async function loadSkills() {
   error.value = ''
   try {
     skills.value = await api.get('/writing-rules/skills')
-    if (!selectedKey.value && skills.value.length) selectedKey.value = skills.value[0].skillKey
+    if (!selectedKey.value && skills.value.length) {
+      const wanted = deepSkill && skills.value.find((item) => item.skillKey === deepSkill)
+      selectedKey.value = (wanted || skills.value[0]).skillKey
+    }
   } catch (err) {
     error.value = err.message
   } finally {
@@ -104,7 +123,22 @@ async function loadRules() {
 
 watch([selectedKey, scope], loadRules)
 
-/** 面板每次编辑都发完整新数组；结构校验交给后端，这里只记脏标记。 */
+/** 预填占位产生的空规则不入库：「没填」等于「未配置、走继承」，不能落成空行。
+ *  判定与后端校验对齐（services/writing_rules.py 的 _require_text / _check_single）：
+ *  空文本、缺 value 的字数、空对象的策略会被后端整组拒绝，必须在这里提前丢弃。 */
+function isEmptyRule(row) {
+  const payload = row.payload || {}
+  if (row.ruleType === 'tone' || row.ruleType === 'prompt_template' || row.ruleType === 'theme' || row.ruleType === 'style_rule') {
+    return !String(payload.text || '').trim()
+  }
+  if (row.ruleType === 'target_length') return !Number.isInteger(payload.value)
+  if (row.ruleType === 'workflow_step') return !String(payload.tool || '').trim()
+  if (row.ruleType === 'exemplar') return !payload.title && !payload.excerpt
+  if (row.ruleType === 'fact_policy' || row.ruleType === 'image_policy' || row.ruleType === 'repair_policy') {
+    return !Object.keys(payload).length
+  }
+  return false
+}
 function onRowsChange(next) {
   rows.value = next
   dirty.value = true
@@ -144,8 +178,9 @@ async function save() {
   if (!selectedKey.value) return
   error.value = ''
   const payload = {
-    // 只提交服务端认识的字段，界面内部的临时字段（如 _localKey）不带上
-    rules: rows.value.map((row) => ({
+    // 只提交服务端认识的字段，界面内部的临时字段（如 _localKey）不带上。
+    // 预填后仍为空的行在这里丢弃，不入库。
+    rules: rows.value.filter((row) => !isEmptyRule(row)).map((row) => ({
       ruleType: row.ruleType,
       ruleKey: row.ruleKey,
       payload: row.payload || {},
@@ -201,6 +236,98 @@ async function resetToFactory() {
   }
 }
 
+// ---------------------------------------------------------------- 左侧 Skill 维护
+//
+// 只有 source=custom 的全局条目（管理员新建）可以改名/删除；
+// 内置条目每次启动会被出厂定义覆盖，界面改了也会被打回，所以只读。
+
+const showSkillModal = ref(false)
+const editingSkill = ref(null) // null=新增；否则是被改名的条目
+const skillForm = reactive({ skillKey: '', displayName: '', description: '' })
+const skillSaving = ref(false)
+
+function openCreate() {
+  editingSkill.value = null
+  skillForm.skillKey = ''
+  skillForm.displayName = ''
+  skillForm.description = ''
+  showSkillModal.value = true
+}
+
+function openEdit() {
+  if (!selectedSkill.value) return
+  editingSkill.value = selectedSkill.value
+  skillForm.skillKey = selectedSkill.value.skillKey
+  skillForm.displayName = selectedSkill.value.name || ''
+  skillForm.description = selectedSkill.value.description || ''
+  showSkillModal.value = true
+}
+
+function validateSkillForm() {
+  const name = skillForm.displayName.trim()
+  if (!name) return '名称不能为空'
+  if (!editingSkill.value) {
+    const key = skillForm.skillKey.trim()
+    if (key.length < 3) return '标识至少 3 个字符'
+    if (/\s/.test(key)) return '标识不能包含空白字符'
+  }
+  return ''
+}
+
+async function submitSkillModal() {
+  const invalid = validateSkillForm()
+  if (invalid) {
+    toast(invalid, 'warning')
+    return
+  }
+  skillSaving.value = true
+  error.value = ''
+  try {
+    if (editingSkill.value) {
+      await api.patch(`/writing-rules/skills/${encodeURIComponent(editingSkill.value.skillKey)}`, {
+        displayName: skillForm.displayName.trim(),
+        description: skillForm.description,
+      })
+      toast('已保存')
+    } else {
+      const created = await api.post('/writing-rules/skills', {
+        skillKey: skillForm.skillKey.trim(),
+        displayName: skillForm.displayName.trim(),
+        description: skillForm.description,
+        // 兼容现有接口；分类不再作为用户需要选择的配置。
+        category: 'style',
+      })
+      selectedKey.value = created.skillKey
+      toast('已新增，规则行保存后下一次生成即生效')
+    }
+    showSkillModal.value = false
+    await loadSkills()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    skillSaving.value = false
+  }
+}
+
+async function removeSelectedSkill() {
+  const skill = selectedSkill.value
+  if (!skill) return
+  const ok = await confirm(
+    `将删除「${skill.name}」及其全部规则行（含成员的个人副本），删除后无法恢复。继续？`,
+    '删除全局 Skill',
+  )
+  if (!ok) return
+  error.value = ''
+  try {
+    await api.del(`/writing-rules/skills/${encodeURIComponent(skill.skillKey)}`)
+    selectedKey.value = ''
+    toast('已删除')
+    await loadSkills()
+  } catch (err) {
+    error.value = err.message
+  }
+}
+
 // ---------------------------------------------------------------- 预览
 
 const showPreview = ref(false)
@@ -222,15 +349,15 @@ const scopeHint = computed(() =>
       <div>
         <h1 class="page-title">创作规则</h1>
         <p class="page-sub">
-          语气、风格、审稿、工作流、字数、策略与提示词词表统一在这里维护；保存后下一次生成即生效。
+          Skill 规则与全局提示词词表分开维护；规则按 Skill 生效，提示词与词表对整个创作系统生效。
         </p>
       </div>
       <div class="row" style="gap: var(--space-2)">
-        <n-button secondary @click="showPreview = true" :disabled="!selectedKey">
+        <n-button v-if="tab === 'rules'" secondary @click="showPreview = true" :disabled="!selectedKey">
           预览最终提示词
         </n-button>
         <n-button
-          v-if="canManage"
+          v-if="tab === 'rules' && canManage && selectedSkill?.source !== 'custom'"
           secondary
           type="warning"
           :disabled="!selectedKey || scope !== 'global'"
@@ -239,6 +366,7 @@ const scopeHint = computed(() =>
           按出厂重建
         </n-button>
         <n-button
+          v-if="tab === 'rules'"
           type="primary"
           :disabled="readonly || !dirty"
           :loading="rulesLoading"
@@ -246,6 +374,7 @@ const scopeHint = computed(() =>
         >
           保存{{ dirty ? '（有改动）' : '' }}
         </n-button>
+        <n-button v-if="backFromStudio" quaternary @click="goBackToStudio">返回创作空间</n-button>
       </div>
     </div>
 
@@ -253,33 +382,44 @@ const scopeHint = computed(() =>
       {{ error }}
     </n-alert>
 
-    <div class="rules-layout">
-      <!-- 左：Skill 列表，按流程型 / 风格型分组，带两侧规则计数 -->
+    <div class="rules-entry-tabs" role="tablist" aria-label="创作配置类型">
+      <button type="button" role="tab" :aria-selected="tab === 'rules'" :class="{ active: tab === 'rules' }" @click="tab = 'rules'">Skill 规则</button>
+      <button type="button" role="tab" :aria-selected="tab === 'prompts'" :class="{ active: tab === 'prompts' }" @click="tab = 'prompts'">全局提示词与词表</button>
+    </div>
+
+    <div v-if="tab === 'prompts'" class="global-prompts">
+      <div class="card global-prompts-head">
+        <div>
+          <h2>全局提示词与词表</h2>
+          <p class="field-hint">此处配置对所有 Skill 共用，不需要选择 Skill；具体按对应生成环节生效。</p>
+        </div>
+        <n-tag size="small" :bordered="false">全局共用</n-tag>
+      </div>
+      <PromptRulesPanel :can-manage="canManage" :focus-type="focusType" />
+    </div>
+
+    <div v-else class="rules-layout">
+      <!-- Skill 列表与对应规则 -->
       <aside class="card rules-side">
         <n-input v-model:value="keyword" size="small" clearable placeholder="搜索 Skill 名称或标识" />
+        <n-button
+          v-if="canManage"
+          block
+          secondary
+          size="small"
+          style="margin-top: var(--space-2)"
+          @click="openCreate"
+        >
+          ＋ 新增 Skill
+        </n-button>
         <div v-if="loading" style="margin-top: var(--space-3)">
           <n-spin size="small" />
         </div>
-        <template v-else>
-          <div v-if="visibleFlow.length" class="skill-group">
-            <div class="skill-group-title">流程型</div>
+        <div v-else class="rules-side-scroll">
+          <div class="skill-group">
+            <div class="skill-group-title">全部 Skill · {{ visibleSkills.length }}</div>
             <button
-              v-for="item in visibleFlow"
-              :key="item.skillKey"
-              class="skill-item"
-              :class="{ active: item.skillKey === selectedKey }"
-              @click="switchSkill(item.skillKey)"
-            >
-              <span class="skill-name">{{ item.name || item.skillKey }}</span>
-              <span class="skill-counts">
-                全局 {{ item.globalCount }} · 个人 {{ item.personalCount }}
-              </span>
-            </button>
-          </div>
-          <div v-if="visibleStyle.length" class="skill-group">
-            <div class="skill-group-title">风格型</div>
-            <button
-              v-for="item in visibleStyle"
+              v-for="item in visibleSkills"
               :key="item.skillKey"
               class="skill-item"
               :class="{ active: item.skillKey === selectedKey }"
@@ -295,63 +435,52 @@ const scopeHint = computed(() =>
             </button>
           </div>
           <n-empty
-            v-if="!visibleFlow.length && !visibleStyle.length"
+            v-if="!visibleSkills.length"
             description="没有匹配的 Skill"
             size="small"
             style="margin-top: var(--space-3)"
           />
-        </template>
+        </div>
       </aside>
 
-      <!-- 右：作用域 + 规则/提示词两页签 -->
+      <!-- 右：Skill 信息卡 + 规则面板 -->
       <section class="rules-main">
-        <div class="card">
+        <div class="card skill-header">
           <div class="row" style="gap: var(--space-3); flex-wrap: wrap">
             <strong>{{ selectedSkill?.name || selectedKey || '未选择 Skill' }}</strong>
-            <n-tag v-if="selectedSkill?.category === 'flow'" size="small" round>流程型</n-tag>
-            <n-tag v-else-if="selectedSkill" size="small" round>风格型</n-tag>
-            <span class="list-meta" style="margin: 0">
-              全局 {{ selectedSkill?.globalCount ?? 0 }} 条 · 个人
-              {{ selectedSkill?.personalCount ?? 0 }} 条
-            </span>
+            <n-tag v-if="selectedSkill?.source === 'custom'" size="small" round type="info">自定义</n-tag>
+            <span class="list-meta" style="margin: 0">全局 {{ selectedSkill?.globalCount ?? 0 }} 条 · 个人 {{ selectedSkill?.personalCount ?? 0 }} 条</span>
+            <template v-if="canManage && selectedSkill?.source === 'custom'">
+              <n-button quaternary size="small" @click="openEdit">编辑</n-button>
+              <n-button quaternary size="small" type="error" @click="removeSelectedSkill">删除</n-button>
+            </template>
             <div class="spacer" />
             <n-radio-group :value="scope" size="small" @update:value="switchScope">
               <n-radio value="global">全局</n-radio>
               <n-radio value="personal">我的副本</n-radio>
             </n-radio-group>
           </div>
+          <p v-if="selectedSkill?.description" class="field-hint">{{ selectedSkill.description }}</p>
           <p class="field-hint" style="margin-top: var(--space-2)">{{ scopeHint }}</p>
-          <p v-if="readonly" class="field-hint" style="margin: 0">
-            你没有「创作规则管理」权限：全局规则只读。要按自己的习惯写作，请切换到「我的副本」。
-          </p>
-          <p v-else-if="dirty" class="field-hint" style="margin: 0; color: var(--color-warning, inherit)">
-            有未保存的改动：共 {{ rows.length }} 条，启用 {{ enabledCount }} 条。保存前不会影响生成。
-          </p>
+          <p v-if="readonly" class="field-hint" style="margin: 0">你没有「创作规则管理」权限：全局规则只读。要按自己的习惯写作，请切换到「我的副本」。</p>
+          <p v-else-if="dirty" class="field-hint" style="margin: 0; color: var(--color-warning, inherit)">有未保存的改动：共 {{ rows.length }} 条，启用 {{ enabledCount }} 条。保存前不会影响生成。</p>
         </div>
-
-        <n-tabs v-model:value="tab" type="line" animated style="margin-top: var(--space-3)">
-          <n-tab name="rules">规则</n-tab>
-          <n-tab name="prompts">提示词与词表</n-tab>
-        </n-tabs>
-
-        <div v-if="tab === 'rules'" style="margin-top: var(--space-3)">
+        <div style="margin-top: var(--space-3)">
           <SkillRulesPanel
+            :key="`${selectedKey}:${scope}`"
             :rows="rows"
             :scope="scope"
             :readonly="readonly"
             :loading="rulesLoading"
+            :focus-type="focusType"
             @update:rows="onRowsChange"
           />
-          <div v-if="!readonly" class="row" style="margin-top: var(--space-3); gap: var(--space-2)">
+          <div v-if="!readonly" class="rules-savebar">
             <n-button type="primary" :disabled="!dirty" :loading="rulesLoading" @click="save">
               保存规则
             </n-button>
             <n-button quaternary :disabled="!dirty" @click="loadRules">放弃改动</n-button>
           </div>
-        </div>
-
-        <div v-else style="margin-top: var(--space-3)">
-          <PromptRulesPanel :can-manage="canManage" />
         </div>
       </section>
     </div>
@@ -361,10 +490,66 @@ const scopeHint = computed(() =>
       :skill-key="selectedKey"
       :scope="scope"
     />
+
+    <!-- 新增 / 编辑全局 Skill：内置条目不可改，这里只服务 source=custom 的条目 -->
+    <n-modal
+      v-model:show="showSkillModal"
+      preset="card"
+      :title="editingSkill ? '编辑 Skill 信息' : '新增全局 Skill'"
+      style="max-width: 480px"
+    >
+      <n-form label-placement="top">
+        <n-form-item v-if="!editingSkill" label="标识（Skill key）">
+          <n-input
+            v-model:value="skillForm.skillKey"
+            :disabled="skillSaving"
+            placeholder="如 team-review-style，3 字符以上、不含空格"
+          />
+        </n-form-item>
+        <n-form-item label="名称">
+          <n-input v-model:value="skillForm.displayName" :disabled="skillSaving" maxlength="60" />
+        </n-form-item>
+        <n-form-item label="描述">
+          <n-input
+            v-model:value="skillForm.description"
+            type="textarea"
+            :rows="2"
+            :disabled="skillSaving"
+            placeholder="给成员看的用途说明，可留空"
+          />
+        </n-form-item>
+      </n-form>
+      <p v-if="!editingSkill" class="field-hint" style="margin: 0 0 var(--space-2)">
+        新增后是空的规则表：在「Skill 规则」里添加语气、模板等规则行并保存，下一次生成即生效。
+      </p>
+      <template #footer>
+        <div class="row" style="justify-content: flex-end; gap: var(--space-2)">
+          <n-button quaternary :disabled="skillSaving" @click="showSkillModal = false">取消</n-button>
+          <n-button type="primary" :loading="skillSaving" @click="submitSkillModal">
+            {{ editingSkill ? '保存' : '新增' }}
+          </n-button>
+        </div>
+      </template>
+    </n-modal>
   </div>
 </template>
 
 <style scoped>
+.rules-savebar {
+  position: sticky;
+  bottom: var(--space-3);
+  z-index: 2;
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+}
+.rules-main {
+  min-width: 0;
+}
 .rules-layout {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
@@ -375,6 +560,16 @@ const scopeHint = computed(() =>
   position: sticky;
   top: var(--space-3);
   max-height: calc(100vh - 160px);
+  display: flex;
+  flex-direction: column;
+}
+/* 搜索框和「新增 Skill」固定在滚动区域之外，列表再长也不用滚到底找按钮 */
+.rules-side > :not(.skill-group):not(.rules-side-scroll) {
+  flex: 0 0 auto;
+}
+/* 两个分组包进同一个滚动容器，侧栏超出视口时一起滚，搜索框和新增按钮留在外面 */
+.rules-side-scroll {
+  min-height: 0;
   overflow: auto;
 }
 .skill-group {
@@ -417,6 +612,42 @@ const scopeHint = computed(() =>
 .skill-counts {
   font-size: 12px;
   color: var(--color-text-secondary);
+}
+/* 页面级双入口：Skill 规则（需选择 Skill）与全局提示词与词表（不依赖 Skill） */
+.rules-entry-tabs {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+.rules-entry-tabs button {
+  margin-bottom: -1px;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--color-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+.rules-entry-tabs button:hover {
+  color: var(--color-text);
+}
+.rules-entry-tabs button.active {
+  border-bottom-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+.global-prompts-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.global-prompts-head h2 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-lg, 18px);
 }
 @media (max-width: 960px) {
   .rules-layout {

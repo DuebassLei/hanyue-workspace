@@ -118,6 +118,61 @@ def review_article(draft_dict: dict, rules) -> dict:
     return {"ok": not violations, "violations": violations}
 
 
+def _rule_active(rule: dict) -> bool:
+    """规则是否可执行：与 _rule_violation 的入参校验一致，无效配置会被跳过。"""
+    kind = rule.get("kind")
+    value = rule.get("value")
+    if kind in ("contains", "not_contains"):
+        return isinstance(value, str) and bool(value)
+    if kind in ("min_chars", "max_chars"):
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    return False
+
+
+def review_rule_reports(draft_dict: dict, rules) -> list[dict]:
+    """逐条给出审稿规则的通过情况（含内置图片占位检查），供「流程」面板展示。
+
+    与 review_article 共用判定，区别是这里通过的规则也列出来；
+    ok=None 表示规则配置无效被跳过，前端显示为「未生效」。
+    """
+    draft = draft_dict if isinstance(draft_dict, dict) else {}
+    reports: list[dict] = []
+    for rule in rules if isinstance(rules, list) else []:
+        if not isinstance(rule, dict) or not isinstance(rule.get("kind"), str):
+            continue
+        kind = rule["kind"]
+        field = rule.get("field", "markdown")
+        if field not in ("markdown", "title", "summary"):
+            field = "markdown"
+        active = _rule_active(rule)
+        try:
+            violation = _rule_violation(draft, rule) if active else None
+        except Exception:  # 与 review_article 同口径：单条异常不影响其它规则
+            violation = None
+        reports.append(
+            {
+                "id": str(rule.get("id") or f"{kind}:{field}"),
+                "kind": kind,
+                "value": rule.get("value"),
+                "field": field,
+                "ok": None if not active else violation is None,
+                "message": violation["message"] if violation else None,
+            }
+        )
+    placeholder = _placeholder_violation(extract_placeholders(_field_text(draft, "markdown")))
+    reports.append(
+        {
+            "id": "image-placeholders",
+            "kind": "builtin",
+            "value": None,
+            "field": "markdown",
+            "ok": placeholder is None,
+            "message": placeholder["message"] if placeholder else None,
+        }
+    )
+    return reports
+
+
 # ---------------------------------------------------------------- AI 味
 
 _PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n")
@@ -171,6 +226,32 @@ def load_lexicon(db: Session | None) -> dict:
         if payload:
             lexicon[key.split(".", 1)[1]] = payload
     return lexicon
+
+
+def lexicon_overview(lexicon: dict | None) -> dict:
+    """AI 味词表各节的生效条数与来源，供「流程」面板说明检查依据。
+
+    custom=True 表示该节被规则表覆盖（显式空列表 = 该节规则已关闭）；
+    custom=False 表示沿用出厂默认词表。
+    """
+    lex = {**DEFAULT_LEXICON, **(lexicon or {})}
+    custom = set(lexicon or {})
+
+    def _count(section: str, key: str, field: str | None = None) -> int:
+        items = (lex.get(section) or {}).get(key) or []
+        if field:
+            return sum(1 for x in items if isinstance(x, dict) and str(x.get(field) or "").strip())
+        return sum(1 for x in items if str(x).strip())
+
+    return {
+        "sentenceOpeners": {
+            "custom": "sentence_openers" in custom,
+            "count": _count("sentence_openers", "phrases"),
+        },
+        "buzzwords": {"custom": "buzzwords" in custom, "count": _count("buzzwords", "rules", "word")},
+        "patterns": {"custom": "patterns" in custom, "count": _count("patterns", "rules", "pattern")},
+        "firstThen": {"custom": "first_then" in custom, "count": _count("first_then", "words")},
+    }
 
 
 def _paragraphs(text: str) -> list[tuple[int, str]]:

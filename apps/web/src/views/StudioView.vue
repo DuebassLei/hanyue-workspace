@@ -13,12 +13,12 @@ import {
   NSpace,
   NTooltip,
 } from 'naive-ui'
-import { api, streamGeneration, fetchBlobUrl, apiUrl } from '../api/client'
+import { api, streamGeneration, fetchBlobUrl, apiUrl, downloadAuthenticated } from '../api/client'
 import StatusTag from '../components/StatusTag.vue'
 import MarkdownEditor from '../components/MarkdownEditor.vue'
 import ModelSelector from '../components/ModelSelector.vue'
 import { useModelSelectionStore } from '../stores/modelSelection'
-import { articleBodyFromOutput, parseArticleOutput } from '../utils/aiArticle'
+import { articleBodyFromOutput, parseArticleOutput, normalizeArticleMarkdown } from '../utils/aiArticle'
 import { markdownToHtml } from '../utils/markdownSerializer'
 import PublishDrawer from '../features/publish/PublishDrawer.vue'
 import DraftLibraryModal from '../features/studio/DraftLibraryModal.vue'
@@ -42,6 +42,10 @@ const saving = ref(false)
 
 const draftTitle = ref('')
 const draftBody = ref('')
+const hasEscapedArticleBreaks = computed(() => normalizeArticleMarkdown(draftBody.value) !== draftBody.value)
+function repairArticleBreaks() {
+  draftBody.value = normalizeArticleMarkdown(draftBody.value)
+}
 const dirty = computed(() => {
   const latest = detail.value?.versions?.[0]
   if (!latest) return Boolean(draftTitle.value || draftBody.value)
@@ -104,6 +108,7 @@ watch([draftTitle, draftBody], () => {
 
 // AI 面板
 const aiOpen = ref(true)
+const aiSettingsOpen = ref(false)
 const aiTask = ref('article')
 const aiPrompt = ref('')
 const aiOutput = ref('')
@@ -112,11 +117,17 @@ const aiError = ref('')
 const aiPromptError = ref('')
 const aiStopped = ref(false)
 const aiResultRef = ref(null)
+const workspaceView = ref('draft')
+const workspaceRef = ref(null)
+const aiSourceItemId = ref(null)
+const aiApplied = ref(false)
+const aiApplying = ref(false)
 // 实际使用的模型（降级后由 generation.model 更正），不谎报首选
 const aiModelInfo = ref('')
 const aiTargetLength = ref(600)  // 字数目标
 const aiInsertMode = ref('append') // 'append' | 'replace'
 const aiAutoImages = ref(false)
+const aiUseLayoutComponents = ref(false)
 const aiGenerateCover = ref(true)
 const aiCoverAspectRatio = ref('3:4')
 const aiInlineAspectRatio = ref('1:1')
@@ -459,7 +470,7 @@ const variantForm = ref({ platform: 'wechat_official', title: '', body: '' })
 const deletingItem = ref(null)
 const deleting = ref(false)
 
-// 右侧面板 Tab：ai | inspiration
+// 右侧面板 Tab：ai | image | originality | inspiration | flow
 const rightTab = ref('ai')
 const flow = ref(null)
 const flowLoading = ref(false)
@@ -559,27 +570,97 @@ const PLATFORMS = [
   { code: 'wechat_official', label: '公众号' },
 ]
 
-async function loadWritingFlow() {
+// 流程检查始终跑编辑器当前内容（含未保存草稿），POST 同名接口；
+// seq 防竞态：连续输入触发多次时，只认最后一次请求的结果。
+let flowSeq = 0
+let flowPending = 0
+async function loadWritingFlow({ silent = false } = {}) {
   const itemId = detail.value?.item.id
   if (!itemId) {
     flow.value = null
     return
   }
-  flowLoading.value = true
+  const seq = ++flowSeq
+  flowPending += 1
+  if (!silent) flowLoading.value = true
   flowError.value = ''
   try {
-    const report = await api.get(
-      `/content/${itemId}/writing-flow?skillKey=${encodeURIComponent(writingStyleKey.value || 'article-drafting')}`,
-    )
-    if (detail.value?.item.id === itemId) flow.value = report
+    const report = await api.post(`/content/${itemId}/writing-flow`, {
+      skillKey: writingStyleKey.value || 'article-drafting',
+      title: draftTitle.value,
+      body: draftBody.value,
+    })
+    if (seq === flowSeq && detail.value?.item.id === itemId) flow.value = report
   } catch (err) {
-    if (detail.value?.item.id === itemId) {
+    if (seq === flowSeq && detail.value?.item.id === itemId) {
       flow.value = null
       flowError.value = err.message
     }
   } finally {
-    if (detail.value?.item.id === itemId) flowLoading.value = false
+    flowPending -= 1
+    if (seq === flowSeq && flowPending === 0 && detail.value?.item.id === itemId) {
+      flowLoading.value = false
+    }
   }
+}
+
+// 编辑器输入停顿后静默重检：检查是本地正则，成本极低，不值得让用户手动点
+let flowDebounce = null
+watch([draftTitle, draftBody], () => {
+  if (rightTab.value !== 'flow' || !detail.value) return
+  clearTimeout(flowDebounce)
+  flowDebounce = setTimeout(() => {
+    loadWritingFlow({ silent: true })
+  }, 600)
+})
+
+// 各检查步骤对应的规则配置位置：跳转创作规则页 deep-link
+// tab=rules 是 Skill 规则表（focus 为 ruleType），tab=prompts 是词表类提示词规则
+const FLOW_RULE_FOCUS = {
+  review_article: { tab: 'rules', focus: 'review_rule' },
+  check_ai_tone: { tab: 'prompts', focus: 'tone_lexicon' },
+  extract_facts: { tab: 'rules', focus: 'fact_policy' },
+  plan_images: { tab: 'rules', focus: 'image_policy' },
+}
+
+function goFlowRules(tool) {
+  const target = FLOW_RULE_FOCUS[tool]
+  if (!target || !flow.value) return
+  router.push({
+    name: 'writing-rules',
+    query: {
+      skill: flow.value.skillKey,
+      tab: target.tab,
+      focus: target.focus,
+      from: 'studio',
+      item: detail.value?.item.id || '',
+    },
+  })
+}
+
+function flowRuleLabel(rule) {
+  if (rule.kind === 'builtin') return '图片占位连续且不重复'
+  const where = rule.field === 'title' ? '标题' : rule.field === 'summary' ? '摘要' : '正文'
+  if (rule.kind === 'contains') return `${where}必含「${rule.value}」`
+  if (rule.kind === 'not_contains') return `${where}禁含「${rule.value}」`
+  if (rule.kind === 'min_chars') return `${where}不少于 ${rule.value} 字`
+  if (rule.kind === 'max_chars') return `${where}不超过 ${rule.value} 字`
+  return `${rule.kind} 规则`
+}
+
+function flowLexiconChips(lexicon) {
+  const defs = [
+    ['sentenceOpeners', '段首套话'],
+    ['buzzwords', 'AI 黑话'],
+    ['patterns', '套路句式'],
+    ['firstThen', '首先其次'],
+  ]
+  return defs
+    .filter(([key]) => (lexicon?.[key]?.count || 0) > 0)
+    .map(([key, label]) => ({
+      key,
+      text: `${label} ${lexicon[key].count} 条${lexicon[key].custom ? '·规则表' : '·默认'}`,
+    }))
 }
 
 function flowStepSummary(step) {
@@ -661,6 +742,9 @@ async function loadList() {
   try {
     // fields=list：不拉正文、后端聚合版本数，几百篇时首屏不再拖泥带水
     items.value = await api.get('/content?fields=list&limit=200')
+    // 从创作规则页「返回创作空间」带回 ?tab=flow：先置 tab 再开稿，
+    // detail 的 watch 会自动触发一次流程检查
+    if (route.query.tab === 'flow') rightTab.value = 'flow'
     const targetId = route.query.id || items.value[0]?.id
     if (targetId) await openItem(targetId)
     else detail.value = null
@@ -881,6 +965,7 @@ async function startAutoImageGeneration(rawOutput, contentItemId) {
 }
 
 function runAi() {
+  if (aiRunning.value || aiApplying.value || !detail.value) return
   if (!aiPrompt.value.trim()) {
     aiPromptError.value = '请先写清楚这次要做什么'
     return
@@ -888,6 +973,9 @@ function runAi() {
   aiPromptError.value = ''
   aiStopped.value = false
   const generationItemId = detail.value?.item.id
+  aiSourceItemId.value = generationItemId
+  aiApplied.value = false
+  workspaceView.value = 'result'
   const autoGenerateImages = aiAutoImages.value && aiTask.value === 'article'
   let generationSaved = false
   aiOutput.value = ''
@@ -899,7 +987,11 @@ function runAi() {
     taskType: aiTask.value,
     prompt: aiPrompt.value,
     contentItemId: generationItemId,
-    constraints: { targetLength: aiTargetLength.value, platform: 'wechat_official' },
+    constraints: {
+      targetLength: aiTargetLength.value,
+      platform: 'wechat_official',
+      ...(usesWritingStyle.value ? { useLayoutComponents: aiUseLayoutComponents.value } : {}),
+    },
     // 不选择时省略 modelId，由服务端按「默认模型优先 + 自动降级」解析
     ...(modelSelection.requestModelId ? { modelId: modelSelection.requestModelId } : {}),
   }
@@ -954,18 +1046,37 @@ function stopAi() {
 const aiPreview = computed(() => articleBodyFromOutput(aiOutput.value))
 const aiPreviewHtml = computed(() => markdownToHtml(aiPreview.value))
 
-function useAiOutput() {
-  // 文章类任务输出的是 JSON 契约，插入正文的只能是 markdown 正文
-  const output = articleBodyFromOutput(aiOutput.value)
-  if (aiInsertMode.value === 'replace') {
-    draftBody.value = output
-  } else {
-    draftBody.value = draftBody.value ? `${draftBody.value}\n\n${output}` : output
+async function useAiOutput() {
+  if (aiRunning.value || aiApplying.value || aiApplied.value || !detail.value) return
+  if (aiSourceItemId.value !== detail.value.item.id) {
+    toast('请回到生成时的稿件使用此结果', 'error')
+    return
   }
-  aiOutput.value = ''
-  aiStopped.value = false
-  // 配图可能在用户点「使用结果」之前就生成完了，这里补插到占位符
-  applyGeneratedInlineImages()
+  const output = articleBodyFromOutput(aiOutput.value)
+  if (!output.trim()) return
+  aiApplying.value = true
+  try {
+    if (aiInsertMode.value === 'replace' && draftBody.value.trim()) {
+      if (!await confirm('此操作会用 AI 结果替换当前正文，请确认已保留需要的内容。', '替换全文')) return
+      // 确认对话框打开期间可能切换稿件，不得覆盖另一篇正文。
+      if (aiSourceItemId.value !== detail.value?.item.id) return
+    }
+    if (aiInsertMode.value === 'replace') {
+      draftBody.value = output
+    } else {
+      draftBody.value = draftBody.value ? `${draftBody.value}\n\n${output}` : output
+    }
+    aiApplied.value = true
+    applyGeneratedInlineImages()
+    workspaceView.value = 'draft'
+    await nextTick()
+    workspaceRef.value?.scrollIntoView({ block: 'start', behavior: 'auto' })
+    // 立即排入现有串行保存队列，不再等待 1.5 秒防抖。
+    await flushAutoSave()
+    toast(autoSaveStatus.value === 'error' ? '已加入正文，但保存失败，请重试保存' : '已加入正文，AI 结果仍保留，可随时对照')
+  } finally {
+    aiApplying.value = false
+  }
 }
 
 /** 把已生成、尚未进正文的自动配图补插到当前文章的 {{imageN}} 位置 */
@@ -1144,6 +1255,151 @@ const imgResults = ref([]) // [{assetId, blobUrl, rawUrl, mime, jobId}]
 async function openImageTab() {
   rightTab.value = 'image'
   await Promise.all([loadImageProviderStatus(), loadInlineStyles(), loadBaseStyles()])
+}
+
+// ─── 原创检测 Tab ────────────────────────────────────────────────
+const originalityOpen = ref(true)
+const originalityLoading = ref(false)
+const originalityError = ref('')
+const originalityAnalysis = ref(null)
+
+// 比对范围与历史
+const compareScope = ref('all')
+const showAnalysisHistory = ref(false)
+const analysisList = ref([])
+const analysisHistoryCount = ref(0)
+
+// 报告导出：后端直接出文件，前端带鉴权下载（<a href> 带不了 Authorization）
+const reportExportOptions = [
+  { label: 'TXT（.txt）', key: 'txt' },
+  { label: 'Markdown（.md，可贴进文档）', key: 'markdown' },
+  { label: '图片（.png）', key: 'png' }
+]
+
+const LEVEL_LABEL = { excellent: '优秀', good: '良好', fair: '中等', poor: '偏低' }
+
+const originalityLevelLabel = computed(
+  () => LEVEL_LABEL[originalityAnalysis.value?.level] || '未知'
+)
+
+/**
+ * 五维评分视图模型。
+ * `similarity` 是「越高越像」，跟其余四维方向相反：高相似度是坏消息，
+ * 所以配色要反过来，语料为空时显示「样本不足」而不是 0 分。
+ */
+const originalityDimensions = computed(() => {
+  const data = originalityAnalysis.value
+  if (!data) return []
+  const scores = data.scoreboard || {}
+  const corpusSize = data.corpusSize ?? 0
+  const dimensions = [
+    { key: 'similarity', label: '相似度', weight: 40, inverted: true, hint: '越低越好' },
+    { key: 'originality', label: '观点独特性', weight: 25, hint: '越高越好' },
+    { key: 'structure', label: '结构层次', weight: 15, hint: '越高越好' },
+    { key: 'dataAccuracy', label: '数据支撑度', weight: 12, hint: '越高越好' },
+    { key: 'styleUniqueness', label: '文风辨识度', weight: 8, hint: '越高越好' }
+  ]
+  return dimensions.map((dim) => {
+    const value = scores[dim.key] ?? 0
+    const unknown = dim.key === 'similarity' && corpusSize === 0
+    const tone = unknown
+      ? 'muted'
+      : dim.inverted
+        ? value <= 30
+          ? 'good'
+          : value <= 55
+            ? 'warn'
+            : 'bad'
+        : value >= 75
+          ? 'good'
+          : value >= 60
+            ? 'warn'
+            : 'bad'
+    return {
+      ...dim,
+      value,
+      display: unknown ? '样本不足' : String(value),
+      percent: unknown ? 0 : Math.max(3, Math.min(100, value)),
+      tone
+    }
+  })
+})
+
+const originalitySegments = computed(() => {
+  const articles = originalityAnalysis.value?.details?.similarArticles || []
+  return articles.flatMap((article) =>
+    (article.matchingSnippets || []).map((seg) => ({ ...seg, articleTitle: article.title }))
+  )
+})
+
+async function analyzeOriginality() {
+  const version = detail.value?.versions?.[0]
+  if (!version) {
+    originalityError.value = '请先保存稿件'
+    return
+  }
+
+  originalityLoading.value = true
+  originalityError.value = ''
+
+  try {
+    const response = await api.post('/content/analyze-originality', {
+      contentVersionId: version.id,
+      compareScope: compareScope.value,
+      useCache: true
+    })
+    originalityAnalysis.value = response
+    await loadAnalysisHistory(version.id)
+  } catch (err) {
+    originalityError.value = err.message || '检测失败'
+  } finally {
+    originalityLoading.value = false
+  }
+}
+
+// 历史记录：与检测结果同一个数据源，改了正文再测会多一条
+async function loadAnalysisHistory(contentVersionId) {
+  try {
+    const response = await api.get(`/originality/${contentVersionId}/history?limit=10`)
+    analysisList.value = response.items || []
+    analysisHistoryCount.value = analysisList.value.length
+  } catch (err) {
+    console.error('加载历史失败:', err)
+  }
+}
+
+async function handleReportExport(key) {
+  const analysisId = originalityAnalysis.value?.analysisId
+  if (!analysisId) return
+  const endpoint = { txt: 'report/txt', markdown: 'report/markdown', png: 'report/png' }[key]
+  if (!endpoint) return
+  try {
+    await downloadAuthenticated(`/originality/${analysisId}/${endpoint}`, `原创度报告.${key}`)
+    toast('报告已开始下载')
+  } catch (err) {
+    toast(err.message || '导出失败', 'error')
+  }
+}
+
+function formatDate(dateString) {
+  const date = new Date(dateString)
+  return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+}
+
+function formatDateTime(dateString) {
+  if (!dateString) return ''
+  const date = new Date(dateString)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleString('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+}
+
+function openOriginalityTab() {
+  rightTab.value = 'originality'
 }
 
 /** 从当前文章标题 + 正文前 300 字提炼图像 prompt（调用 SSE 流） */
@@ -1452,6 +1708,7 @@ onBeforeUnmount(() => {
   stopImgPoll()
   releaseImgResults()
   clearTimeout(imagePreferencesTimer)
+  clearTimeout(flowDebounce)
   // 组件卸载时若有待保存内容，立即同步
   flushAutoSave()
 })
@@ -1695,7 +1952,15 @@ onBeforeUnmount(() => {
         </template>
       </aside>
 
-      <section class="card studio-editor" aria-label="稿件编辑器">
+      <section ref="workspaceRef" class="card studio-editor" aria-label="创作工作区">
+        <nav class="studio-workspace-nav" aria-label="写作视图">
+          <div class="studio-workspace-tabs" role="tablist" aria-label="正文与 AI 结果">
+            <button id="workspace-draft-tab" role="tab" :aria-selected="workspaceView === 'draft'" aria-controls="workspace-draft" :class="{ 'is-active': workspaceView === 'draft' }" @click="workspaceView = 'draft'">正文编辑</button>
+            <button id="workspace-result-tab" role="tab" :aria-selected="workspaceView === 'result'" aria-controls="workspace-result" :class="{ 'is-active': workspaceView === 'result' }" @click="workspaceView = 'result'">AI 生成结果 <span v-if="aiOutput || aiRunning" class="studio-result-dot" aria-hidden="true"></span></button>
+          </div>
+          <span class="studio-workspace-caption">{{ workspaceView === 'draft' ? '你的正式稿件' : '独立预览 · 不会自动覆盖正文' }}</span>
+        </nav>
+        <div id="workspace-draft" v-show="workspaceView === 'draft'" role="tabpanel" aria-labelledby="workspace-draft-tab" class="studio-draft-surface">
         <template v-if="detail">
           <header class="studio-doc-head">
             <input
@@ -1723,6 +1988,10 @@ onBeforeUnmount(() => {
               <span class="studio-chip">{{ draftBody.length }} 字</span>
             </div>
           </header>
+          <n-alert v-if="hasEscapedArticleBreaks" type="warning" :bordered="false">
+            检测到正文中的换行被转义，导致标题、列表和段落无法排版。
+            <n-button size="small" @click="repairArticleBreaks">修复换行与排版</n-button>
+          </n-alert>
           <MarkdownEditor
             v-model="draftBody"
             :enable-ai-bubble="true"
@@ -1731,11 +2000,33 @@ onBeforeUnmount(() => {
             @editor-ready="(ed) => (editorRef = ed)"
             @focusout="scheduleFlushPendingInlineImages"
           />
-          <p class="studio-doc-hint">AI 成文结果需点「使用结果」进入正文；配图生成后会自动落到正文对应位置</p>
+          <p class="studio-doc-hint">正文自动保存 · AI 结果保留在独立标签中，确认采用后才进入正文</p>
         </template>
         <div v-else class="empty">
           <span class="empty-title">选择或新建一篇稿件</span>
         </div>
+        </div>
+        <section id="workspace-result" v-show="workspaceView === 'result'" ref="aiResultRef" role="tabpanel" aria-labelledby="workspace-result-tab" class="studio-result-surface">
+          <header class="studio-result-header">
+            <div><span class="studio-section-label">AI 写作 / 生成结果</span><h2>{{ aiRunning ? '正在把想法写成文章' : aiApplied ? '已采用，结果为你保留' : aiOutput ? '先阅读，再决定采用' : '从一个想法开始' }}</h2></div>
+            <n-button v-if="aiRunning" size="small" @click="stopAi">停止生成</n-button>
+          </header>
+          <p class="studio-ai-status" role="status">{{ aiRunning ? (aiOutput ? '内容持续生成中，完成或停止后可采用' : '正在等待模型响应…') : aiStopped ? '已停止，可阅读并采用已有内容' : aiApplied ? '已加入正文；切换「正文编辑」继续修改。此处保留生成时的内容。' : '生成结果不会自动修改正文。追加保留原文，替换需再次确认。' }}</p>
+          <p v-if="aiModelInfo" class="studio-model-usage">{{ aiModelInfo }}</p>
+          <n-alert v-if="aiError" type="error" :bordered="false">{{ aiError }}</n-alert>
+          <template v-if="aiOutput">
+            <div class="studio-result-paper studio-ai-output-markdown" v-html="aiPreviewHtml"></div>
+            <footer class="studio-result-actions">
+              <div class="ai-insert-group" role="group" aria-label="采用方式">
+                <button class="ai-length-btn" :disabled="aiRunning || aiApplying || aiApplied" :class="{ 'is-active': aiInsertMode === 'append' }" :aria-pressed="aiInsertMode === 'append'" @click="aiInsertMode = 'append'">追加到正文末尾</button>
+                <button class="ai-length-btn" :disabled="aiRunning || aiApplying || aiApplied" :class="{ 'is-active': aiInsertMode === 'replace' }" :aria-pressed="aiInsertMode === 'replace'" @click="aiInsertMode = 'replace'">替换全文</button>
+              </div>
+              <n-button type="primary" :loading="aiApplying" :disabled="aiRunning || aiApplied || !detail || aiSourceItemId !== detail.item.id" @click="useAiOutput">{{ aiApplied ? '已加入正文' : '采用到正文' }}</n-button>
+              <n-button quaternary @click="workspaceView = 'draft'">返回正文</n-button>
+            </footer>
+          </template>
+          <div v-else-if="!aiRunning" class="studio-result-empty"><span aria-hidden="true">✎</span><h3>写下需求，让 AI 帮你起笔</h3><p>在右侧选择任务并描述主题，生成的文章会显示在这里。</p></div>
+        </section>
       </section>
 
       <aside class="card studio-tools" aria-label="创作工具">
@@ -1759,6 +2050,15 @@ onBeforeUnmount(() => {
             :aria-selected="rightTab === 'image'"
             @click="openImageTab"
           >配图</button>
+          <button
+            id="studio-tab-originality"
+            class="segmented-item"
+            :class="{ 'is-active': rightTab === 'originality' }"
+            role="tab"
+            aria-controls="studio-panel-originality"
+            :aria-selected="rightTab === 'originality'"
+            @click="openOriginalityTab"
+          >原创检测</button>
           <button
             id="studio-tab-inspiration"
             class="segmented-item"
@@ -1787,34 +2087,11 @@ onBeforeUnmount(() => {
           role="tabpanel"
           aria-labelledby="studio-tab-ai"
         >
-          <section v-if="aiRunning || aiOutput || aiError || aiStopped" ref="aiResultRef" class="studio-ai-output" aria-label="AI 生成结果">
-            <div class="studio-ai-output-head">
-              <div>
-                <span class="studio-ai-output-label">生成结果预览</span>
-                <p class="studio-model-usage">预览不会自动修改正文</p>
-              </div>
-              <n-button v-if="aiRunning" quaternary size="small" @click="stopAi">中断</n-button>
-            </div>
-            <p class="studio-ai-status" role="status">{{ aiRunning ? (aiOutput ? '正在生成…' : '正在等待生成结果…') : aiStopped ? (aiOutput ? '已中断，已有内容可继续使用' : '已中断') : aiError ? '生成失败' : '生成结束' }}</p>
-            <p v-if="aiModelInfo" class="studio-model-usage">{{ aiModelInfo }}</p>
-            <n-alert v-if="aiError" type="error" :bordered="false">{{ aiError }}</n-alert>
-            <template v-if="aiOutput">
-              <div class="studio-ai-output-content" tabindex="0" aria-label="生成内容预览">
-                <div class="studio-ai-output-markdown" v-html="aiPreviewHtml"></div>
-              </div>
-              <div class="ai-insert-mode">
-                <span class="ai-insert-label">插入方式</span>
-                <div class="ai-insert-group" role="group" aria-label="插入方式">
-                  <button class="ai-length-btn" :class="{ 'is-active': aiInsertMode === 'append' }" :aria-pressed="aiInsertMode === 'append'" @click="aiInsertMode = 'append'">追加末尾</button>
-                  <button class="ai-length-btn" :class="{ 'is-active': aiInsertMode === 'replace' }" :aria-pressed="aiInsertMode === 'replace'" @click="aiInsertMode = 'replace'">替换全文</button>
-                </div>
-              </div>
-              <n-space :size="8" class="studio-actions">
-                <n-button size="small" type="primary" @click="useAiOutput">插入正文</n-button>
-                <n-button quaternary size="small" @click="aiOutput = ''; aiStopped = false">丢弃</n-button>
-              </n-space>
-            </template>
-          </section>
+          <div class="studio-brief-label">创作助手</div>
+          <div v-if="aiOutput || aiRunning" class="studio-result-notice" role="status">
+            <span>{{ aiRunning ? '文章正在主工作区生成' : aiApplied ? '结果已采用，仍可查看原稿' : '新结果已就绪，等待你确认' }}</span>
+            <n-button text size="small" @click="workspaceView = 'result'">查看结果 →</n-button>
+          </div>
           <div class="row studio-tool-head">
             <div>
               <span class="studio-section-label studio-section-label-flush">AI 写作</span>
@@ -1849,7 +2126,7 @@ onBeforeUnmount(() => {
                 v-model:value="aiPrompt"
                 type="textarea"
                 class="studio-ai-prompt"
-                :autosize="{ minRows: 4, maxRows: 10 }"
+                :autosize="{ minRows: 3, maxRows: 5 }"
                 placeholder="例如：围绕「一周三篇图文」写一篇初稿，语气平实"
               />
             </div>
@@ -1866,6 +2143,24 @@ onBeforeUnmount(() => {
                 >{{ opt.label }}</button>
               </div>
             </div>
+            <div class="studio-ai-quick-actions">
+              <n-button block type="primary" :loading="aiRunning" :disabled="!detail || aiApplying || imagePreferencesLoading" @click="runAi">开始生成</n-button>
+              <n-button block secondary @click="aiSettingsOpen = true">配图与高级设置</n-button>
+              <n-button v-if="aiRunning" block @click="stopAi">停止生成</n-button>
+            </div>
+            <n-alert v-if="aiPromptError" type="error" :bordered="false">{{ aiPromptError }}</n-alert>
+            <n-modal v-model:show="aiSettingsOpen" preset="card" title="AI 写作设置" class="studio-ai-settings-modal" :style="{ width: 'min(640px, calc(100vw - 32px))' }" :bordered="false">
+              <div class="studio-ai-settings-body">
+            <n-checkbox
+              v-if="usesWritingStyle"
+              v-model:checked="aiUseLayoutComponents"
+              :disabled="aiRunning"
+            >
+              <span>
+                <strong>使用排版小组件</strong>
+                <small>默认关闭；开启后 AI 可按需使用导语、数据、步骤等小组件</small>
+              </span>
+            </n-checkbox>
             <n-checkbox
               v-model:checked="aiAutoImages"
               :disabled="aiRunning || aiTask !== 'article' || imagePreferencesLoading"
@@ -1936,18 +2231,6 @@ onBeforeUnmount(() => {
               <p v-if="imagePreferencesError" class="ai-image-settings-error">{{ imagePreferencesError }}</p>
             </section>
             <p v-else-if="imagePreferencesError" class="ai-image-settings-error">{{ imagePreferencesError }}</p>
-            <n-space :size="8" class="studio-actions">
-              <n-button
-                size="small"
-                type="primary"
-                :loading="aiRunning"
-                :disabled="imagePreferencesLoading"
-                @click="runAi"
-              >
-                开始生成
-              </n-button>
-            </n-space>
-            <n-alert v-if="aiPromptError" type="error" :bordered="false">{{ aiPromptError }}</n-alert>
             <section v-if="sceneDrafts.length" class="ai-image-settings" aria-label="手动配图">
               <span class="studio-section-label studio-section-label-flush">画面描述</span>
               <p class="ai-image-settings-status">只含画面，不含基础风格。改完再按此生成。</p>
@@ -1981,6 +2264,14 @@ onBeforeUnmount(() => {
                 若所选供应商不支持独立负向字段，负向词会以文本并入正向提示词并在生成结果中标注。
               </p>
             </section>
+              </div>
+              <template #footer>
+                <div class="studio-ai-settings-footer">
+                  <span>设置会用于下一次生成，关闭不会丢失已填写的内容</span>
+                  <n-button type="primary" @click="aiSettingsOpen = false">完成设置</n-button>
+                </div>
+              </template>
+            </n-modal>
           </div>
         </section>
 
@@ -1996,6 +2287,7 @@ onBeforeUnmount(() => {
             <div>
               <span class="studio-section-label studio-section-label-flush">写作流程</span>
               <p class="studio-tool-description">{{ flow?.skillName || '按当前写作风格的步骤检查这篇稿' }}</p>
+              <p class="flow-source-hint">按编辑器当前内容实时检查（含未保存草稿）</p>
             </div>
             <n-button quaternary size="small" :loading="flowLoading" :disabled="!detail" @click="loadWritingFlow">
               重新检查
@@ -2012,22 +2304,271 @@ onBeforeUnmount(() => {
             <li v-for="step in flow.steps" :key="step.tool" class="flow-step" :class="flowStepTone(step)">
               <span class="flow-index">{{ String(step.index).padStart(2, '0') }}</span>
               <div class="flow-main">
-                <div class="flow-title">{{ step.label }}</div>
+                <div class="flow-title-row">
+                  <div class="flow-title">{{ step.label }}</div>
+                  <button
+                    v-if="FLOW_RULE_FOCUS[step.tool]"
+                    type="button"
+                    class="flow-config-link"
+                    @click="goFlowRules(step.tool)"
+                  >配置规则</button>
+                </div>
                 <div class="flow-meta">{{ flowStepSummary(step) }}</div>
-                <ul v-if="step.tool === 'review_article' && step.result?.violations?.length" class="flow-list">
-                  <li v-for="item in step.result.violations" :key="item.id">{{ item.message }}</li>
-                </ul>
-                <ul v-else-if="step.tool === 'check_ai_tone' && step.result?.hits?.length" class="flow-list">
-                  <li v-for="(hit, index) in step.result.hits.slice(0, 6)" :key="`${hit.offset}-${index}`">
-                    「{{ hit.excerpt }}」
+
+                <!-- 审稿：逐条规则给出通过情况，而不是只列未通过项 -->
+                <ul v-if="step.tool === 'review_article' && step.result?.rules?.length" class="flow-rule-list">
+                  <li
+                    v-for="rule in step.result.rules"
+                    :key="rule.id"
+                    class="flow-rule"
+                    :class="rule.ok === true ? 'is-pass' : rule.ok === false ? 'is-fail' : 'is-skip'"
+                  >
+                    <span class="flow-rule-icon">{{ rule.ok === true ? '✓' : rule.ok === false ? '✗' : '—' }}</span>
+                    <span class="flow-rule-text">{{ flowRuleLabel(rule) }}</span>
+                    <span v-if="rule.ok === null" class="flow-rule-msg">配置无效，已跳过</span>
+                    <span v-else-if="rule.message" class="flow-rule-msg">{{ rule.message }}</span>
                   </li>
                 </ul>
-                <p v-else-if="step.tool === 'extract_facts' && step.result?.numbers?.length" class="flow-meta">
+
+                <template v-else-if="step.tool === 'check_ai_tone'">
+                  <!-- 词表概览：说明这一项检查依据的是哪些词条 -->
+                  <p v-if="step.result?.lexicon" class="flow-lexicon">
+                    <span
+                      v-for="chip in flowLexiconChips(step.result.lexicon)"
+                      :key="chip.key"
+                      class="flow-lexicon-chip"
+                    >{{ chip.text }}</span>
+                  </p>
+                  <ul v-if="step.result?.hits?.length" class="flow-list">
+                    <li v-for="(hit, index) in step.result.hits.slice(0, 6)" :key="`${hit.offset}-${index}`">
+                      「{{ hit.excerpt }}」
+                    </li>
+                  </ul>
+                </template>
+
+                <p
+                  v-else-if="step.tool === 'extract_facts' && step.result?.numbers?.length"
+                  class="flow-meta"
+                >
                   {{ step.result.numbers.slice(0, 6).join('、') }}
+                </p>
+                <p
+                  v-else-if="step.tool === 'plan_images' && step.result?.policy"
+                  class="flow-meta"
+                >
+                  正文图上限 {{ step.result.policy.maxInlineImages ?? 3 }} 张 ·
+                  封面 {{ step.result.policy.coverAspectRatio || '3:4' }} ·
+                  正文 {{ step.result.policy.inlineAspectRatio || '1:1' }}
                 </p>
               </div>
             </li>
           </ol>
+        </section>
+
+        <!-- 原创检测 Tab -->
+        <section
+          v-else-if="rightTab === 'originality'"
+          id="studio-panel-originality"
+          class="studio-tab-panel"
+          role="tabpanel"
+          aria-labelledby="studio-tab-originality"
+        >
+          <div class="row studio-tool-head">
+            <div>
+              <span class="studio-section-label studio-section-label-flush">原创度检测</span>
+              <p class="studio-tool-description">检测文章与已有稿件的重合度及多维度评分</p>
+            </div>
+            <div class="spacer" />
+            <n-button quaternary size="small" :aria-label="originalityOpen ? '收起' : '展开'" @click="originalityOpen = !originalityOpen">
+              {{ originalityOpen ? '▾' : '▸' }}
+            </n-button>
+          </div>
+
+          <div v-if="originalityOpen" class="studio-tool-stack">
+            <n-alert v-if="originalityError" type="error" :bordered="false">{{ originalityError }}</n-alert>
+            
+            <!-- 比对范围 -->
+            <div class="originality-options">
+              <n-select
+                v-model:value="compareScope"
+                :options="[
+                  { label: '与全部稿件比对', value: 'all' },
+                  { label: '只与我的稿件比对', value: 'own' }
+                ]"
+                size="small"
+                style="flex: 1"
+              />
+            </div>
+            
+            <div v-if="originalityLoading" class="stack" style="margin-top: var(--space-3)">
+              <div class="skeleton" style="height: 200px" />
+              <p style="text-align: center; margin-top: var(--space-2); font-size: 12px; color: var(--text-secondary)">
+                正在分词比对，长文需要几秒…
+              </p>
+            </div>
+            
+            <div v-else-if="!originalityAnalysis" style="text-align: center; padding: var(--space-5) var(--space-2)">
+              <p style="margin-bottom: var(--space-3); color: var(--text-secondary)">点击下方按钮开始检测</p>
+              <n-button type="primary" size="small" :loading="originalityLoading" @click="analyzeOriginality">
+                开始分析
+              </n-button>
+            </div>
+            
+            <div v-else class="originality-result">
+              <!-- 结论卡片 -->
+              <div class="orig-summary" :class="[`level-${originalityAnalysis.level}`]">
+                <div class="orig-summary-top">
+                  <span class="orig-total">{{ originalityAnalysis.totalScore }}</span>
+                  <span class="orig-level">{{ originalityLevelLabel }}</span>
+                  <span v-if="originalityAnalysis.cached" class="orig-badge">复用上次结果</span>
+                  <span v-else-if="originalityAnalysis.processingTimeMs" class="orig-cost">
+                    {{ originalityAnalysis.processingTimeMs }}ms
+                  </span>
+                </div>
+                <p class="orig-summary-text">{{ originalityAnalysis.summary }}</p>
+              </div>
+
+              <!-- 五维度评分 -->
+              <div class="originality-scores">
+                <div v-for="dim in originalityDimensions" :key="dim.key" class="score-item">
+                  <div class="score-item-head">
+                    <span class="score-label">{{ dim.label }}</span>
+                    <span class="score-value" :class="[`tone-${dim.tone}`]">{{ dim.display }}</span>
+                  </div>
+                  <div class="score-bar">
+                    <div
+                      class="score-fill"
+                      :class="[`tone-${dim.tone}`]"
+                      :style="{ width: dim.percent + '%' }"
+                    />
+                  </div>
+                  <span class="score-hint">权重 {{ dim.weight }}% · {{ dim.hint }}</span>
+                </div>
+              </div>
+
+              <p v-if="originalityAnalysis.corpusSize === 0" class="orig-note">
+                库里还没有其它稿件可供比对，相似度与观点独特性不参与计分。
+              </p>
+              <p v-else class="orig-note">
+                与库内 {{ originalityAnalysis.corpusSize }} 篇稿件比对<template
+                  v-if="originalityAnalysis.selfVersionCount"
+                >，同稿的 {{ originalityAnalysis.selfVersionCount }} 个历史版本未计入</template>。
+              </p>
+
+              <!-- 风险提示 -->
+              <div v-if="originalityAnalysis.details.riskFlags.length" class="originality-section">
+                <h4 class="originality-section-title">风险提示</h4>
+                <div class="risk-list">
+                  <div
+                    v-for="(risk, idx) in originalityAnalysis.details.riskFlags"
+                    :key="idx"
+                    class="risk-item"
+                    :class="[`severity-${risk.severity}`]"
+                  >
+                    <span class="risk-dot" />
+                    <div class="risk-body">
+                      <div class="risk-title">{{ risk.position }}</div>
+                      <div class="risk-reason">{{ risk.reason }}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 相似文章 -->
+              <div v-if="originalityAnalysis.details.similarArticles.length" class="originality-section">
+                <h4 class="originality-section-title">最相似的稿件</h4>
+                <div
+                  v-for="article in originalityAnalysis.details.similarArticles"
+                  :key="article.id"
+                  class="similar-article"
+                >
+                  <div class="similar-article-title">{{ article.title }}</div>
+                  <div class="similar-article-meta">{{ (article.similarity * 100).toFixed(0) }}%</div>
+                </div>
+              </div>
+
+              <!-- 重合片段 -->
+              <div v-if="originalitySegments.length" class="originality-section">
+                <h4 class="originality-section-title">重合片段</h4>
+                <div v-for="(seg, idx) in originalitySegments" :key="idx" class="segment-item">
+                  <div class="segment-head">
+                    <span>{{ seg.position }}</span>
+                    <span class="segment-ratio">{{ Math.round(seg.similarity * 100) }}%</span>
+                  </div>
+                  <p class="segment-line"><span class="segment-tag">本文</span>{{ seg.targetText }}</p>
+                  <p class="segment-line segment-line-muted">
+                    <span class="segment-tag">对方</span>{{ seg.sourceText }}
+                  </p>
+                </div>
+              </div>
+
+              <!-- 关键观点 -->
+              <div v-if="originalityAnalysis.details.keyPoints.length" class="originality-section">
+                <h4 class="originality-section-title">关键观点</h4>
+                <div class="point-chips">
+                  <span
+                    v-for="point in originalityAnalysis.details.keyPoints"
+                    :key="point.point"
+                    class="point-chip"
+                    :class="[point.sources ? 'is-shared' : 'is-new']"
+                    :title="`库内 ${point.sources} 篇提过，新颖度 ${point.novelty}`"
+                  >
+                    {{ point.point }}
+                    <em v-if="!point.sources">新</em>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 改进建议 -->
+              <div v-if="originalityAnalysis.recommendations.length" class="originality-section">
+                <h4 class="originality-section-title">改进建议</h4>
+                <ul class="recommendations-list">
+                  <li v-for="(rec, idx) in originalityAnalysis.recommendations" :key="idx">{{ rec }}</li>
+                </ul>
+              </div>
+
+              <!-- 操作 -->
+              <div class="originality-actions">
+                <n-space :size="8" style="margin-bottom: var(--space-3)">
+                  <n-button size="small" type="primary" :loading="originalityLoading" @click="analyzeOriginality">
+                    重新分析
+                  </n-button>
+                  <n-dropdown :options="reportExportOptions" @select="handleReportExport">
+                    <n-button size="small">导出报告</n-button>
+                  </n-dropdown>
+                  <n-button
+                    v-if="analysisHistoryCount > 0"
+                    size="small"
+                    text
+                    @click="showAnalysisHistory = !showAnalysisHistory"
+                  >
+                    {{ showAnalysisHistory ? '隐藏' : '显示' }}历史 ({{ analysisHistoryCount }})
+                  </n-button>
+                </n-space>
+              </div>
+
+              <!-- 检测历史 -->
+              <div v-if="showAnalysisHistory && analysisList.length > 0" class="originality-section">
+                <h4 class="originality-section-title">检测历史</h4>
+                <div class="history-timeline">
+                  <div v-for="item in analysisList" :key="item.analysisId" class="history-item">
+                    <div class="history-marker" :class="[`level-${item.level}`]" />
+                    <div class="history-content">
+                      <div class="history-score">
+                        <span class="history-value">{{ item.totalScore }}</span>
+                        <span class="history-level">{{ LEVEL_LABEL[item.level] || item.level }}</span>
+                        <span class="history-time">{{ formatDateTime(item.analyzedAt) }}</span>
+                      </div>
+                      <div class="history-meta">
+                        相似度 {{ item.corpusSize ? item.similarity + '%' : '样本不足' }} · 比对
+                        {{ item.corpusSize }} 篇
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <!-- 灵感 Tab -->
@@ -2365,9 +2906,9 @@ onBeforeUnmount(() => {
 }
 .studio-drafts,
 .studio-tools {
-  position: sticky;
-  top: 80px;
-  max-height: calc(100vh - 104px);
+  position: relative;
+  top: auto;
+  max-height: none;
   border-color: color-mix(in srgb, var(--color-border) 78%, transparent);
   background: color-mix(in srgb, var(--color-surface) 82%, var(--color-bg));
   box-shadow: none;
@@ -2399,7 +2940,7 @@ onBeforeUnmount(() => {
 /* ---------- 左侧稿件栏 ---------- */
 .studio-drafts {
   padding: var(--space-3);
-  overflow-y: auto;
+  overflow: visible;
   scrollbar-width: thin;
   scrollbar-color: var(--color-border-strong) transparent;
 }
@@ -2650,6 +3191,85 @@ onBeforeUnmount(() => {
 }
 .flow-list {
   padding-left: 1.1em;
+}
+.flow-source-hint {
+  margin: 2px 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
+}
+.flow-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.flow-config-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--color-primary, #6a5cff);
+  font-size: var(--font-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.flow-config-link:hover {
+  text-decoration: underline;
+}
+.flow-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-xs);
+}
+.flow-rule {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.flow-rule-icon {
+  flex: none;
+  width: 1.2em;
+  text-align: center;
+  font-weight: 700;
+}
+.flow-rule.is-pass .flow-rule-icon {
+  color: var(--color-success);
+}
+.flow-rule.is-fail .flow-rule-icon,
+.flow-rule.is-fail .flow-rule-msg {
+  color: var(--color-danger);
+}
+.flow-rule.is-skip .flow-rule-icon {
+  color: var(--color-text-muted);
+}
+.flow-rule-text {
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+.flow-rule.is-skip .flow-rule-text {
+  color: var(--color-text-muted);
+}
+.flow-rule-msg {
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+.flow-lexicon {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+}
+.flow-lexicon-chip {
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
+  white-space: nowrap;
 }
 
 /* 折叠态：窄轨道，仅保留把手与计数 */
@@ -2904,7 +3524,7 @@ onBeforeUnmount(() => {
 .studio-tab-panel {
   min-height: 0;
   padding: var(--space-4);
-  overflow-y: auto;
+  overflow: visible;
   scrollbar-width: thin;
   scrollbar-color: var(--color-border-strong) transparent;
 }
@@ -2928,6 +3548,21 @@ onBeforeUnmount(() => {
 .studio-tool-stack .field-error {
   margin: 0;
 }
+.studio-ai-quick-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: grid;
+  gap: 10px;
+  margin: 0 -4px -4px;
+  padding: 12px 4px 4px;
+  background: linear-gradient(180deg, transparent, var(--color-surface) 24%);
+}
+.studio-ai-settings-body { display: flex; flex-direction: column; gap: 16px; max-height: min(60vh, 600px); overflow-y: auto; padding-right: 8px; }
+.studio-ai-settings-body .ai-image-settings { margin: 0; }
+.studio-ai-settings-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.studio-ai-settings-footer span { color: var(--color-text-muted); font-size: 12px; }
+
 .studio-ai-prompt {
   min-height: 108px;
   line-height: 1.7;
@@ -3239,6 +3874,45 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-lg);
 }
 
+/* 工作台：稿件导航 / 主画布 / 创作设置 */
+.studio-grid { grid-template-columns: 210px minmax(0, 1fr) 310px; gap: 16px; }
+.studio-grid.drafts-collapsed { grid-template-columns: 48px minmax(0, 1fr) 310px; }
+.studio-editor { overflow: hidden; border-radius: var(--radius-lg); }
+.studio-workspace-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--color-border); background: var(--color-surface-raised); }
+.studio-workspace-tabs { display: flex; gap: 6px; }
+.studio-workspace-tabs button { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 12px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--color-text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
+.studio-workspace-tabs button.is-active { background: var(--color-surface); color: var(--color-accent); box-shadow: inset 0 -2px var(--color-accent); font-weight: 600; }
+.studio-workspace-tabs button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.studio-workspace-caption { font-size: 11px; color: var(--color-text-muted); }
+.studio-result-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); }
+.studio-draft-surface { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.studio-draft-surface[style*="display: none"], .studio-result-surface[style*="display: none"] { display: none; }
+.studio-result-surface { min-height: 65vh; padding: 28px; scroll-margin-top: 90px; }
+.studio-result-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.studio-result-header h2 { margin: 8px 0 0; color: var(--color-text-primary); font-size: 22px; font-weight: 600; letter-spacing: -0.025em; }
+.studio-result-paper { margin-top: 24px; padding: 24px 0; min-height: 260px; border-top: 1px solid var(--color-border); font-size: 15px; line-height: 1.95; }
+.studio-result-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; position: sticky; bottom: 12px; padding: 14px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); box-shadow: 0 6px 24px color-mix(in srgb, var(--color-text-primary) 8%, transparent); }
+.studio-result-actions .ai-insert-group { margin-right: auto; flex-wrap: wrap; }
+.studio-result-empty { display: grid; justify-items: center; padding: 80px 16px; text-align: center; color: var(--color-text-secondary); }
+.studio-result-empty > span { font-size: 36px; color: var(--color-accent); }
+.studio-result-empty h3 { margin: 20px 0 8px; color: var(--color-text-primary); }
+.studio-result-empty p { margin: 0; font-size: 13px; line-height: 1.8; }
+.studio-brief-label { margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--color-border); color: var(--color-text-muted); font-size: 11px; letter-spacing: 0.12em; }
+.studio-result-notice { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 20px; padding: 12px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-accent-soft); color: var(--color-text-secondary); font-size: 12px; }
+@media (max-width: 1180px) and (min-width: 781px) {
+  .studio-grid { grid-template-columns: 170px minmax(0, 1fr); }
+  .studio-grid.drafts-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
+  .studio-workspace-caption { display: none; }
+}
+@media (max-width: 780px) {
+  .studio-workspace-nav { padding: 10px; }
+  .studio-workspace-caption { display: none; }
+  .studio-result-surface { padding: 16px; }
+  .studio-result-header h2 { font-size: 19px; }
+  .studio-result-actions { bottom: 0; }
+  .studio-result-paper { font-size: 14px; }
+}
+
 /* ---------- 灵感列表 ---------- */
 .inspiration-list {
   display: flex;
@@ -3305,21 +3979,28 @@ onBeforeUnmount(() => {
   .studio-grid.drafts-collapsed {
     grid-template-columns: 56px minmax(0, 1fr);
   }
+  /* 中等宽度下编辑器和助手并排，避免助手被排到正文之后 */
+  .studio-tools {
+    position: sticky;
+    top: 12px;
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+    max-height: calc(100vh - 124px);
+    overflow-y: auto;
+  }
   .studio-tools,
   .studio-tools-skeleton {
-    position: relative;
-    top: auto;
+    position: sticky;
+    top: 12px;
     grid-column: 2;
-    max-height: none;
-  }
-  .studio-tools {
-    overflow: visible;
+    grid-row: 1;
+    align-self: start;
+    max-height: calc(100vh - 124px);
+    overflow-y: auto;
   }
   .studio-tools .studio-tab-panel {
     overflow: visible;
-  }
-  .studio-tools-skeleton {
-    height: 320px;
   }
 }
 
@@ -3463,5 +4144,438 @@ onBeforeUnmount(() => {
   .inspiration-item {
     padding: var(--space-3);
   }
+}
+
+/* 原创检测样式 */
+.orig-summary {
+  padding: var(--space-3) var(--space-4);
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-primary);
+  background: var(--color-fill);
+  margin-bottom: var(--space-4);
+}
+
+.orig-summary.level-excellent { border-left-color: #10b981; }
+.orig-summary.level-good { border-left-color: #3b82f6; }
+.orig-summary.level-fair { border-left-color: #f59e0b; }
+.orig-summary.level-poor { border-left-color: #ef4444; }
+
+.orig-summary-top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.orig-total {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.orig-level {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.orig-badge {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.orig-cost {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.orig-summary-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+.originality-scores {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.score-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.score-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.score-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.score-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+
+.score-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--color-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.score-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #10b981);
+  transition: width 0.3s ease;
+}
+
+.score-fill.tone-good { background: linear-gradient(90deg, #34d399, #10b981); }
+.score-fill.tone-warn { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+.score-fill.tone-bad { background: linear-gradient(90deg, #f87171, #ef4444); }
+.score-fill.tone-muted { background: var(--color-border); }
+
+.score-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.score-value.tone-good { color: #10b981; }
+.score-value.tone-warn { color: #f59e0b; }
+.score-value.tone-bad { color: #ef4444; }
+.score-value.tone-muted { color: var(--text-secondary); font-weight: 400; }
+
+.orig-note {
+  margin: calc(var(--space-2) * -1) 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+/* 风险提示 */
+.risk-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.risk-item {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: 4px;
+  background: var(--color-fill-secondary);
+  border-left: 2px solid #f59e0b;
+}
+
+.risk-item.severity-error {
+  border-left-color: #ef4444;
+}
+
+.risk-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  flex: none;
+}
+
+.risk-item.severity-error .risk-dot {
+  background: #ef4444;
+}
+
+.risk-body { min-width: 0; }
+
+.risk-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.risk-reason {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+/* 重合片段 */
+.segment-item {
+  padding: var(--space-2);
+  margin-bottom: var(--space-2);
+  background: var(--color-fill-secondary);
+  border-radius: 4px;
+}
+
+.segment-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.segment-ratio {
+  font-weight: 600;
+  color: #f59e0b;
+}
+
+.segment-line {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-primary);
+}
+
+.segment-line-muted {
+  color: var(--text-secondary);
+}
+
+.segment-tag {
+  display: inline-block;
+  min-width: 32px;
+  margin-right: 4px;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 2px;
+  border: 1px solid var(--color-border);
+  color: var(--text-secondary);
+}
+
+/* 关键观点 */
+.point-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.point-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--color-border);
+  color: var(--text-secondary);
+  background: var(--color-fill-secondary);
+}
+
+.point-chip.is-new {
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #10b981;
+}
+
+.point-chip em {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.originality-section {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.originality-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: var(--space-2);
+  color: var(--text-primary);
+}
+
+.similar-article {
+  padding: var(--space-2);
+  margin-bottom: var(--space-2);
+  background: var(--color-fill-secondary);
+  border-radius: 4px;
+}
+
+.similar-article-title {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: var(--space-1);
+}
+
+.similar-article-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.recommendations-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.recommendations-list li {
+  padding: var(--space-2);
+  margin-bottom: var(--space-1);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--color-fill-secondary);
+  border-left: 2px solid var(--color-primary);
+  border-radius: 2px;
+}
+
+/* ═══════════════════════════════════════════════════════════════ */
+/* Phase 2 & 3：高级功能样式 */
+/* ═══════════════════════════════════════════════════════════════ */
+
+.originality-options {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin-bottom: var(--space-3);
+  padding: var(--space-2);
+  background: var(--color-fill);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.score-time {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.originality-actions {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+/* 检测历史样式 */
+.history-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  position: relative;
+  padding-left: var(--space-4);
+}
+
+.history-timeline::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-border);
+}
+
+.history-item {
+  display: flex;
+  gap: var(--space-2);
+  position: relative;
+}
+
+.history-marker {
+  position: absolute;
+  left: -12px;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-fill-secondary);
+  border: 2px solid var(--color-border);
+}
+
+.history-marker.level-excellent {
+  background: #10b981;
+  border-color: #059669;
+}
+
+.history-marker.level-good {
+  background: #3b82f6;
+  border-color: #2563eb;
+}
+
+.history-marker.level-fair {
+  background: #f59e0b;
+  border-color: #d97706;
+}
+
+.history-marker.level-poor {
+  background: #ef4444;
+  border-color: #dc2626;
+}
+
+.history-content {
+  flex: 1;
+  padding: var(--space-2);
+  background: var(--color-fill-secondary);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.history-score {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-1);
+}
+
+.history-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.history-time {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.history-change {
+  color: #10b981;
+  font-size: 11px;
+}
+
+.history-change:has(+ .negative) {
+  color: #ef4444;
+}
+
+.history-score {
+  justify-content: flex-start;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.history-level {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.history-time {
+  margin-left: auto;
+}
+
+.history-meta {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
 }
 </style>

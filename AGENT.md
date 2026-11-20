@@ -219,13 +219,41 @@ curl -X POST http://127.0.0.1:8000/api/v1/auth/login \
 
 ---
 
-## 测试
+## 测试与验证节奏
+
+**默认走增量，全量只在交付前跑一次。** 改几行就全量 `pytest -q` + `npm run build` 是最常见的时间浪费：后端全量 600+ 项、前端 `vite build` 是生产打包（压缩、分包、产物校验），都是分钟级。开发中用秒级的增量检查确认改动没坏，收尾交付时再跑全量兜底。
+
+### 开发中：按改动范围选最小检查
+
+| 改了什么 | 跑什么 | 不跑什么 |
+|---|---|---|
+| 后端单个模块 / 服务 | `pytest tests/test_<对应文件>.py -q`，跨模块时加 `-k "关键词"` | 全量 pytest |
+| 后端纯逻辑、不碰路由/模型 | 同上，只跑直接覆盖的用例 | compileall、前端任何命令 |
+| 前端 `.vue` / `.js` | **不用跑命令**：`npm run dev` 开着时 Vite HMR 即改即见，报错在终端和浏览器控制台 | `npm run build` |
+| 前端构建配置（`vite.config`、`package.json`） | `npm run build` | — |
+| 只改文档 / 注释 | 不跑 | 全部 |
 
 ```bash
 cd apps/api
-.venv/Scripts/python.exe -m pytest -q                  # 232 项
+# 增量：只跑受影响的测试文件（多数改动 10 秒内出结果）
+.venv/Scripts/python.exe -m pytest tests/test_writing_rules_api.py -q
+# 跨文件但不想全量时按关键字收窄
+.venv/Scripts/python.exe -m pytest -q -k "writing_rules or skill_registry"
+# 改了 import / 语法、想快速确认能编译：只编译改过的文件，不要 compileall 整棵 app
+.venv/Scripts/python.exe -m py_compile app/modules/writing_rules.py
+```
+
+选测试文件的规则：路由改动对应 `tests/test_<模块名>.py`；服务改动先找引用它的测试文件，找不到再加一个最小用例，不要靠全量碰运气。
+
+### 交付前：全量一次
+
+功能完成、准备提交或合并时跑完整回归，这是唯一需要全量的时机：
+
+```bash
+cd apps/api
+.venv/Scripts/python.exe -m pytest -q                  # 全量
 .venv/Scripts/python.exe -m compileall -q app          # 编译检查
-cd ../web && npm run build                             # 前端构建
+cd ../web && npm run build                             # 前端生产构建
 ```
 
 **测试注意事项**：

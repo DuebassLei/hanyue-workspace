@@ -26,13 +26,15 @@ APScheduler（内存 jobstore，只算时间）
         ↓  到点回调
 CAS 推进 next_run_at ──失败──→ 另一副本已抢到，本次直接返回
         ↓  成功（rowcount == 1）
-并发判定 ──有未落定 run──→ 记 skipped，写明原因
-        ↓
-queue.enqueue() → background_jobs → job_runner → 按 queue 分发 handler
+CAS 抢互斥槽位 active_job_id ──已被占用──→ 记 skipped，写明原因
+        ↓  抢到（同一事务）
+写 run + create_job（flush）+ 绑定槽位 → commit → dispatch
+        ↓                                   ↓
+background_jobs → job_runner → 按 queue 分发 handler
         ↓                                   ├─ hot-topics / topic-digest：专用 handler
-        │                                   └─ script：通用 handler → manifest 指定的脚本 run()
+        │                                   └─ user-script.*：快照执行（payload 锁版本）
         ↓  终态
-回写 scheduled_task_runs（同一处写）+ 累计连续失败次数
+回写 scheduled_task_runs（同一处写）+ 释放槽位 + 累计连续失败次数
 ```
 
 ### 2.1 任务类型注册表：manifest 声明驱动
@@ -138,6 +140,28 @@ def run(params: dict, ctx: ScriptContext) -> dict:
 
 **信任边界**：脚本运行在 API/worker 进程内，拥有数据库会话。只放可信代码；不要让终端用户上传脚本或编辑 manifest。
 
+### 2.1.1 用户自定义脚本（`/schedules/scripts/*`）
+
+与 manifest 受控脚本不同，用户自定义脚本（`ScheduledScript`）由用户在界面上编写、保存草稿、发布后成为
+`user-script.{scriptId}` 类型的定时任务。执行隔离在子进程（`services/script_runtime.py`）：
+发布前 AST 校验（禁 import / global / 危险名）、独立 Python 进程跑、父进程不传 DB 会话，
+通过短期 token 回调 SDK 接口。
+
+**版本快照（执行一致性）**：每次发布都写一条 `ScheduledScriptVersion`（version 递增 + 代码全量），
+并在 `published_version` / `published_hash` 上留指针。投递（定时触发或手动「试运行」）时把
+`scriptVersion` / `scriptHash` / `scriptCode` **锁进 job payload**：
+
+- 排队期间脚本被修改、停用、重新发布，都不影响已入队的这次执行——worker 只按 payload 里的
+  版本号从 `ScheduledScriptVersion` 取快照代码；
+- 快照行被清理找不到时，job 明确失败（`script_snapshot_missing`），不静默回退到最新版——
+  「跑了和看到的不一样」比失败更难排查；
+- 停用只影响之后的触发，不追溯已入队的执行。快照路径不做 `enabled` 检查（投递时准入已校验过）；
+  旧 payload（升级前投递、无快照字段）回退读当前发布版并保留停用检查。
+
+**手动试运行**：`POST /schedules/scripts/{id}/run` 只返回 `{jobId}` 入队回执；前端轮询
+`GET /jobs/{jobId}` 到终态后再展示 `result` 里的 stdout/stderr/exitCode。直接把入队回执当
+执行结果是试运行「看起来不行」的常见根因。
+
 
 ### 2.2 调度器装配（`services/scheduler.py`）
 
@@ -165,13 +189,15 @@ UPDATE scheduled_tasks
 
 `rowcount != 1` 说明别的副本已经处理过，本次静默返回——不是错误，不写 run 记录。
 
-**② 并发判定。** 注意一个容易搞错的点：APScheduler 的 `max_instances=1` 保护的是**回调函数**，不是任务执行。回调投递完 job 就返回了，所以 `max_instances` 几乎永远不会生效。真正的互斥必须自己做：
+**② 并发判定（互斥槽位）。** 注意一个容易搞错的点：APScheduler 的 `max_instances=1` 保护的是**回调函数**，不是任务执行。回调投递完 job 就返回了，所以 `max_instances` 几乎永远不会生效。真正的互斥必须自己做：
 
-- 查该任务是否存在 `status in (queued, running)` 的 run；
-- **并按租约判活**：`queued` 超过 `job_lease_seconds` 仍未开始、或 `running` 的 `started_at` 早于租约窗口，视为僵尸，记 `warning` 后照常触发。不加这条，一个卡死在 `queued` 的 job（典型原因：Redis 模式漏了 worker 消费）会让该任务永远跳过，且界面上看不出原因——静默死亡比失败更糟。
-- 确实忙 → 写一条 `status="skipped"` 的 run，`skip_reason` 写明「上一次仍在执行（runId=…）」。
+- `scheduled_tasks.active_job_id` 是**原子互斥槽位**：`_launch()` 用一条 `UPDATE … SET active_job_id = :job WHERE id = :id AND active_job_id IS NULL` 的 CAS 抢占，`rowcount != 1` 说明上一轮还没落定。定时与手动两条入口共用这个槽位，谁先抢到谁投递，另一个写 `status="skipped"` 的 run，`skip_reason` 写明「上一次仍在执行」。
+- 查询-然后-插入（先 SELECT 有没有未落定 run 再决定投递）在两个入口同时到达时会双双通过——这就是为什么判定必须是单条 UPDATE，而不是应用层判断。
+- 槽位在 run 落终态时释放（`sync_run_from_job`，含取消路径），启动对账 `reconcile_runs` 也会把 job 已终态但槽位未释放的悬空记录清掉。僵尸防护保留：queued 超过 `job_lease_seconds` 仍未开始、或 `running` 的 `started_at` 早于租约窗口的 run，对账时按失败处理并放行后续触发。
 
-**③ 投递。** `queue.enqueue(db, owner_user_id=..., queue=type.queue, kind=type.kind, payload={**build_payload(params), "scheduledTaskId": task.id, "scheduledRunId": run.id})`。
+**③ 投递（同事务提交后才 dispatch）。** `_launch()` 在**同一个事务**里写 run、job（`queue.create_job()`，只 flush 不 commit）和任务级状态，commit 成功后才调 `queue.dispatch(job.id)`。不能反过来：`queue.enqueue()` 是「commit + dispatch」的组合，若先用它再补 `run.job_id`，一个快 worker 会在 dispatch 内同步把 job 跑完——而此刻 run 还没关联 jobId，终态回写找不到对象，run 永远停在 `queued`。
+
+payload 组成：`{**build_payload(params), "scheduledTaskId": task.id, "scheduledRunId": run.id}`。
 
 `owner_user_id` 取任务的 `owner_user_id`；`system` 任务取**系统账号**（首个用户或专用 seed 用户）。`background_jobs.owner_user_id` 是必填外键，不能让 system 任务留空——所以 system 任务在播种时必须绑定一个真实用户，文档与代码里都不出现「空 owner」这种半截状态。
 
@@ -255,6 +281,7 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
 | `last_status` | VARCHAR(24) | 最近一次 run 的终态，用于列表标红 |
 | `consecutive_failures` | INTEGER | 连续失败计数 |
 | `paused_reason` | VARCHAR(300) | 自动暂停原因；手动停用为空 |
+| `active_job_id` | VARCHAR(32) | 互斥槽位：当前未落定执行的 jobId，NULL 表示空闲（见 2.3②） |
 | `created_at` / `updated_at` | TIMESTAMP | `TimestampMixin` |
 
 ### 4.2 `scheduled_task_runs`
@@ -401,10 +428,13 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
 | 接口（types/CRUD/run/runs/preview） | `apps/api/app/modules/schedules.py` |
 | 表 | `ScheduledTask` / `ScheduledTaskRun`（`models.py`） |
 | 索引 | `core/db.py` 的 `_INDEXES` 四条 |
-| 终态回写 | `job_runner._write_terminal`（唯一入口，含取消路径 `modules/jobs.py`） |
+| 终态回写 | `job_runner._write_terminal`（唯一入口，含取消路径 `modules/jobs.py`；同时释放互斥槽位） |
+| 互斥槽位准入 | `scheduled_tasks._launch`（CAS 抢 `active_job_id` + 同事务建 run/job + 提交后 dispatch） |
+| 事务内建 job | `queue.create_job`（只 flush；`enqueue` = create + commit + dispatch） |
 | 拉热点 handler | `job_runner._handle_hot_topics`（queue=`hot-topics`） |
 | 选题简报 handler | `job_runner._handle_hot_topics_digest`（queue=`topic-digest`） |
-| 简报逻辑 / 建稿 | `hot_topics.build_digest` / `_new_draft`（与「热点→稿件」共用建稿代码） |
+| 用户脚本 handler / 快照执行 | `job_runner._handle_user_script`（payload 快照优先，旧 payload 回退） |
+| 用户脚本接口 / 发布快照 | `modules/script_schedules.py`（publish 写版本行，run 锁快照进 payload） |
 | 页面 | `apps/web/src/views/SchedulesView.vue` + `router.js` |
 | 测试 | `apps/api/tests/test_scheduled_tasks.py`（30 项） |
 
@@ -424,3 +454,15 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
   验证「第二个副本必须失败」。
 - 回调 `fire()` 是普通同步函数：`AsyncIOExecutor` 对同步函数会自动落到线程池
   （`run_in_executor`），不需要写 `async def` 再加一层 `to_thread`。
+
+**2026-11 准入模型重构**（回归测试驱动，修三处竞态）：
+
+1. **run/job 关联竞态**：原实现 `queue.enqueue()`（commit+dispatch）先投递、再回填
+   `run.job_id`，同步 worker 会在 dispatch 内跑完而 run 仍停在 `queued`。改为
+   `queue.create_job()` 同事务写入、commit 后 dispatch
+   （`test_fire_commits_run_job_link_before_dispatch`）。
+2. **并发判定竞态**：原「查未落定 run 再决定」是查询-然后-插入，手动与定时同时到达会双双通过。
+   改为 `active_job_id` 单条 UPDATE 的 CAS 槽位
+   （`test_concurrent_manual_triggers_yield_single_dispatch`）。
+3. **脚本版本竞态**：原 worker 执行时读脚本当前发布版，排队后重新发布会让已入队执行跑新版。
+   改为投递时锁快照进 payload（`test_queued_script_run_keeps_published_version_after_republish`）。
