@@ -691,7 +691,11 @@ def ensure_system_tasks(db, owner_user_id: str, timezone_name: str = "") -> int:
 
     system 任务也必须有真实 owner：`background_jobs.owner_user_id` 是必填外键，
     留空会造出「跑不起来的任务」这种半截状态。多用户环境下只有第一条会留下。
+    `SCHEDULER_SEED_SYSTEM_TASKS=false` 时整体跳过：部署方不想让内置定时脚本
+    出现在界面里，需要时再手动建。
     """
+    if not get_settings().scheduler_seed_system_tasks:
+        return 0
     created = 0
     for spec in TASK_TYPES.values():
         if spec.scope != "system":

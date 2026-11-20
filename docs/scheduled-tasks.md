@@ -436,6 +436,7 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
 | `SCHEDULER_MISFIRE_GRACE` | `300` | 错过宽限秒数的默认值，任务可覆盖 |
 | `SCHEDULER_MAX_CONSECUTIVE_FAILURES` | `3` | 连续失败多少次自动暂停，0 表示不自动暂停 |
 | `SCHEDULER_SYSTEM_WRITE` | `dev` | system 任务写权限：`dev` / `any` / `never` |
+| `SCHEDULER_SEED_SYSTEM_TASKS` | `true` | `false` 时不自动播种内置定时脚本（拉热点等），界面不再出现；需要时手动建任务 |
 
 ## 9. 后续接入项
 

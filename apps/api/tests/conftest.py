@@ -24,6 +24,9 @@ os.environ["SECRET_KEY"] = "test-secret"
 # AsyncIOScheduler 绑定的事件循环并不是真正在跑的那个，装进去只会制造噪音。
 # 调度语义（CAS / 并发 / 对账）在 test_scheduled_tasks.py 里直接调服务层函数测。
 os.environ["SCHEDULER_ENABLED"] = "false"
+# 播种语义与本地 .env 解耦：多个用例依赖「登录即播种 system 任务」，
+# 测试永远按默认（播种）跑，开发库想关 seeding 改自己的 .env 即可。
+os.environ["SCHEDULER_SEED_SYSTEM_TASKS"] = "true"
 atexit.register(lambda: shutil.rmtree(_TMP_ROOT, ignore_errors=True))
 
 # 这些用例验证的是 Agent 工具链，不是 AI 网关本身。
