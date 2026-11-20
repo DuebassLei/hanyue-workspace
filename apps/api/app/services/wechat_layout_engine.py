@@ -270,6 +270,35 @@ def _sFrame(title, body, H, T) -> str:
             + f'<rect x="40" y="38" width="5" height="34" rx="2.5" fill="{T["line"]}"/>'
             + _sText(58, 65, title, 27, "#FFFFFF", 800)
         )
+    elif st == "note":
+        # 手账：白纸卡 + 虚线边 + 纸胶带斜贴 + 荧光笔底（借 dsh 文档级 note 语言的卡面化原创设计）。
+        # 胶带用 path 近似旋转矩形而不用 transform，保持微信对 SVG 变换的最大兼容。
+        tape_x2 = 40 + 88
+        hl_w = _stw(title, 26) + 10
+        bg = (
+            f'<rect x="1" y="1" width="{_sR(SW - 2)}" height="{_sR(H - 2)}" rx="10" fill="#FFFFFF" stroke="{T["line"]}" stroke-width="1.5" stroke-dasharray="7 6"/>'
+            + f'<path d="M40 22L{_sR(tape_x2)} 16L{_sR(tape_x2 + 6)} 44L46 50Z" fill="{T["mark"]}"/>'
+            + f'<rect x="40" y="70" width="{_sR(hl_w)}" height="13" fill="{T["tint"]}"/>'
+            + _sText(40, 84, title, 26, INK, 800)
+        )
+    elif st == "zen":
+        # 雅致：双线内框 + 宋体居中标题 + 主色短粗线/细线双下划线。
+        serif = "Georgia,'Songti SC','STSong','Source Han Serif SC','Noto Serif SC',serif"
+        bg = (
+            f'<rect x="1" y="1" width="{_sR(SW - 2)}" height="{_sR(H - 2)}" rx="4" fill="#FFFFFF" stroke="{T["line"]}" stroke-width="1.5"/>'
+            + f'<rect x="10" y="10" width="{_sR(SW - 20)}" height="{_sR(H - 20)}" rx="2" fill="none" stroke="{T["line"]}" stroke-width="1"/>'
+            + f'<text x="{_sR(SW / 2)}" y="62" font-size="25" font-weight="700" fill="{INK}" text-anchor="middle" font-family="{serif}">{_esc(title)}</text>'
+            + f'<rect x="{_sR(SW / 2 - 22)}" y="76" width="44" height="2.5" fill="{M}"/>'
+            + f'<rect x="{_sR(SW / 2 - 34)}" y="82" width="68" height="1" fill="{T["line"]}"/>'
+        )
+    elif st == "bento":
+        # 卡片：大圆角 soft 底 + 白色胶囊标题（与 std 的主色药丸形成区分）。
+        pill_w = capW + 24
+        bg = (
+            f'<rect x="0" y="0" width="{_sR(SW)}" height="{_sR(H)}" rx="28" fill="{T["soft"]}"/>'
+            + f'<rect x="36" y="28" width="{_sR(pill_w)}" height="52" rx="26" fill="#FFFFFF" stroke="{T["tint"]}" stroke-width="1.5"/>'
+            + _sText(36 + pill_w / 2, 63, title, 25, INK, 800, "middle")
+        )
     else:
         bg = (
             f'<rect x="0" y="0" width="{_sR(SW)}" height="{_sR(H)}" rx="24" fill="{T["soft"]}"/>'

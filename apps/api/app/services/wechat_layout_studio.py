@@ -31,6 +31,7 @@ import re
 from urllib.parse import urlsplit
 
 from . import wechat_layout_engine as engine
+from . import wechat_svg_cards as cards
 
 MONO = "Menlo,Consolas,'SF Mono',monospace"
 SERIF = "Georgia,'Songti SC','STSong','Source Han Serif SC','Noto Serif SC',serif"
@@ -310,9 +311,13 @@ class StudioRenderer:
         body = '<tbody>' + ''.join('<tr>' + ''.join(tag('td', self.inline(c), f'padding:11px 13px;color:{self.body};' + cs) for c in (row + [''] * len(rows[0]))[:len(rows[0])]) + '</tr>' for row in rows[1:]) + '</tbody>'
         return section(tag('table', head + body, 'width:100%;border-collapse:collapse;font-size:14px;line-height:1.7;'), f'margin:26px 0;overflow-x:auto;border-radius:{T["r"]}px;' + (f'background:{DK_PANEL};border:1px solid {DK_BORDER};' if st == 'dark' else ''))
 
-    def code(self, lang, title, lines):
+    def code(self, lang, title, lines, fence_text=''):
         self.stats['codeBlocks'] += 1
         if lang in engine.SVG_CARD_KINDS:
+            # 渲染期防幻觉提示：柱状图数值必须能在正文（去掉本围栏后）中找到。
+            source_text = self.source_body.replace(fence_text, '', 1) if fence_text else self.source_body
+            for warning in cards.card_warnings(lang, title, lines, source_text=source_text):
+                self.warn(warning)
             result = engine.render_svg_card(lang, title, lines, style=self.style, theme=self.theme)
             for warning in result['warnings']:
                 self.warn(warning)
@@ -350,14 +355,29 @@ class StudioRenderer:
         return section(content, 'margin:48px 0 12px;padding:20px;display:flex;align-items:center;' + box)
 
     def render(self, body):
-        body = str(body or '').replace('\r\n', '\n').replace('\r', '\n').replace('\x00', '')
+        body = str(body or '').lstrip('﻿').replace('\r\n', '\n').replace('\r', '\n').replace('\x00', '')
+        # Reference parser treats YAML front matter as metadata and never synthesizes a title heading.
+        meta = {}
+        if body.startswith('---\n'):
+            end = body.find('\n---', 4)
+            if end > 0:
+                for line in body[4:end].splitlines():
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        meta[key.strip().lower()] = value.strip().strip('"').strip("'")
+                body = body[end + 4:].lstrip('\n')
+        self.source_body = body  # 渲染期防幻觉校验的对照原文（卡片数值必须出自这里）
         self.stats['characters'] = len(re.sub(r'\s', '', body))
         lines = body.split('\n')
         title_match = next((re.match(r'^#\s+(.+)', ln.strip()) for ln in lines if re.match(r'^#\s+(.+)', ln.strip())), None)
-        title = str(self.options.get('title') or (title_match[1] if title_match else '未命名文章'))
-        self.stats['title'] = title
-        if title == '未命名文章':
+        title = str(meta.get('title') or self.options.get('title') or (title_match[1] if title_match else ''))
+        self.stats['title'] = title or '未命名文章'
+        if not title:
             self.warn('正文未提供一级标题，已使用默认标题「未命名文章」')
+        meta.update({key.lower(): str(value).lower() if isinstance(value, bool) else value for key, value in self.options.items() if value is not None})
+        meta['author'] = meta.get('brandauthor', meta.get('author', '林月半子的AI笔记'))
+        meta['slogan'] = meta.get('brandslogan', meta.get('slogan', '我是林月半子，教你用AI干掉90%的重复劳动'))
+        meta['outro_cta'] = meta.get('outrocta', meta.get('outro_cta', '点个关注，下一篇见 →'))
         result = []
         banner = self.options.get('banner', 'none')
         if banner and banner != 'none':
@@ -371,8 +391,6 @@ class StudioRenderer:
             result.append(rendered['html'])
             for warning in rendered['warnings']:
                 self.warn(warning)
-        else:
-            result.append(tag('p', self.inline(title), f'margin:0 0 28px;font-size:27px;line-height:1.4;font-weight:800;color:{self.ink};' + (f'font-family:{SERIF};text-align:center;' if self.style in ('mag', 'zen') else '')))
         i, part = 0, 0
         list_re = re.compile(r'^(\s*)(?:([-+*])\s+|(\d+)[.)]\s+)(.+)$')
         def block_start(line):
@@ -398,7 +416,9 @@ class StudioRenderer:
                     buf.append(lines[i]); i += 1
                 if not closed:
                     self.warn('代码围栏未闭合，已安全渲染到文末')
-                result.append(self.code(lang, caption, buf)); continue
+                fence_start = i - len(buf) - (2 if closed else 1)
+                fence_text = '\n'.join(lines[fence_start:i])
+                result.append(self.code(lang, caption, buf, fence_text=fence_text)); continue
             heading = re.match(r'^(#{1,6})\s+(.+?)\s*#*$', s)
             if heading:
                 level, text = len(heading[1]), heading[2]
@@ -407,13 +427,13 @@ class StudioRenderer:
                     continue
                 if level == 2:
                     part += 1
-                    pieces = [x.strip() for x in re.split(r'[|｜]', text, maxsplit=1)]
+                    pieces = [x.strip() for x in text.split('|', 1)]
                     heading_text = re.sub(r'^(?:[一二三四五六七八九十]+[、.．]|\d+[、.．]\s*|PART\s*\d+\s*[:：]?\s*)', '', pieces[0]).strip() or pieces[0]
                     result.append(self.h2(part, heading_text, pieces[1] if len(pieces) > 1 else ''))
                 else:
                     result.append(self.h3(text, level))
                 continue
-            if s.startswith('>') or re.match(r'^\[!(TIP|NOTE|WARN|WARNING|TLDR|GOLDEN|QUOTE)\]', s):
+            if s.startswith('>'):
                 quote_lines = [re.sub(r'^>\s?', '', s)]
                 while i < len(lines) and lines[i].lstrip().startswith('>'):
                     quote_lines.append(re.sub(r'^>\s?', '', lines[i].strip())); i += 1
@@ -462,16 +482,13 @@ class StudioRenderer:
             value = url.get('url', '') if isinstance(url, dict) else url
             if image_index not in self.consumed_images and value and value not in body:
                 result.append(self.image(value, ''))
+        if meta.get('outro', 'true').lower() != 'false':
+            result.append(self.author())
         if self.notes:
             refs = ''.join(tag('p', f'[{index}] {esc(text)}：{esc(url)}', 'margin:0 0 6px;font-size:12px;line-height:1.7;color:#94A3B8;word-break:break-all;') for index, (text, url) in enumerate(self.notes, 1))
             result.append(section(tag('p', '参考链接', f'font-size:13px;font-weight:700;color:{self.body};') + refs, 'margin:36px 0 0;padding-top:14px;border-top:1px solid #E5E7EB;'))
-        if self.options.get('outro', True):
-            result.append(self.author())
-        css = f'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow-wrap:anywhere;color:{self.body};'
-        # font-family 的引号也要转义，避免破坏 style 属性。
-        css = css.replace('"', "'")
-        css += f'background:{DK_BG};padding:26px 18px 30px;border-radius:18px;' if self.style == 'dark' else 'background:#FFFFFF;padding:0 4px;'
-        output = section(''.join(result), css)
+        wrap = f'padding:26px 18px 30px;background:{DK_BG};border-radius:18px;' if self.style == 'dark' else 'padding:0 4px;'
+        output = section(''.join(result), "font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue',sans-serif;" + wrap)
         self.stats['htmlBytes'] = len(output.encode('utf-8'))
         return {'html': output, 'warnings': self.warnings, 'stats': self.stats}
 

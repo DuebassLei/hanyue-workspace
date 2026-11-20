@@ -121,9 +121,8 @@ def test_themes_produce_distinct_html():
 
 
 def test_implemented_styles_produce_distinct_html():
-    # std/note/zen/bento intentionally share the default SVG frame today;
-    # compare only the styles that have a dedicated frame branch.
-    styles = ["std", "mag", "min", "geek", "bold", "neo", "dark"]
+    # 每个风格都有独立的卡框分支（note/zen/bento 于本次优化补齐）。
+    styles = list(engine.STYLES)
     htmls = [
         engine.render_svg_card("svg-table", "示例", ["列1|列2", "★v|12"], style=s)["html"]
         for s in styles

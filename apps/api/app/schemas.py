@@ -598,6 +598,25 @@ class WeChatStudioRenderIn(WeChatStudioSettingsIn):
     asset_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
+class WeChatSvgCardGenerateIn(CamelModel):
+    """排版工作台「选段生成动画卡」的请求体。
+
+    text 是选中的目标段落（柱状图数值防幻觉的对照原文）；
+    context_before / after 是前后各一段，帮模型理解上下文，不参与数值校验。
+    """
+
+    model_config = {"populate_by_name": True, "alias_generator": camel, "extra": "forbid"}
+
+    text: str = Field(min_length=8, max_length=8000)
+    kind: Literal[
+        "svg-table", "svg-bars", "svg-steps", "svg-timeline",
+        "svg-breakdown", "svg-compare", "svg-concept", "svg-phone",
+    ]
+    article_title: str = Field(default="", max_length=200)
+    context_before: str = Field(default="", max_length=2000)
+    context_after: str = Field(default="", max_length=2000)
+
+
 class WeChatDraftIn(CamelModel):
     model_config = {"populate_by_name": True, "alias_generator": camel, "extra": "forbid"}
 

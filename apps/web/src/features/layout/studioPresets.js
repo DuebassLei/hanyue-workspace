@@ -37,6 +37,19 @@ export const BANNER_MODES = [
   { id: 'none', label: '无横幅', desc: '直接进入正文' },
 ]
 
+// 8 种 SVG 动画卡（与后端 wechat_layout_engine.SVG_CARD_INFO 对齐）。
+// hint 提示每卡的行语法，会作为占位文案出现在生成面板的行编辑框里。
+export const SVG_CARD_PRESETS = [
+  { id: 'svg-table', name: '表格', lead: '一张表看懂', hint: '列1|列2|…（第一行表头，之后每行一条数据）' },
+  { id: 'svg-bars', name: '柱状图', lead: '数据对比', hint: '标签|数值|显示文案（数值必须取自正文原文）' },
+  { id: 'svg-steps', name: '步骤', lead: '照着做', hint: '步骤标题|说明' },
+  { id: 'svg-timeline', name: '时间线', lead: '时间线', hint: '时间|事件' },
+  { id: 'svg-breakdown', name: '拆解', lead: '拆开看', hint: '词条|解释' },
+  { id: 'svg-compare', name: '对比', lead: '对比', hint: '左表头|右表头，之后每行「旧做法|新做法」' },
+  { id: 'svg-concept', name: '概念', lead: '一张图看懂', hint: '第一行总述，之后「以前|节点|节点」轨道' },
+  { id: 'svg-phone', name: '手机演示', lead: '演示', hint: '第一行副标题，之后「场景名|说话人|消息」' },
+]
+
 export const DEFAULT_OPTIONS = {
   style: 'std', theme: 'orange', banner: 'none', outro: true,
   brandAuthor: '', brandSlogan: '', avatarUrl: '', title: '',

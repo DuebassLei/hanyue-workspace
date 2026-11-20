@@ -2,16 +2,18 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { useLayoutStudio } from '../features/layout/useLayoutStudio'
-import { STYLE_PRESETS, COLOR_PRESETS, BANNER_MODES } from '../features/layout/studioPresets'
+import { STYLE_PRESETS, COLOR_PRESETS, BANNER_MODES, SVG_CARD_PRESETS } from '../features/layout/studioPresets'
 
 const route = useRoute()
 const router = useRouter()
 const studio = useLayoutStudio(route, router)
 const { title, body, options, articleId, versionId, loading, saving, rendering, error, previewError, renderWarnings, renderStats,
-  notice, html, dirty, savedAt, ready, load, save, copyHtml, copyRichText, previewDocument } = studio
+  notice, html, dirty, savedAt, ready, load, save, copyHtml, copyRichText, previewDocument,
+  cardPanel, cardPreviewDocument, openCardPanel, closeCardPanel, generateCard, renderCardPreview, insertCard } = studio
 const editing = ref(false)
 const currentStyle = computed(() => STYLE_PRESETS.find(item => item.id === options.style))
 const currentColor = computed(() => COLOR_PRESETS.find(item => item.id === options.theme))
+const currentCardPreset = computed(() => SVG_CARD_PRESETS.find(item => item.id === cardPanel.kind))
 const wordCount = computed(() => body.value.replace(/\s/g, '').length)
 const saveStatus = computed(() => saving.value ? '正在保存…' : dirty.value ? '有未保存的修改' : savedAt.value ? '已保存到当前版本' : articleId.value ? '当前版本已载入' : '样文体验 · 未关联文章')
 onBeforeRouteLeave(() => !dirty.value || !articleId.value || window.confirm('排版或正文尚未保存，确定离开吗？'))
@@ -37,6 +39,7 @@ onBeforeRouteUpdate((to, from) => {
           <div class="document-state"><span class="state-dot" :class="{ unsaved: dirty }" /><span>{{ saveStatus }}</span></div>
           <div class="toolbar-actions">
             <button class="studio-button" :class="{ active: editing }" :disabled="loading || !ready" @click="editing = !editing">{{ editing ? '完成编辑' : '编辑正文' }}</button>
+            <button v-if="editing" class="studio-button" :disabled="saving" title="选中一段正文后生成 SVG 动画卡" @click="openCardPanel">✦ 动画卡</button>
             <button class="studio-button" :disabled="!html || rendering || loading" @click="copyHtml">复制 HTML</button>
             <button class="studio-button" :disabled="!html || rendering || loading" @click="copyRichText">复制到公众号</button>
             <button class="studio-button primary" :disabled="!articleId || !ready || loading || saving || !dirty" @click="save">{{ saving ? '保存中…' : '保存排版' }}</button>
@@ -103,6 +106,50 @@ onBeforeRouteUpdate((to, from) => {
         <div class="settings-footnote"><span aria-hidden="true">↳</span><p>配置随文章版本保存。发布时将沿用这份排版，无需重复设置。</p></div>
       </aside>
     </div>
+
+    <div v-if="cardPanel.open" class="card-modal-backdrop" @click.self="closeCardPanel">
+      <section class="card-modal" role="dialog" aria-modal="true" aria-label="生成 SVG 动画卡">
+        <header class="card-modal-head">
+          <div><p class="eyebrow">SVG ANIMATION CARD</p><h2>生成动画卡</h2></div>
+          <button class="studio-button subtle" aria-label="关闭动画卡面板" @click="closeCardPanel">✕ 关闭</button>
+        </header>
+        <div class="card-modal-body">
+          <section class="card-step">
+            <label class="field-label" for="card-source">目标段落 <span>在正文中选中的文字会带到这里，可修改</span></label>
+            <textarea id="card-source" v-model="cardPanel.text" rows="5" maxlength="8000" placeholder="粘贴或输入一段正文（至少 8 个字）。柱状图数值只能取自这段文字里已经出现的数值。" />
+          </section>
+          <section class="card-step">
+            <div class="section-heading"><h2>卡型</h2><span>8 种动画</span></div>
+            <div class="card-kind-grid">
+              <button v-for="preset in SVG_CARD_PRESETS" :key="preset.id" class="card-kind-option" :class="{ selected: cardPanel.kind === preset.id }" :aria-pressed="cardPanel.kind === preset.id" :title="preset.lead" @click="cardPanel.kind = preset.id">
+                <strong>{{ preset.name }}</strong><span>{{ preset.lead }}</span>
+              </button>
+            </div>
+          </section>
+          <div class="card-actions-row">
+            <button class="studio-button primary" :disabled="cardPanel.generating || cardPanel.text.trim().length < 8" @click="generateCard">{{ cardPanel.generating ? '生成中…' : '生成候选' }}</button>
+            <p v-if="cardPanel.error" class="card-error" role="alert">{{ cardPanel.error }}</p>
+          </div>
+          <template v-if="cardPanel.result">
+            <section class="card-step">
+              <label class="field-label" for="card-title">卡片标题</label>
+              <input id="card-title" v-model="cardPanel.title" maxlength="40" placeholder="不超过 40 字" />
+              <label class="field-label" for="card-lines">卡片行（每行一条）</label>
+              <textarea id="card-lines" v-model="cardPanel.lines" rows="6" spellcheck="false" :placeholder="currentCardPreset?.hint" />
+              <div class="card-edit-actions">
+                <button class="studio-button" :disabled="cardPanel.previewing" @click="renderCardPreview">{{ cardPanel.previewing ? '预览中…' : '刷新预览' }}</button>
+                <button class="studio-button primary" :disabled="cardPanel.previewing" @click="insertCard">插入正文</button>
+              </div>
+              <p v-if="cardPanel.previewError" class="card-error" role="alert">{{ cardPanel.previewError }}</p>
+              <ul v-if="cardPanel.warnings.length" class="card-warnings"><li v-for="(warning, index) in cardPanel.warnings" :key="index">{{ warning }}</li></ul>
+            </section>
+            <section class="card-step">
+              <iframe v-if="cardPanel.previewHtml" class="card-preview-frame" title="动画卡预览" :srcdoc="cardPreviewDocument" sandbox="" />
+            </section>
+          </template>
+        </div>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -111,4 +158,29 @@ onBeforeRouteUpdate((to, from) => {
 .layout-studio{max-width:1440px;margin:0 auto;color:var(--color-text-primary);font-family:'PingFang SC','Microsoft YaHei',sans-serif;--studio-line:var(--color-border-strong)}
 .studio-heading{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:24px}.eyebrow{font-family:Georgia,serif;font-size:10px;letter-spacing:2.4px;color:var(--color-text-muted);margin:0 0 8px}.studio-heading h1{font-size:25px;letter-spacing:-.6px;font-weight:650;margin:0}.studio-heading h1 span{font-size:13px;letter-spacing:.4px;font-weight:400;color:var(--color-text-muted);margin-left:18px}.studio-grid{display:grid;grid-template-columns:minmax(0,1fr) 296px;gap:22px;align-items:start}.manuscript{min-width:0;border:1px solid var(--studio-line);border-radius:12px;overflow:hidden;background:var(--color-surface);box-shadow:var(--shadow-sm)}.paper-toolbar{padding:14px 17px;display:flex;align-items:center;flex-wrap:wrap;gap:12px;border-bottom:1px solid var(--color-border)}.document-state{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--color-text-muted);margin-right:auto}.state-dot{width:6px;height:6px;flex-shrink:0;background:var(--color-success);border-radius:50%}.state-dot.unsaved{background:var(--color-warning)}.toolbar-actions{display:flex;gap:7px;flex-wrap:wrap}.studio-button{background:var(--color-surface);color:var(--color-text-secondary);border:1px solid var(--studio-line);border-radius:6px;font:inherit;font-size:12px;padding:7px 11px;cursor:pointer;transition:background .15s,border-color .15s;white-space:nowrap}.studio-button:hover:not(:disabled){background:var(--color-surface-muted);border-color:var(--color-accent)}.studio-button.primary{background:var(--color-accent);border-color:var(--color-accent);color:var(--color-on-accent)}.studio-button.active{color:var(--color-accent);border-color:var(--color-accent)}button:disabled{opacity:.4;cursor:not-allowed}.studio-button.subtle{border:0;background:transparent;padding-right:0;color:var(--color-text-muted)}.subtle span{margin-left:10px}.paper-meta{display:flex;justify-content:space-between;gap:10px;padding:12px 22px;font-size:10px;letter-spacing:.3px;color:var(--color-text-muted);background:var(--color-surface-raised)}.meta-divider{margin:0 6px;opacity:.4}.sample-note{padding:9px 22px;background:var(--color-accent-soft);font-size:11px;color:var(--color-text-secondary)}.paper-stage{position:relative;background:#eeede9;padding:28px clamp(12px,3vw,36px);height:calc(100vh - 280px);min-height:570px;max-height:1100px}.article-frame{display:block;background:#fff;width:100%;height:100%;border:0;border-radius:2px;box-shadow:0 4px 22px #27241c0d;color-scheme:light}.render-status{position:absolute;top:6px;right:20px;font-size:10px;color:#68645b;opacity:0;pointer-events:none}.render-status.visible{opacity:1}.paper-footer{display:flex;justify-content:space-between;gap:12px;padding:11px 18px;color:var(--color-text-muted);font-size:10px;border-top:1px solid var(--color-border)}.settings-panel{border:1px solid var(--studio-line);border-radius:12px;background:var(--color-surface);position:sticky;top:20px;overflow:hidden}.settings-title{display:flex;justify-content:space-between;align-items:center;padding:17px 19px;border-bottom:1px solid var(--color-border);font-size:14px;font-weight:600}.live-label{font-size:10px;font-weight:400;color:var(--color-accent);display:flex;align-items:center;gap:6px}.live-label:before{content:'';width:5px;height:5px;background:currentColor;border-radius:50%}fieldset{padding:0;margin:0;border:0;min-width:0}.setting-section{padding:18px 19px;border-bottom:1px solid var(--color-border)}.section-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:13px}.section-heading h2{font-size:12px;font-weight:600;margin:0}.section-heading>span{font-size:10px;color:var(--color-text-muted)}.style-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}.style-option{padding:8px 0;background:transparent;border:1px solid var(--studio-line);border-radius:5px;color:var(--color-text-secondary);font:inherit;font-size:11px;cursor:pointer}.style-option.selected{background:var(--color-accent-soft);color:var(--color-accent);border-color:var(--color-accent);font-weight:600}.setting-caption{font-size:10px;line-height:1.7;color:var(--color-text-muted);margin:10px 0 0}.style-description{min-height:17px}.color-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:11px 7px;padding:1px 0}.color-option{width:23px;height:23px;justify-self:center;border:2px solid var(--color-surface);background:var(--swatch);box-shadow:0 0 0 1px transparent;border-radius:50%;cursor:pointer;display:grid;place-items:center;color:#fff;font-size:11px;padding:0}.color-option.selected{box-shadow:0 0 0 1.5px var(--swatch)}.banner-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}.banner-option{background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:6px;padding:10px 8px 8px;display:flex;flex-direction:column;align-items:center;gap:7px;font:inherit;font-size:10px;color:var(--color-text-secondary);cursor:pointer}.banner-option.selected{border-color:var(--color-accent);background:var(--color-accent-soft);color:var(--color-accent)}.banner-sketch{width:63px;height:28px;border:1px solid currentColor;opacity:.6;display:flex;flex-direction:column;justify-content:center;gap:4px;padding:5px 8px;box-sizing:border-box}.banner-sketch i{display:block;height:3px;width:80%;background:currentColor}.banner-sketch i+ i{width:55%;height:2px}.sketch-poster{border:0;background:var(--color-text-tertiary);color:var(--color-surface);align-items:center}.sketch-poster i{height:5px}.sketch-neo{border-width:2px;transform:skew(-5deg);border-radius:3px}.sketch-card{border-radius:4px}.sketch-none{border-style:dashed;align-items:center}.sketch-none i{height:1px;width:20px;transform:rotate(-25deg)}.sketch-none i+i{display:none}.toggle{display:block;position:relative;width:29px;height:17px;cursor:pointer}.toggle input{opacity:0;position:absolute;width:100%;height:100%;margin:0;cursor:pointer}.toggle span{display:block;width:29px;height:17px;border-radius:12px;background:var(--color-border-strong);pointer-events:none;transition:background .2s}.toggle span:after{content:'';display:block;position:absolute;left:2px;top:2px;background:#fff;width:13px;height:13px;border-radius:50%;transition:transform .2s}.toggle input:checked+span{background:var(--color-accent)}.toggle input:checked+span:after{transform:translateX(12px)}.toggle input:focus-visible+span{outline:2px solid var(--color-accent);outline-offset:3px}.brand-section .section-heading{margin-bottom:0}.field-label{display:block;font-size:10px;color:var(--color-text-muted);margin:14px 0 6px}.setting-input{box-sizing:border-box;width:100%;border:1px solid var(--studio-line);border-radius:5px;background:var(--color-bg);padding:8px 9px;font:inherit;font-size:11px;color:var(--color-text-primary);outline:0}.setting-input:focus{border-color:var(--color-accent)}.setting-input:disabled{opacity:.4}.slogan{height:59px;resize:vertical}.settings-footnote{display:flex;gap:9px;padding:14px 19px;background:var(--color-surface-raised);color:var(--color-text-muted)}.settings-footnote>span{font-size:18px;color:var(--color-accent)}.settings-footnote p{font-size:10px;line-height:1.8;margin:0}.studio-message{border-radius:6px;padding:11px 14px;font-size:12px;margin-bottom:14px}.studio-message.error{color:var(--color-danger);border:1px solid currentColor}.studio-message.success{color:var(--color-success);background:var(--color-accent-soft)}.text-button{font:inherit;border:0;background:none;color:inherit;text-decoration:underline;cursor:pointer;margin-left:10px}.paper-loading{min-height:500px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:20px;font-size:12px;color:var(--color-text-muted)}.loading-line{width:65px;height:2px;background:var(--color-accent);animation:pulse 1s infinite alternate}.preview-failure{padding:65px 25px;text-align:center;background:#fff;color:#6d5148;font-size:12px;min-height:250px}.preview-failure strong{font-size:16px}.preview-failure p{line-height:1.8}.markdown-editor{background:#fff;color:#252525;padding:28px;min-height:540px;color-scheme:light}.markdown-editor>label,.editor-label label{font-size:11px;color:#817a70}.markdown-editor>input{display:block;box-sizing:border-box;width:100%;font:600 23px 'Songti SC',Georgia,serif;line-height:1.6;color:#282722;border:0;border-bottom:1px solid #e8e5df;padding:10px 0 16px;margin-bottom:23px;outline:0;background:#fff}.editor-label{display:flex;gap:15px;align-items:center;justify-content:space-between;margin-bottom:13px}.editor-label span{font-size:10px;color:#a49b90}.markdown-editor>textarea{box-sizing:border-box;width:100%;min-height:450px;height:calc(100vh - 485px);resize:vertical;font:13px/2 'SFMono-Regular',Consolas,'Microsoft YaHei',monospace;border:0;color:#423f39;background:#fff;outline:none}.editor-hint{color:#999086;font-size:10px;border-top:1px solid #e8e5df;padding-top:15px;margin-bottom:0}button:focus-visible{outline:2px solid var(--color-accent);outline-offset:3px}@keyframes pulse{to{opacity:.2;transform:scaleX(.6)}}
 @media(min-width:1600px){.studio-grid{grid-template-columns:minmax(0,1fr) 314px}.setting-section{padding:20px 22px}.paper-stage{padding:34px 55px}}@media(max-width:1100px){.studio-grid{gap:14px;grid-template-columns:minmax(0,1fr) 270px}.setting-section{padding:16px}.studio-heading h1 span{display:none}.paper-toolbar{padding:12px}.document-state{width:100%}.paper-stage{padding:20px 14px}.toolbar-actions{gap:5px}.studio-button{font-size:11px;padding:7px 9px}}@media(max-width:780px){.studio-grid{grid-template-columns:minmax(0,1fr)}.settings-panel{position:static}.settings-panel fieldset{display:grid;grid-template-columns:1fr 1fr}.setting-section:nth-child(odd){border-right:1px solid var(--color-border)}.paper-stage{height:700px;min-height:400px}.studio-heading{margin-bottom:18px}.studio-heading h1{font-size:22px}.eyebrow{font-size:8px;letter-spacing:1.6px}.paper-meta{padding:12px;font-size:9px}.paper-footer{font-size:9px}.markdown-editor{padding:20px}}@media(max-width:440px){.settings-panel fieldset{grid-template-columns:1fr}.setting-section:nth-child(odd){border-right:0}.toolbar-actions{width:100%}.toolbar-actions .studio-button{flex:1}.studio-heading{gap:5px}.studio-button.subtle{font-size:10px}.paper-footer span:last-child{display:none}.editor-label span{display:none}.paper-stage{padding:16px 8px}.studio-heading h1{font-size:20px}}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* SVG 动画卡生成面板 */
+.card-modal-backdrop{position:fixed;inset:0;z-index:60;background:rgba(15,18,24,.45);display:flex;align-items:center;justify-content:center;padding:20px}
+.card-modal{width:min(720px,100%);max-height:min(88vh,820px);display:flex;flex-direction:column;background:var(--color-surface);border:1px solid var(--studio-line);border-radius:14px;box-shadow:0 18px 48px rgba(15,18,24,.28);overflow:hidden}
+.card-modal-head{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:16px 20px;border-bottom:1px solid var(--color-border)}
+.card-modal-head h2{font-size:17px;margin:0;letter-spacing:-.3px}
+.card-modal-head .eyebrow{margin:0 0 4px}
+.card-modal-body{padding:16px 20px 22px;overflow:auto;display:flex;flex-direction:column;gap:16px}
+.card-step{display:flex;flex-direction:column;gap:8px}
+.card-step .section-heading{margin:0}
+.field-label{display:flex;justify-content:space-between;align-items:baseline;font-size:11px;color:var(--color-text-muted)}
+.field-label span{font-size:10px;color:var(--color-text-muted)}
+#card-source,#card-lines,#card-title{width:100%;font:inherit;font-size:12px;color:var(--color-text-primary);background:var(--color-surface-muted);border:1px solid var(--studio-line);border-radius:8px;padding:9px 11px}
+#card-source,#card-lines{resize:vertical}
+.card-kind-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.card-kind-option{display:flex;flex-direction:column;gap:3px;align-items:flex-start;padding:9px 10px;font:inherit;text-align:left;background:var(--color-surface);border:1px solid var(--studio-line);border-radius:8px;cursor:pointer;transition:border-color .15s}
+.card-kind-option strong{font-size:12px}
+.card-kind-option span{font-size:10px;color:var(--color-text-muted)}
+.card-kind-option.selected{border-color:var(--color-accent);box-shadow:inset 0 0 0 1px var(--color-accent)}
+.card-kind-option.selected strong{color:var(--color-accent)}
+.card-actions-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.card-error{margin:0;font-size:11px;color:var(--color-warning)}
+.card-warnings{margin:0;padding-left:18px;font-size:11px;color:var(--color-warning);line-height:1.7}
+.card-edit-actions{display:flex;gap:8px}
+.card-preview-frame{width:100%;height:320px;border:1px solid var(--color-border);border-radius:10px;background:#fff}
+@media(max-width:560px){.card-kind-grid{grid-template-columns:repeat(2,1fr)}.card-modal-backdrop{padding:10px}}
 </style>

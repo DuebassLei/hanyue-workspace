@@ -4,7 +4,7 @@ import test from 'node:test'
 import * as vue from 'vue'
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
 import { JSDOM } from 'jsdom'
-import { DEFAULT_OPTIONS, SAMPLE_BODY } from './studioPresets.js'
+import { DEFAULT_OPTIONS, SAMPLE_BODY, SVG_CARD_PRESETS } from './studioPresets.js'
 
 // 隔离HTTP与组件生命周期；仍执行实际组合函数和Vue响应式，不复制业务实现。
 const context = { api: null, cleanups: [] }
@@ -19,7 +19,7 @@ const { useLayoutStudio } = await import(`data:text/javascript;base64,${Buffer.f
 
 function harness(query = { articleId: 'a1', versionId: 'v1' }) {
   const requests = []
-  const state = { failConfig: false, versionCount: 0, failRender: false }
+  const state = { failConfig: false, versionCount: 0, failRender: false, failGenerate: false }
   context.api = {
     async get(path) {
       requests.push({ method: 'GET', path })
@@ -30,6 +30,14 @@ function harness(query = { articleId: 'a1', versionId: 'v1' }) {
     async post(path, payload) {
       requests.push({ method: 'POST', path, payload })
       if (path.endsWith('/versions')) { state.versionCount++; return { id: 'v2' } }
+      if (path.endsWith('/svg-card/generate')) {
+        if (state.failGenerate) throw new Error('生成内容未通过校验，请换一段更具体的正文')
+        return {
+          card: { kind: payload.kind, title: '数据对比', lines: ['转化率|45%'] },
+          markdown: `\`\`\`${payload.kind} 数据对比\n转化率|45%\n\`\`\``,
+          sourceHash: 'a'.repeat(64), modelCode: 'test-double', fallbackUsed: false,
+        }
+      }
       if (state.failRender) throw new Error('渲染服务不可用')
       return { html: '<section><p>真实排版正文</p></section>', warnings: [{ field: 'body', level: 'warning', message: '横幅标题已缩略' }], stats: { sourceChars: 10, images: 0, readingMinutes: 1, htmlChars: 40 } }
     },
@@ -66,6 +74,55 @@ await test('独立排版工作台自动化回归', async t => {
     assert.match(contents, /prefers-reduced-motion/)
     assert.match(contents, /v-model="options.avatarUrl"/)
     assert.match(contents, /html && !rendering && !previewError/)
+    assert.match(contents, /card-modal-backdrop/)
+    assert.match(contents, /SVG_CARD_PRESETS/)
+  })
+
+  await t.test('SVG_CARD_PRESETS 与后端 8 卡对齐', async () => {
+    assert.deepEqual(SVG_CARD_PRESETS.map(item => item.id),
+      ['svg-table', 'svg-bars', 'svg-steps', 'svg-timeline', 'svg-breakdown', 'svg-compare', 'svg-concept', 'svg-phone'])
+    assert.ok(SVG_CARD_PRESETS.every(item => item.name && item.lead && item.hint))
+  })
+
+  await t.test('动画卡面板：生成候选、围栏预览请求与插入正文', async () => {
+    const h = harness()
+    try {
+      await h.store.load()
+      h.store.cardPanel.open = true
+      h.store.cardPanel.text = '本季度转化率 45%，环比提升明显。'
+      h.store.cardPanel.kind = 'svg-bars'
+      await h.store.generateCard()
+      assert.deepEqual(h.store.cardPanel.result, { kind: 'svg-bars', title: '数据对比', lines: ['转化率|45%'] })
+      assert.equal(h.store.cardPanel.title, '数据对比')
+      assert.equal(h.store.cardPanel.lines, '转化率|45%')
+      const generate = h.requests.find(item => item.path.endsWith('/svg-card/generate'))
+      assert.equal(generate.payload.kind, 'svg-bars')
+      assert.equal(generate.payload.text, '本季度转化率 45%，环比提升明显。')
+      const preview = h.requests.findLast(item => item.path.endsWith('/wechat-mp/layout-studio/render'))
+      assert.equal(preview.payload.body, '```svg-bars 数据对比\n转化率|45%\n```')
+      assert.equal(h.store.cardPanel.previewHtml, '<section><p>真实排版正文</p></section>')
+      h.store.cardPanel.insertAt = h.store.body.value.length
+      const before = h.store.body.value
+      h.store.insertCard()
+      assert.match(h.store.body.value, /```svg-bars 数据对比/)
+      assert.notEqual(h.store.body.value, before)
+      assert.equal(h.store.cardPanel.open, false)
+      assert.equal(h.store.dirty.value, true)
+    } finally { h.dispose() }
+  })
+
+  await t.test('动画卡生成失败展示服务端错误，不产生候选', async () => {
+    const h = harness()
+    try {
+      await h.store.load()
+      h.store.cardPanel.open = true
+      h.store.cardPanel.text = '一段足够长的目标段落。'
+      h.state.failGenerate = true
+      await h.store.generateCard()
+      assert.equal(h.store.cardPanel.result, null)
+      assert.match(h.store.cardPanel.error, /未通过校验/)
+      assert.equal(h.store.cardPanel.generating, false)
+    } finally { h.dispose() }
   })
 
   await t.test('加载真实版本，文章标题优先旧配置标题，布尔关闭关注可回读', async () => {

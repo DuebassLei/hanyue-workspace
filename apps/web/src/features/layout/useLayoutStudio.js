@@ -31,7 +31,8 @@ export function useLayoutStudio(route, router) {
   const snapshot = () => JSON.stringify({ title: title.value, body: body.value, options: { ...options } })
   const contentSnapshot = () => JSON.stringify({ title: title.value, body: body.value })
   const dirty = computed(() => ready.value && baseline.value !== snapshot())
-  const previewDocument = computed(() => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline'; font-src 'none'"><style>html{background:#fff;color-scheme:light}body{margin:0;padding:30px 26px;background:#fff;color:#333;overflow-wrap:anywhere;font-family:'PingFang SC','Microsoft YaHei',sans-serif}img,svg,video{max-width:100%;height:auto}pre{white-space:pre-wrap}table{max-width:100%}@media(max-width:420px){body{padding:24px 18px}}</style></head><body>${html.value}</body></html>`)
+  const wrapDocument = inner => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline'; font-src 'none'"><style>html{background:#fff;color-scheme:light}body{margin:0;padding:30px 26px;background:#fff;color:#333;overflow-wrap:anywhere;font-family:'PingFang SC','Microsoft YaHei',sans-serif}img,svg,video{max-width:100%;height:auto}pre{white-space:pre-wrap}table{max-width:100%}@media(max-width:420px){body{padding:24px 18px}}</style></head><body>${inner}</body></html>`
+  const previewDocument = computed(() => wrapDocument(html.value))
 
   function flash(text) {
     notice.value = text
@@ -161,6 +162,98 @@ export function useLayoutStudio(route, router) {
     } catch (err) { error.value = `复制失败：${err.message || '请允许浏览器剪贴板权限后重试。'}` }
   }
 
+  // ---- SVG 动画卡候选面板：选段 → 生成 → 校验提示 → 插入正文 ----
+  const cardPanel = reactive({
+    open: false, text: '', kind: 'svg-bars', generating: false, error: '',
+    result: null, title: '', lines: '', warnings: [], previewing: false,
+    previewError: '', previewHtml: '', insertAt: null,
+  })
+  const cardPreviewDocument = computed(() => wrapDocument(cardPanel.previewHtml))
+
+  function openCardPanel() {
+    // 编辑态才有 #layout-body；取选段，插卡位置记在选段末尾。
+    const area = document.getElementById('layout-body')
+    let text = ''
+    let insertAt = null
+    if (area) {
+      const start = area.selectionStart ?? 0
+      const end = area.selectionEnd ?? 0
+      if (end > start) { text = area.value.slice(start, end); insertAt = end }
+    }
+    cardPanel.open = true
+    cardPanel.text = text.trim()
+    cardPanel.insertAt = insertAt
+    cardPanel.error = ''
+    cardPanel.result = null
+    cardPanel.title = ''
+    cardPanel.lines = ''
+    cardPanel.warnings = []
+    cardPanel.previewHtml = ''
+    cardPanel.previewError = ''
+    if (!cardPanel.kind) cardPanel.kind = 'svg-bars'
+  }
+
+  function closeCardPanel() { cardPanel.open = false }
+
+  function cardFence() {
+    const lines = cardPanel.lines.split('\n').map(line => line.trim()).filter(Boolean)
+    const head = `\`\`\`${cardPanel.kind} ${cardPanel.title.trim()}`.trimEnd()
+    return `${head}\n${lines.join('\n')}\n\`\`\``
+  }
+
+  async function generateCard() {
+    if (cardPanel.generating) return
+    cardPanel.generating = true
+    cardPanel.error = ''
+    cardPanel.result = null
+    try {
+      const result = await api.post('/wechat-mp/layout-studio/svg-card/generate', {
+        text: cardPanel.text, kind: cardPanel.kind, articleTitle: title.value.slice(0, 200),
+      })
+      if (cardPanel.open) {
+        cardPanel.result = result.card || null
+        cardPanel.title = result.card?.title || ''
+        cardPanel.lines = (result.card?.lines || []).join('\n')
+        await renderCardPreview()
+      }
+    } catch (err) {
+      if (cardPanel.open) cardPanel.error = err.message || '生成失败，请稍后重试'
+    } finally {
+      cardPanel.generating = false
+    }
+  }
+
+  async function renderCardPreview() {
+    const fence = cardFence()
+    if (!fence.trim() || cardPanel.previewing) return
+    cardPanel.previewing = true
+    cardPanel.previewError = ''
+    cardPanel.warnings = []
+    try {
+      const result = await api.post('/wechat-mp/layout-studio/render', { body: fence, options: renderOptions() })
+      if (!cardPanel.open) return
+      cardPanel.previewHtml = result.html || ''
+      cardPanel.warnings = [...(result.warnings || []), ...(result.issues || [])]
+        .map(item => typeof item === 'string' ? item : item.message).filter(Boolean)
+    } catch (err) {
+      if (cardPanel.open) cardPanel.previewError = err.message || '卡片预览失败'
+    } finally {
+      cardPanel.previewing = false
+    }
+  }
+
+  function insertCard() {
+    if (!cardPanel.result) return
+    const fence = cardFence()
+    const at = cardPanel.insertAt ?? body.value.length
+    const before = body.value.slice(0, at)
+    const after = body.value.slice(at)
+    const padBefore = before && !before.endsWith('\n\n') ? (before.endsWith('\n') ? '\n' : '\n\n') : ''
+    body.value = `${before}${padBefore}${fence}\n\n${after}`
+    cardPanel.open = false
+    flash('动画卡已插入正文，预览中可查看效果；柱状图数值请核对是否与原文一致。')
+  }
+
   watch([title, body, options], () => {
     if (!ready.value || loading.value) return
     ++renderSequence
@@ -191,5 +284,6 @@ export function useLayoutStudio(route, router) {
   })
 
   return { title, body, options, articleId, versionId, loading, saving, rendering, ready,
-    error, previewError, renderWarnings, renderStats, notice, html, dirty, savedAt, previewDocument, load, save, renderPreview, copyHtml, copyRichText }
+    error, previewError, renderWarnings, renderStats, notice, html, dirty, savedAt, previewDocument, load, save, renderPreview, copyHtml, copyRichText,
+    cardPanel, cardPreviewDocument, openCardPanel, closeCardPanel, generateCard, renderCardPreview, insertCard }
 }

@@ -1,4 +1,4 @@
-﻿"""微信公众号草稿箱接入（官方接口）。
+"""微信公众号草稿箱接入（官方接口）。
 
 能力边界：
 - 做：把稿件推送到公众号**草稿箱**（含封面永久素材、正文内图片上传）。
@@ -21,7 +21,7 @@ from ..connectors import wechat_mp as wechat
 from ..core import queue
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.security import decrypt_secret, encrypt_secret
-from ..services import egress_ip, publish_state, wechat_article, wechat_layout_engine
+from ..services import egress_ip, publish_state, wechat_article, wechat_layout_engine, wechat_svg_cards
 from ..services.wechat_layout_engine import (
     STYLES as STUDIO_STYLES,
     SVG_CARD_INFO as STUDIO_SVG_CARD_INFO,
@@ -245,6 +245,24 @@ def layout_studio_catalog() -> dict:
         ],
         "defaults": _studio_options(),
     }
+
+
+@router.post("/wechat-mp/layout-studio/svg-card/generate", dependencies=_LAYOUT)
+async def generate_svg_card(payload: schemas.WeChatSvgCardGenerateIn, user: CurrentUser, db: DbSession) -> dict:
+    """按选中段落生成一张 SVG 动画卡候选。
+
+    模型只产出 JSON（title + lines），服务端做严格校验：行格式 + 柱状图数值
+    必须来自目标段落（防幻觉）。校验不过返回 422，前端可提示用户重试。
+    """
+    return await wechat_svg_cards.draft_card(
+        db,
+        owner_user_id=user.id,
+        kind=payload.kind,
+        text=payload.text,
+        article_title=payload.article_title,
+        context_before=payload.context_before,
+        context_after=payload.context_after,
+    )
 
 
 @router.get("/wechat-mp/egress-ip", dependencies=_CHANNEL_WRITE)

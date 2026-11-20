@@ -38,6 +38,8 @@ ARTICLE_OUTPUT_CONTRACT = (
     "可按内容选用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、"
     "svg-compare、svg-concept、svg-phone 语言标识的三反引号代码围栏，首行可附标题，"
     "围栏内用 | 分列数据；不要堆砌视觉卡，不使用冒号扩展区块。"
+    "svg-bars 柱状图的第二列数值必须取自正文段落中已经出现的完整数值"
+    "（千分位可带逗号、百分比需带 %），禁止编造或换算；第三列显示文案中的数值必须与第二列一致。"
     "封面图提示词用英文，描述画面主体、风格、色调。"
     "正文中的 {{imageN}} 数量必须与 inlinePrompts 数量保持一致。"
 )
