@@ -218,6 +218,22 @@ function openRow(row) {
   router.push({ name: 'studio', query: { id: row.id } })
 }
 
+async function openLayout(row) {
+  rowBusyId.value = row.id
+  try {
+    const detail = await api.get(`/content/${encodeURIComponent(row.id)}`)
+    const versionId = detail.item?.currentVersionId || detail.versions?.[0]?.id
+    await router.push({
+      path: '/wechat-layout',
+      query: { articleId: row.id, ...(versionId ? { versionId } : {}) },
+    })
+  } catch (err) {
+    toast(`无法打开排版预览：${err.message}`, 'error')
+  } finally {
+    rowBusyId.value = ''
+  }
+}
+
 async function createArticle() {
   creating.value = true
   try {
@@ -422,6 +438,14 @@ async function batchArchive(archived) {
               <td class="articles-actions">
                 <n-button size="tiny" quaternary :loading="rowBusyId === row.id" @click="openRow(row)">
                   打开
+                </n-button>
+                <n-button
+                  size="tiny"
+                  tertiary
+                  :loading="rowBusyId === row.id"
+                  @click="openLayout(row)"
+                >
+                  排版预览
                 </n-button>
                 <n-button
                   size="tiny"

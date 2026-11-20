@@ -11,9 +11,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-
-from .wechat_layout import PRESET_THEMES
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 MAX_PROMPT_TEMPLATE = 4000
 MAX_TONE = 400
@@ -146,7 +144,6 @@ class SkillManifest(BaseModel):
     promptTemplate: str | None = Field(default=None, max_length=MAX_PROMPT_TEMPLATE)
     tone: str | None = Field(default=None, max_length=MAX_TONE)
     styleRules: list[str] | None = None
-    defaultTheme: str | None = None
     targetLength: int | None = Field(default=None, ge=100, le=5000)
     input: dict | None = None
     output: dict | None = None
@@ -190,14 +187,13 @@ class SkillManifest(BaseModel):
             raise ValueError(f"风格规则最多 {MAX_RULES} 条")
         return cleaned
 
-    @field_validator("defaultTheme")
+    @model_validator(mode="before")
     @classmethod
-    def _check_theme(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if value not in PRESET_THEMES:
-            allowed = "、".join(PRESET_THEMES)
-            raise ValueError(f"未知排版主题「{value}」，可选：{allowed}")
+    def _reject_retired_layout(cls, value):
+        if isinstance(value, dict):
+            retired = {"defaultTheme", "theme", "theme_id", "themeId"}.intersection(value)
+            if retired:
+                raise ValueError(f"已废弃的排版字段：{'、'.join(sorted(retired))}")
         return value
 
 

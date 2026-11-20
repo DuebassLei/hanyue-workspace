@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, StrictBool, StrictStr
+from pydantic import AliasChoices, BaseModel, Field, StrictBool, StrictStr, field_validator
 
 
 def camel(name: str) -> str:
@@ -508,7 +509,6 @@ class PublishJobOut(CamelModel):
     created_at: datetime
     # publish：对外发布；draft：推送到平台草稿箱（公众号）
     target: str = "publish"
-    theme_id: str = ""
     # manual | auto | draft（草稿箱推送），来自 payload_snapshot.mode
     mode: str = ""
     # 手动回填/草稿推送时记录的落地页链接（如有）
@@ -564,11 +564,48 @@ class WeChatBindIn(CamelModel):
     credentials: WeChatCredentialsIn | None = None
 
 
+class WeChatStudioOptions(CamelModel):
+    model_config = {"populate_by_name": True, "alias_generator": camel, "extra": "forbid"}
+
+    style: Literal["std", "mag", "min", "geek", "bold", "neo", "note", "zen", "bento", "dark"] = "std"
+    theme: Literal["orange", "blue", "teal", "ink", "navy", "violet", "rose", "amber", "morandi", "forest", "petrol", "mist", "matcha", "cocoa", "dusty"] = "orange"
+    banner: Literal["none", "poster", "neo", "card"] = "none"
+    outro: StrictBool = True
+    brand_author: str = Field(default="", max_length=80)
+    brand_slogan: str = Field(default="", max_length=200)
+    avatar_url: str = Field(default="", max_length=2048)
+    title: str = Field(default="", max_length=200)
+
+    @field_validator("avatar_url")
+    @classmethod
+    def validate_avatar_url(cls, value: str) -> str:
+        if not value:
+            return value
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or any(char.isspace() or ord(char) < 32 for char in value):
+            raise ValueError("头像必须是安全的 HTTPS 图片地址")
+        return value
+
+
+class WeChatStudioSettingsIn(CamelModel):
+    options: WeChatStudioOptions = Field(default_factory=WeChatStudioOptions)
+
+
+class WeChatStudioRenderIn(WeChatStudioSettingsIn):
+    title: str | None = Field(default=None, max_length=200)
+    body: str = Field(default="", max_length=100000)
+    image_urls: list[str] = Field(default_factory=list, max_length=100)
+    asset_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
 class WeChatDraftIn(CamelModel):
+    model_config = {"populate_by_name": True, "alias_generator": camel, "extra": "forbid"}
+
     account_id: str
     idempotency_key: str = Field(min_length=6, max_length=120)
     # 关联创作空间稿件，便于发布队列追溯来源
     content_item_id: str | None = None
+    version_id: str | None = Field(default=None, validation_alias=AliasChoices("versionId", "contentVersionId", "version_id"))
     title: str = ""
     body: str = ""
     digest: str = ""
@@ -577,59 +614,20 @@ class WeChatDraftIn(CamelModel):
     asset_ids: list[str] = Field(default_factory=list)
     need_open_comment: bool = False
     only_fans_can_comment: bool = False
-    # 排版主题；留空使用默认预设
-    theme_id: str = ""
 
 
 class WeChatDraftPreviewIn(CamelModel):
+    model_config = {"populate_by_name": True, "alias_generator": camel, "extra": "forbid"}
+
     account_id: str = ""
+    content_item_id: str | None = None
+    version_id: str | None = Field(default=None, validation_alias=AliasChoices("versionId", "contentVersionId", "version_id"))
     title: str = ""
     body: str = ""
     digest: str = ""
     author: str = ""
     content_source_url: str = ""
     asset_ids: list[str] = Field(default_factory=list)
-    theme_id: str = ""
-
-
-class WeChatRenderIn(CamelModel):
-    """排版预览：不落库、不调微信，纯渲染。"""
-
-    title: str = ""
-    body: str = ""
-    theme_id: str = ""
-    # 主题编辑器里未保存草稿的实时预览：非空时优先于 themeId，同样过 normalize_tokens
-    tokens: dict[str, Any] = Field(default_factory=dict)
-    # 直接用已有图片 URL 预览（前端本地已有上传结果时）；为空时用 assetIds 的占位
-    image_urls: list[str] = Field(default_factory=list)
-    asset_ids: list[str] = Field(default_factory=list)
-
-
-class WeChatThemeIn(CamelModel):
-    name: str = Field(default="", max_length=60)
-    tokens: dict[str, Any] = Field(default_factory=dict)
-    # 基于哪个预设复制（tokens 会覆盖在预设之上）
-    base_theme_id: str = ""
-
-
-class WeChatThemeOut(CamelModel):
-    id: str
-    name: str
-    is_preset: bool
-    description: str = ""
-    tokens: dict[str, Any]
-    editable: bool = True
-    # 用户展示偏好（仅预设有意义）：收藏置顶、隐藏后不出现在发布抽屉
-    favorite: bool = False
-    hidden: bool = False
-
-
-class WeChatThemePrefsIn(CamelModel):
-    """排版偏好：PUT 全量替换，三个字段都随请求发送。"""
-
-    default_theme_id: str = ""
-    favorite_preset_ids: list[str] = Field(default_factory=list)
-    hidden_preset_ids: list[str] = Field(default_factory=list)
 
 
 # ---------- agent ----------

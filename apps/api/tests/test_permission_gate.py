@@ -262,14 +262,14 @@ def test_operator_holds_both_publish_permissions(client):
 # ---------------- 排版 / 公众号通道 ----------------
 #
 # wechat_mp 曾经整模块 any-of：有排版权限就能绑公众号、推草稿。
-# 排版只改自己的主题；绑号和推草稿落到公众号上，撤不回。
+# 排版只改自己的工作室配置；绑号和推草稿落到公众号上。
 
 
 def test_layout_role_can_render_but_cannot_bind_or_push(client):
     headers = login(client, subject="gate-layout", role="editor")
-    assert client.get(f"{PREFIX}/wechat-mp/themes", headers=headers).status_code == 200
+    assert client.get(f"{PREFIX}/wechat-mp/layout-studio/catalog", headers=headers).status_code == 200
     rendered = client.post(
-        f"{PREFIX}/wechat-mp/drafts/render", headers=headers, json={"body": "你好"}
+        f"{PREFIX}/wechat-mp/layout-studio/render", headers=headers, json={"body": "你好"}
     )
     assert rendered.status_code == 200, rendered.text
 
@@ -287,14 +287,14 @@ def test_layout_role_can_render_but_cannot_bind_or_push(client):
         assert res.json()["code"] == "permission_denied"
 
 
-def test_publish_role_can_push_path_but_not_edit_themes(client):
-    """只有 publishing.use 的角色要能渲染、能走到绑定；不能改主题库。"""
+def test_publish_role_can_push_path_but_not_edit_studio_settings(client):
+    """只有 publishing.use 的角色要能渲染、能走到绑定；不能修改工作室配置。"""
     role_key = _custom_role(["publishing.use"], "wxpub")
     headers = login(client, subject="gate-wx-pub", role=role_key)
-    assert client.get(f"{PREFIX}/wechat-mp/themes", headers=headers).status_code == 200
+    assert client.get(f"{PREFIX}/wechat-mp/layout-studio/catalog", headers=headers).status_code == 200
     assert client.get(f"{PREFIX}/wechat-mp/status", headers=headers).status_code == 200
     rendered = client.post(
-        f"{PREFIX}/wechat-mp/drafts/render", headers=headers, json={"body": "你好"}
+        f"{PREFIX}/wechat-mp/layout-studio/render", headers=headers, json={"body": "你好"}
     )
     assert rendered.status_code == 200, rendered.text
     # 没配公众号时业务失败，但不能是权限拒绝
@@ -303,8 +303,8 @@ def test_publish_role_can_push_path_but_not_edit_themes(client):
     )
     assert bound.status_code != 403, bound.text
 
-    created = client.post(
-        f"{PREFIX}/wechat-mp/themes", headers=headers, json={"name": "不该能建"}
+    created = client.put(
+        f"{PREFIX}/wechat-mp/layout-studio/articles/not-exist", headers=headers, json={"options": {}}
     )
     assert created.status_code == 403, created.text
     assert created.json()["code"] == "permission_denied"
@@ -317,14 +317,14 @@ def test_publish_viewer_can_see_channel_status_only(client):
     assert client.get(f"{PREFIX}/wechat-mp/credentials", headers=headers).status_code == 200
     denied = client.post(f"{PREFIX}/wechat-mp/bind", headers=headers, json={})
     assert denied.status_code == 403
-    # 主题库不是发布复盘的一部分
-    assert client.get(f"{PREFIX}/wechat-mp/themes", headers=headers).status_code == 403
+    # 工作室目录不是发布复盘的一部分
+    assert client.get(f"{PREFIX}/wechat-mp/layout-studio/catalog", headers=headers).status_code == 403
 
 
-def test_member_theme_list_stays_closed(client):
-    """设置页拉主题失败会退回内置快照，不因此把主题接口对全员放开。"""
+def test_member_studio_catalog_stays_closed(client):
+    """工作室目录保持排版权限边界，不对全员放开。"""
     headers = _member(client, subject="gate-wx-member")
-    res = client.get(f"{PREFIX}/wechat-mp/themes", headers=headers)
+    res = client.get(f"{PREFIX}/wechat-mp/layout-studio/catalog", headers=headers)
     assert res.status_code == 403
     assert res.json()["code"] == "permission_denied"
 

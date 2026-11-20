@@ -36,7 +36,7 @@
         "retrieve_content"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "语气平实有深度，结构清晰，善用小标题和引用",
         "styleRules": [
           "不用 emoji",
@@ -45,7 +45,6 @@
           "关键信息用 > 引用块突出",
           "数据、步骤、对比、清单、金句按需用对应区块，不要为了用而用"
         ],
-        "defaultTheme": "ink-green",
         "targetLength": 1200,
         "input": {
           "goal": "string"
@@ -140,7 +139,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "第一人称在场，语气克制，多写实测细节，重判断后置，不喊口号",
         "styleRules": [
           "结构：开头用亲切自述，抛出一个具体真问题",
@@ -154,7 +153,6 @@
           "产品名首次出现后保持英文",
           "禁「重大突破」等无证据断言"
         ],
-        "defaultTheme": "blue-business",
         "input": {
           "goal": "string"
         },
@@ -174,7 +172,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "作者退到记录员位置，冷静陈述，多用时间、地点、数字与引语，不抒情不评判",
         "styleRules": [
           "结构：开头用事实卡，三句话说清五要素",
@@ -189,7 +187,6 @@
           "感叹号仅限引用官方通报原文",
           "敏感人脸与遗体画面必须处理"
         ],
-        "defaultTheme": "dispatch",
         "input": {
           "goal": "string"
         },
@@ -209,7 +206,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "以同代朋友的口吻叙述，情绪克制，最重的一句写得最短，不评价不说教",
         "styleRules": [
           "结构：开头对准一个具体的人：名字、年龄、场景一句话",
@@ -223,7 +220,6 @@
           "不虚构「我的一位朋友」骗共情",
           "当事人须化名并做面部处理"
         ],
-        "defaultTheme": "warm-orange",
         "input": {
           "goal": "string"
         },
@@ -243,7 +239,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "像懂行分析师在饭桌聊天，结论前置、敢下判断，但每一步都给来源与前提",
         "styleRules": [
           "结构：开头三句给一个反直觉的数据反差",
@@ -257,7 +253,6 @@
           "禁改数据轴或掐头去尾造错觉",
           "不写「未来可期」「值得关注」空话"
         ],
-        "defaultTheme": "blue-business",
         "input": {
           "goal": "string"
         },
@@ -277,7 +272,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "像耐心的老师在你面前讲，术语先解释，多用类比，不端着不炫技",
         "styleRules": [
           "结构：开头从读者遇到过的具体场景切入",
@@ -291,7 +286,6 @@
           "类比要说明哪里不精确",
           "禁「XX 五大好处」式罗列"
         ],
-        "defaultTheme": "ink-green",
         "input": {
           "goal": "string"
         },
@@ -311,7 +305,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "像比你时髦一点的朋友翻衣橱，有主张、有细节、有节制，不夸大功效",
         "styleRules": [
           "结构：开头先立一句可复述的生活方式主张",
@@ -324,7 +318,6 @@
           "禁虚构素人推荐包装商务合作",
           "AI 图不伪造上身与试色"
         ],
-        "defaultTheme": "warm-orange",
         "input": {
           "goal": "string"
         },
@@ -344,7 +337,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "像刚从现场回来的朋友讲见闻，多用感官细节与取舍判断，落到实处",
         "styleRules": [
           "结构：开头给一个只有到场才写出的感官细节",
@@ -358,7 +351,6 @@
           "商务合作须开头或结尾明示",
           "食安指控须基于可验证事实"
         ],
-        "defaultTheme": "warm-orange",
         "input": {
           "goal": "string"
         },
@@ -378,7 +370,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "镜头始终对准人物，语气安静克制，只用看得见听得到的细节，不代言",
         "styleRules": [
           "结构：开头落在此人某个具体动作上",
@@ -392,7 +384,6 @@
           "不消费遗容病榻与家属崩溃",
           "不俯视不仰视，不做人格审判"
         ],
-        "defaultTheme": "mono",
         "input": {
           "goal": "string"
         },
@@ -412,7 +403,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "懂行但不装的评论人，先给反共识判断，再用场景细节验证，尊重剧透边界",
         "styleRules": [
           "结构：开头一行明示剧透范围",
@@ -426,7 +417,6 @@
           "批评作品不攻击演员容貌私生活",
           "不炒 CP，不放大饭圈骂战"
         ],
-        "defaultTheme": "mono",
         "input": {
           "goal": "string"
         },
@@ -446,7 +436,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "像会推荐给朋友的人说话，利益前置、门槛透明、有取舍，不吆喝不空喊",
         "styleRules": [
           "结构：前三行说清是什么、何时、为何点",
@@ -460,7 +450,6 @@
           "不虚构参与人数与用户评价",
           "抽奖规则必须公示"
         ],
-        "defaultTheme": "warm-orange",
         "input": {
           "goal": "string"
         },
@@ -480,7 +469,7 @@
         "generate_article"
       ],
       "manifest": {
-        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
+        "promptTemplate": "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\",\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\",\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。正文使用中文，{tone}，不用 emoji，不用绝对化承诺。正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。封面图提示词用英文，描述画面主体、风格、色调。插图提示词数量与正文中 {{imageN}} 标记数量一致。",
         "tone": "像把工具自己跑通的朋友在讲，第一人称实测，口语短句，一句一段。判断后置，不喊口号，不写死作者署名",
         "styleRules": [
           "结构：开头用读者刚碰到的具体麻烦切入，先说痛点再给结果",
@@ -496,7 +485,6 @@
           "不用 emoji，不用绝对化承诺",
           "禁赋能、抓手、闭环等商业黑话"
         ],
-        "defaultTheme": "ink-green",
         "input": {
           "goal": "string"
         },

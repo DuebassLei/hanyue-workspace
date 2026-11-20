@@ -71,8 +71,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     # 必须是 true：补列会给**已有行**填这个默认值，填 false 会把所有老账号判成停用。
     ("users", "is_active", "BOOLEAN DEFAULT true"),
     ("publish_jobs", "target", "VARCHAR(24) DEFAULT 'publish'"),
-    ("publish_jobs", "theme_id", "VARCHAR(32) DEFAULT ''"),
     ("publish_jobs", "layout_snapshot", "JSON"),
+    ("content_versions", "layout_options", "JSON DEFAULT '{}'"),
     ("publish_jobs", "content_item_id", "VARCHAR(32)"),
     ("publish_jobs", "status_history", "JSON"),
     ("connected_accounts", "auth_source", "VARCHAR(24) DEFAULT 'none'"),
@@ -96,8 +96,6 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("sticker_sets", "meta_json", "JSON"),
     # 贴图：该行最近一次入队用的描述，用于识别「改了描述但还没重画」
     ("sticker_images", "generated_prompt", "TEXT"),
-    # 微信排版页：用户级默认主题 / 收藏 / 隐藏
-    ("user_preferences", "wechat_layout", "JSON"),
     # 全局默认文本模型（model_catalog_entries.id）
     ("user_preferences", "default_text_model_id", "VARCHAR(32)"),
     # 创作空间 AI 自动配图偏好
@@ -232,12 +230,76 @@ def _sqlite_drop_not_null(conn, table_name: str, column: str) -> None:
         conn.execute(text(ddl.replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1)))
 
 
+# 退役排版列只保留库内数据，不再进入 ORM，也不由自动同步删除或猜测改名。
+_RETIRED_LAYOUT_DEFAULTS = {
+    "user_preferences": {"wechat_layout": "'{}'"},
+    "publish_jobs": {"theme_id": "''"},
+}
+
+
+def _preserve_retired_layout_columns(conn) -> None:
+    """给旧列补数据库默认值，避免新 ORM 插入被旧 NOT NULL 约束阻塞。"""
+    from sqlalchemy.schema import CreateTable, DefaultClause
+
+    inspector = inspect(conn)
+    tables = set(inspector.get_table_names())
+    quote = conn.dialect.identifier_preparer.quote
+    for table_name, defaults in _RETIRED_LAYOUT_DEFAULTS.items():
+        if table_name not in tables:
+            continue
+        columns = {column["name"]: column for column in inspector.get_columns(table_name)}
+        missing = {
+            name: default for name, default in defaults.items()
+            if name in columns and columns[name]["default"] is None and not columns[name]["nullable"]
+        }
+        if not missing:
+            continue
+        if conn.dialect.name == "postgresql":
+            for name, default in missing.items():
+                conn.execute(text(
+                    f"ALTER TABLE {quote(table_name)} ALTER COLUMN {quote(name)} SET DEFAULT {default}"
+                ))
+            continue
+        if conn.dialect.name != "sqlite":
+            raise RuntimeError("退役排版列的默认值迁移仅支持 SQLite 和 PostgreSQL")
+        if conn.exec_driver_sql("PRAGMA foreign_keys").scalar():
+            raise RuntimeError("迁移退役排版列前需停服并使用关闭 foreign_keys 的 SQLite 连接")
+        # 显式事务保证建表、复制、换表及恢复索引/触发器能够一起回滚。
+        if not conn.connection.driver_connection.in_transaction:
+            conn.exec_driver_sql("BEGIN")
+        objects = conn.execute(text(
+            "SELECT sql FROM sqlite_master WHERE tbl_name = :name "
+            "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
+        ), {"name": table_name}).scalars().all()
+        metadata = MetaData()
+        original = Table(table_name, metadata, autoload_with=conn)
+        temporary_metadata = MetaData()
+        for reflected in metadata.tables.values():
+            if reflected.name != table_name:
+                reflected.to_metadata(temporary_metadata)
+        temporary_name = f"{table_name}_retired_defaults_rebuild"
+        temporary = original.to_metadata(temporary_metadata, name=temporary_name)
+        for name, default in missing.items():
+            temporary.c[name].server_default = DefaultClause(text(default))
+        conn.execute(CreateTable(temporary))
+        column_list = ", ".join(quote(column.name) for column in original.columns)
+        conn.execute(text(
+            f"INSERT INTO {quote(temporary_name)} ({column_list}) "
+            f"SELECT {column_list} FROM {quote(table_name)}"
+        ))
+        conn.execute(text(f"DROP TABLE {quote(table_name)}"))
+        conn.execute(text(f"ALTER TABLE {quote(temporary_name)} RENAME TO {quote(table_name)}"))
+        for ddl in objects:
+            conn.exec_driver_sql(ddl)
+
+
 def _apply_additive_migrations() -> None:
     """只做加列 / 加宽 / 放开 NOT NULL / 加索引 / 必要去重，幂等可重复执行。"""
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     pg = engine.dialect.name == "postgresql"
     with engine.begin() as conn:
+        _preserve_retired_layout_columns(conn)
         for table, column, ddl_type in _ADDED_COLUMNS:
             if table not in existing_tables:
                 continue
@@ -424,7 +486,8 @@ def _sync_schema_from_models() -> list[str]:
                 for c in inspect(engine).get_columns(table.name)
             }
             model_names = {c.name for c in table.columns}
-            db_only = sorted(set(reflected) - model_names)
+            preserved = set(_RETIRED_LAYOUT_DEFAULTS.get(table.name, {}))
+            db_only = sorted(set(reflected) - model_names - preserved)
             model_only = sorted(model_names - set(reflected))
             pk_cols = [c.name for c in table.primary_key.columns]
 
@@ -461,7 +524,7 @@ def _sync_schema_from_models() -> list[str]:
                 c["name"]
                 for c in inspect(engine).get_columns(table.name)
             }
-            for old in sorted(reflected_now - model_names):
+            for old in sorted(reflected_now - model_names - preserved):
                 if old in table.primary_key.columns:
                     logger.warning(
                         "表 %s 的主键列 %s 不在模型中：无法安全删除，需手工迁移",

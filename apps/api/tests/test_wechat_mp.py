@@ -324,9 +324,10 @@ def test_push_draft_success_writes_media_id_and_record(client, configured, monke
     # 正文占位符必须被真实图片 URL 替换（只声明了 1 张正文图，编号从 1 开始）
     assert "https://mmbiz.qpic.cn/inline1.jpg" in article["content"]
     assert "{{image1}}" not in article["content"]
-    # 列表项现在带内联样式（微信只认 inline style），断言语义内容与标签结构
-    assert "<li" in article["content"] and "要点一" in article["content"]
-    assert article["content"].count("<li") == 2
+    # 独立工作台按参考设计用 section/p 自绘列表，不再限定旧引擎 li 标签。
+    assert "要点一" in article["content"] and "要点二" in article["content"]
+    assert article["content"].count('display:flex;margin:0 0 10px 0px;') == 2
+    assert "- 要点" not in article["content"]
 
     from app import models
 
@@ -381,7 +382,14 @@ def test_render_html_escapes_user_content():
     assert "&amp;" in html
 
 
-def test_theme_and_cover_limits_are_enforced():
+def test_default_render_uses_studio_engine():
+    from app.services import wechat_article, wechat_layout_engine
+
+    body = "## 标题\n\n正文"
+    assert wechat_article.render_html(body) == wechat_layout_engine.render_studio_document(body, {}, None)["html"]
+
+
+def test_digest_and_cover_limits_are_enforced():
     from app.services import wechat_article
 
     issues = wechat_article.validate_article(

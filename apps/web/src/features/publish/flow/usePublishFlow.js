@@ -39,7 +39,6 @@ export function usePublishFlow(options = {}) {
     remoteContentId: '',
     permalink: '',
     assetIds: [],
-    themeId: 'ink-green',
     coverAssetId: '',
     inlineAssetIdsText: '',
   })
@@ -99,7 +98,6 @@ export function usePublishFlow(options = {}) {
     form.remoteContentId = ''
     form.permalink = ''
     form.assetIds = defaults.assetIds ? [...defaults.assetIds] : []
-    form.themeId = defaults.themeId || 'ink-green'
     form.coverAssetId = defaults.coverAssetId || ''
     form.inlineAssetIdsText = defaults.inlineAssetIds ? defaults.inlineAssetIds.join(',') : ''
   }
@@ -178,7 +176,6 @@ export function usePublishFlow(options = {}) {
               title: form.title,
               body: form.body,
               assetIds: form.assetIds,
-              themeId: form.themeId,
             }))
           : await api.post('/publishing/preview', {
               accountId: account.id,
@@ -225,7 +222,6 @@ export function usePublishFlow(options = {}) {
             title: form.title,
             body: form.body,
             assetIds: form.assetIds,
-            themeId: form.themeId,
             }))
         } else {
           job = await api.post('/publishing/jobs', {

@@ -108,9 +108,6 @@ class UserPreference(Base, TimestampMixin):
     # 全局默认文本模型：model_catalog_entries.id。不选择模型时它排候选链首位，
     # 后面仍保留自动降级；失效时忽略但不清除偏好，恢复后自动生效。
     default_text_model_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # 公众号排版偏好：{"defaultThemeId", "favoritePresetIds", "hiddenPresetIds"}
-    # 读时兜底，写时整包替换（JSON 列必须赋新 dict，原地改不会被 SQLAlchemy 感知）
-    wechat_layout: Mapped[dict] = mapped_column(JSON, default=dict)
     # 创作空间 AI 自动配图偏好；读时兜底，写时整包替换
     studio_image_preferences: Mapped[dict] = mapped_column(JSON, default=dict)
 
@@ -186,6 +183,8 @@ class ContentVersion(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(200), default="")
     body: Mapped[str] = mapped_column(Text, default="")
     summary: Mapped[str] = mapped_column(Text, default="")
+    # 按文章版本保存独立工作台设置，发布入队时复制为不可变快照。
+    layout_options: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
 
 
 class PlatformVariant(Base, TimestampMixin):
@@ -360,23 +359,8 @@ class PublishJob(Base, TimestampMixin):
     request_id: Mapped[str] = mapped_column(String(64), default="")
     reviewed_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     payload_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
-    # 公众号排版：引用的主题 + 推送时的 tokens 快照（主题后续被改也能复现当时的排版）
-    theme_id: Mapped[str] = mapped_column(String(32), default="")
+    # 公众号排版：推送时的工作室配置快照。
     layout_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
-
-
-class WeChatTheme(Base, TimestampMixin):
-    """公众号排版主题。owner_user_id 为空表示系统预设（只读，不可删改）。"""
-
-    __tablename__ = "wechat_themes"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    owner_user_id: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id"), nullable=True, index=True
-    )
-    name: Mapped[str] = mapped_column(String(60), default="")
-    tokens: Mapped[dict] = mapped_column(JSON, default=dict)
-    is_preset: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class PublishRecord(Base, TimestampMixin):

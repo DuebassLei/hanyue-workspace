@@ -15,7 +15,7 @@ import re
 
 from PIL import Image
 
-from . import wechat_layout
+from .wechat_layout_engine import render_studio_document
 
 MAX_THUMB_BYTES = 10 * 1024 * 1024
 MAX_INLINE_BYTES = 1 * 1024 * 1024
@@ -104,17 +104,10 @@ def prepare_inline(raw: bytes) -> tuple[bytes, str, str]:
 def render_html(
     body: str,
     image_urls: list[str] | None = None,
-    theme_tokens: dict | None = None,
+    studio_options: dict | None = None,
 ) -> str:
-    """把正文渲染成微信可接受的 HTML（内联样式）。
-
-    排版规则集中在 `services.wechat_layout`：主题 tokens 决定字号/行高/字距/配色，
-    解析器支持 `# / ## / ###` 标题、`> ` 引用、`- ` / `1. ` 列表、`---` 分割线、
-    ``` 代码块、`:::` 区块，以及 `{{imageN|图注}}` 插图占位。
-
-    预览与推送共用同一个渲染函数，保证所见即所得。
-    """
-    result = wechat_layout.render_document(body, theme_tokens, image_urls)
+    """把正文通过工作室单引擎渲染成微信可接受的 HTML。"""
+    result = render_studio_document(body, studio_options or {}, image_urls)
     return result["html"]
 
 

@@ -49,7 +49,7 @@ OUTLINE_INJECT_TEXT = "参考大纲（结构可微调，不要照抄标题）：
 
 # 单行类规则排序号恒为 0；列表类在各自类型内从 0 递增
 SINGLE_TYPES = frozenset(
-    {"tone", "prompt_template", "theme", "target_length", "fact_policy", "image_policy", "repair_policy"}
+    {"tone", "prompt_template", "target_length", "fact_policy", "image_policy", "repair_policy"}
 )
 
 
@@ -73,8 +73,6 @@ def _manifest_to_rules(manifest: dict, category: str = "flow") -> list[dict]:
         raw.append({"ruleType": "prompt_template", "payload": {"text": prompt_template}})
     for i, text in enumerate(manifest.get("styleRules") or [], start=1):
         raw.append({"ruleType": "style_rule", "ruleKey": f"sr-{i}", "payload": {"text": text}})
-    if "defaultTheme" in manifest:
-        raw.append({"ruleType": "theme", "payload": {"text": manifest["defaultTheme"]}})
     if "targetLength" in manifest:
         raw.append({"ruleType": "target_length", "payload": {"value": manifest["targetLength"]}})
     for i, step in enumerate(manifest.get("workflow") or [], start=1):

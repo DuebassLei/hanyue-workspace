@@ -128,7 +128,7 @@ watch([selectedKey, scope], loadRules)
  *  空文本、缺 value 的字数、空对象的策略会被后端整组拒绝，必须在这里提前丢弃。 */
 function isEmptyRule(row) {
   const payload = row.payload || {}
-  if (row.ruleType === 'tone' || row.ruleType === 'prompt_template' || row.ruleType === 'theme' || row.ruleType === 'style_rule') {
+  if (row.ruleType === 'tone' || row.ruleType === 'prompt_template' || row.ruleType === 'style_rule') {
     return !String(payload.text || '').trim()
   }
   if (row.ruleType === 'target_length') return !Number.isInteger(payload.value)

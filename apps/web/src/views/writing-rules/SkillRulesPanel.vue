@@ -40,11 +40,6 @@ const GROUPS = [
     placeholder: '例如：请以{tone}的口吻写一篇关于……',
   },
   {
-    type: 'theme', label: '默认排版主题', kind: 'single', json: false, field: 'input',
-    hint: '系统预设主题 id，如 ink-green。',
-    placeholder: 'ink-green',
-  },
-  {
     type: 'target_length', label: '目标字数', kind: 'single', json: false, field: 'number',
     primary: true,
     hint: '生成正文的目标字数，超出后会被要求压缩。',
@@ -106,7 +101,7 @@ const editorSection = ref('writing')
 const EDITOR_SECTIONS = [
   { key: 'writing', label: '写作设置', hint: '先确定口吻、模板和篇幅，再补充风格要求。', types: ['tone', 'prompt_template', 'target_length', 'style_rule'] },
   { key: 'quality', label: '审稿与范文', hint: '配置质量要求与参考范文，让生成结果更稳定。', types: ['review_rule', 'exemplar', 'fact_policy'] },
-  { key: 'advanced', label: '排版与执行', hint: '按需调整排版、配图、工作流及自动修复策略。', types: ['theme', 'image_policy', 'workflow_step', 'repair_policy'] },
+  { key: 'advanced', label: '配图与执行', hint: '按需调整配图、工作流及自动修复策略。', types: ['image_policy', 'workflow_step', 'repair_policy'] },
 ]
 const currentSection = computed(() => EDITOR_SECTIONS.find((section) => section.key === editorSection.value))
 const visibleGroups = computed(() => currentSection.value.types.map((type) => GROUPS.find((group) => group.type === type)))
@@ -415,7 +410,6 @@ function defaultPayload(type, ruleKey) {
   switch (type) {
     case 'tone':
     case 'prompt_template':
-    case 'theme':
     case 'style_rule':
       return { text: '' }
     case 'target_length':

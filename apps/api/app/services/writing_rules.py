@@ -12,7 +12,7 @@
 「有效规则」的口径（`effective_rows`）
 --------------------------------------
 个人副本是**按类型**覆盖，而不是整份拷贝：
-- 单行类（tone / prompt_template / theme / target_length / fact_policy / image_policy /
+- 单行类（tone / prompt_template / target_length / fact_policy / image_policy /
   repair_policy）：个人有该类型就用个人的，没有沿用全局；
 - 列表类（style_rule / workflow_step / review_rule / exemplar）：个人该类型的**启用行非空**
   时整套替换全局，否则沿用全局。先过滤禁用行再判断「非空」，这样用户「把某类规则全部关掉」
@@ -49,7 +49,6 @@ RULE_TYPES: tuple[str, ...] = (
     "tone",
     "style_rule",
     "prompt_template",
-    "theme",
     "target_length",
     "workflow_step",
     "review_rule",
@@ -64,7 +63,6 @@ RULE_TYPE_LABELS: dict[str, str] = {
     "tone": "语气",
     "style_rule": "风格规则",
     "prompt_template": "提示词模板",
-    "theme": "默认排版主题",
     "target_length": "目标字数",
     "workflow_step": "工作流步骤",
     "review_rule": "审核规则",
@@ -76,7 +74,7 @@ RULE_TYPE_LABELS: dict[str, str] = {
 
 # 单行类：一个 Skill 每类至多一行，个人副本按类型覆盖全局
 SINGLE_TYPES = frozenset(
-    {"tone", "prompt_template", "theme", "target_length", "fact_policy", "image_policy", "repair_policy"}
+    {"tone", "prompt_template", "target_length", "fact_policy", "image_policy", "repair_policy"}
 )
 # 列表类：多条，合成成 manifest 的一个数组
 LIST_TYPES = frozenset(set(RULE_TYPES) - SINGLE_TYPES)
@@ -143,9 +141,6 @@ def _check_single(rule_type: str, payload: dict) -> dict:
     if rule_type == "tone":
         return {"text": _require_text(payload, rule_type)}
     if rule_type == "prompt_template":
-        return {"text": _require_text(payload, rule_type)}
-    if rule_type == "theme":
-        # 预设目录随排版服务走；这里只确认形状，取值校验交给 SkillManifest.defaultTheme
         return {"text": _require_text(payload, rule_type)}
     if rule_type == "target_length":
         value = payload.get("value")
@@ -252,7 +247,7 @@ def validate_rule(rule: dict) -> dict:
 
     payload = _normalize_payload(rule_type, rule_key, rule.get("payload", {}))
 
-    # 兜底走一遍 manifest 校验：主题是否在预设目录、字数区间、提示词长度等全局约束
+    # 兜底走一遍 manifest 校验：字数区间、提示词长度等全局约束
     # 都只在这里写一份，避免与 manifest 校验各维护一套。
     try:
         validate_manifest(_payload_to_manifest(rule_type, payload))
@@ -273,8 +268,8 @@ def validate_rule(rule: dict) -> dict:
 
 def _payload_to_manifest(rule_type: str, payload: dict) -> dict:
     """单行 → manifest 片段，用于复用 SkillManifest 做全局约束校验。"""
-    if rule_type in ("tone", "prompt_template", "theme"):
-        key = {"tone": "tone", "prompt_template": "promptTemplate", "theme": "defaultTheme"}[rule_type]
+    if rule_type in ("tone", "prompt_template"):
+        key = {"tone": "tone", "prompt_template": "promptTemplate"}[rule_type]
         return {key: payload.get("text")}
     if rule_type == "target_length":
         return {"targetLength": payload.get("value")}
@@ -307,9 +302,12 @@ def compose_manifest(entry, rows: list) -> dict:
       该类型全部被禁用时产出空数组 / 不产出，**不回退** manifest——用户关掉就该是关掉；
     - 规则表里**没有**某一类型，manifest 残留（迁移期历史数据）先按 Schema 规范化再原样带出。
     """
-    manifest = dict(getattr(entry, "manifest", None) or {})
+    manifest = {
+        key: value for key, value in (getattr(entry, "manifest", None) or {}).items()
+        if key not in {"defaultTheme", "theme", "theme_id", "themeId"}
+    }
     # 未 flush 的新对象 enabled 还是 None（列默认值要到 INSERT 才生效），按「启用」处理
-    ordered = _ordered(rows)
+    ordered = _ordered(row for row in rows if row.rule_type in RULE_TYPES)
     present = {row.rule_type for row in ordered}
     by_type: dict[str, list[dict]] = {}
     for row in ordered:
@@ -319,7 +317,7 @@ def compose_manifest(entry, rows: list) -> dict:
     for rule_type in present:
         payloads = by_type.get(rule_type, [])
         key = next(iter(_MANIFEST_KEYS_BY_TYPE[rule_type]))
-        if rule_type in ("tone", "prompt_template", "theme"):
+        if rule_type in ("tone", "prompt_template"):
             text = payloads[0].get("text") if payloads else ""
             manifest.pop(key, None)
             if text:
@@ -368,7 +366,6 @@ def compose_manifest(entry, rows: list) -> dict:
 _MANIFEST_KEYS_BY_TYPE: dict[str, set[str]] = {
     "tone": {"tone"},
     "prompt_template": {"promptTemplate"},
-    "theme": {"defaultTheme"},
     "target_length": {"targetLength"},
     "fact_policy": {"factPolicy"},
     "image_policy": {"imagePolicy"},
@@ -432,7 +429,10 @@ def effective_manifest(db, entry, owner_user_id: str | None = None) -> dict:
         return {}
     if db is None:
         manifest = entry.manifest if isinstance(entry.manifest, dict) else {}
-        return dict(manifest)
+        return {
+            key: value for key, value in manifest.items()
+            if key not in {"defaultTheme", "theme", "theme_id", "themeId"}
+        }
     rows = effective_rows(db, entry.skill_key, owner_user_id)
     return compose_manifest(entry, rows)
 

@@ -85,6 +85,7 @@ BEGIN;
 def _stmt(node) -> str:
     """把 DDL 节点编译成 PG SQL，去掉 SQLAlchemy 追加的分号，末尾补分号统一格式。"""
     sql = str(node.compile(dialect=PG_DIALECT)).strip()
+    sql = "\n".join(line.rstrip() for line in sql.splitlines())
     return sql.rstrip(";") + ";"
 
 

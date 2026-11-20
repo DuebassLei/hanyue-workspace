@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -20,14 +21,19 @@ from ..connectors import wechat_mp as wechat
 from ..core import queue
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.security import decrypt_secret, encrypt_secret
-from ..services import egress_ip, publish_state, wechat_article, wechat_layout
+from ..services import egress_ip, publish_state, wechat_article, wechat_layout_engine
+from ..services.wechat_layout_engine import (
+    STYLES as STUDIO_STYLES,
+    SVG_CARD_INFO as STUDIO_SVG_CARD_INFO,
+    THEMES as STUDIO_THEMES,
+)
 from .publishing import _job_out
 
 from ..core.rbac import require_permission
 
 # 排版与发布通道拆开。模块级 any-of 会让「只会排版」的编辑直接绑公众号、推草稿。
-# 主题、组件、本地渲染只影响自己的稿面；凭据、绑定、推草稿会落到公众号上，撤不回。
-# 发布流程自己也要拉主题和渲染，所以这两类读接口对 publishing.use 放行。
+# 工作室配置与本地渲染只影响自己的稿面；凭据、绑定、推草稿会落到公众号上。
+# 发布流程也需要读取工作室目录和渲染，因此读接口对 publishing.use 放行。
 _LAYOUT = [require_permission("wechat_layout.use", "publishing.use", mode="any")]
 _LAYOUT_WRITE = [require_permission("wechat_layout.use")]
 _CHANNEL_READ = [require_permission("publishing.view", "publishing.use", mode="any")]
@@ -117,259 +123,128 @@ def _resolve_assets(db, user, asset_ids: list[str]) -> list[models.Asset]:
     return assets
 
 
-def _theme_out(preset: dict, *, favorite: bool = False, hidden: bool = False) -> schemas.WeChatThemeOut:
-    return schemas.WeChatThemeOut(
-        id=preset["id"],
-        name=preset["name"],
-        is_preset=True,
-        description=preset.get("description", ""),
-        tokens=preset["tokens"],
-        editable=False,
-        favorite=favorite,
-        hidden=hidden,
-    )
+def _studio_version(db, user, content_item_id: str, version_id: str | None = None):
+    item = db.get(models.ContentItem, content_item_id)
+    if not item or item.owner_user_id != user.id:
+        raise not_found("稿件")
+    workspace = db.get(models.Workspace, item.workspace_id)
+    if not workspace or workspace.owner_user_id != user.id:
+        raise not_found("稿件")
+    version = db.get(models.ContentVersion, version_id or item.current_version_id or "")
+    if not version or version.content_item_id != item.id:
+        raise not_found("稿件版本")
+    return item, version
 
 
-def _custom_theme_out(row: models.WeChatTheme) -> schemas.WeChatThemeOut:
-    return schemas.WeChatThemeOut(
-        id=row.id,
-        name=row.name,
-        is_preset=False,
-        description="",
-        tokens=row.tokens or {},
-        editable=True,
-    )
+def _studio_options(version: models.ContentVersion | None = None) -> dict:
+    return schemas.WeChatStudioOptions.model_validate(
+        version.layout_options or {} if version is not None else {}
+    ).model_dump(by_alias=True)
 
 
-def _theme_tokens(db, user, theme_id: str) -> tuple[str, dict]:
-    """解析主题 → (themeId, tokens)。未指定用默认预设；自定义主题必须属于当前用户。"""
-    if not theme_id or theme_id in wechat_layout.PRESET_THEMES:
-        preset = wechat_layout.theme_by_id(theme_id)
-        return preset["id"], dict(preset["tokens"])
-    row = db.get(models.WeChatTheme, theme_id)
-    if not row or row.owner_user_id != user.id:
-        raise ApiError("theme_not_found", "排版主题不存在或无权访问", status_code=404)
-    try:
-        return row.id, wechat_layout.normalize_tokens(row.tokens)
-    except wechat_layout.ThemeError as exc:
-        raise ApiError("invalid_theme", f"主题配置已损坏：{exc}", status_code=409) from exc
+def _publish_studio_options(db, user, content_item_id: str | None, version_id: str | None) -> tuple[dict, str | None]:
+    if not content_item_id:
+        if version_id:
+            raise ApiError("content_required", "指定版本时必须同时指定稿件", status_code=422)
+        return _studio_options(), None
+    _, version = _studio_version(db, user, content_item_id, version_id)
+    return _studio_options(version), version.id
 
 
-# ---------------- 排版主题 ----------------
-
-
-def _user_pref_row(db, user) -> models.UserPreference | None:
-    return db.scalar(
-        select(models.UserPreference).where(
-            models.UserPreference.owner_user_id == user.id
-        )
-    )
-
-
-def _layout_prefs(db, user) -> dict:
-    """读用户的排版偏好；没有记录时给空默认（不写库）。"""
-    row = _user_pref_row(db, user)
-    prefs = (row.wechat_layout or {}) if row else {}
+def _studio_render(body: str, options: dict, image_urls: list[str]) -> dict:
+    result = wechat_layout_engine.render_studio_document(body, options, image_urls)
     return {
-        "defaultThemeId": str(prefs.get("defaultThemeId") or ""),
-        "favoritePresetIds": [str(x) for x in (prefs.get("favoritePresetIds") or [])],
-        "hiddenPresetIds": [str(x) for x in (prefs.get("hiddenPresetIds") or [])],
-    }
-
-
-def _resolve_default_theme_id(db, user, prefs: dict) -> str:
-    """默认主题解析：预设命中 → 自有自定义命中 → 回退系统默认。
-
-    默认主题指向已被删除的自定义主题时读时回退（GET 不写库），下次保存偏好自然修复。
-    """
-    theme_id = prefs["defaultThemeId"]
-    if theme_id in wechat_layout.PRESET_THEMES:
-        return theme_id
-    if theme_id:
-        row = db.get(models.WeChatTheme, theme_id)
-        if row and row.owner_user_id == user.id:
-            return theme_id
-    return wechat_layout.DEFAULT_THEME_ID
-
-
-def _theme_list_payload(db, user) -> dict:
-    prefs = _layout_prefs(db, user)
-    favorites = set(prefs["favoritePresetIds"])
-    hidden = set(prefs["hiddenPresetIds"])
-    presets = [
-        _theme_out(item, favorite=item["id"] in favorites, hidden=item["id"] in hidden)
-        for item in wechat_layout.PRESET_THEMES.values()
-    ]
-    rows = db.scalars(
-        select(models.WeChatTheme)
-        .where(models.WeChatTheme.owner_user_id == user.id)
-        .order_by(models.WeChatTheme.created_at.asc())
-    ).all()
-    return {
-        "defaultThemeId": _resolve_default_theme_id(db, user, prefs),
-        "favoritePresetIds": sorted(favorites),
-        "hiddenPresetIds": sorted(hidden),
-        "presets": [item.model_dump(by_alias=True) for item in presets],
-        "custom": [
-            _custom_theme_out(row).model_dump(by_alias=True) for row in rows
+        **result,
+        "warnings": [
+            {"field": "body", "level": "warning", "message": warning}
+            if isinstance(warning, str) else warning
+            for warning in result["warnings"]
         ],
+        "stats": {
+            **result["stats"],
+            "sourceChars": len(body),
+            "htmlChars": len(result["html"]),
+            "renderedChars": len(re.sub(r"<[^>]+>", "", result["html"])),
+            "images": result["stats"].get("images", 0),
+            "readingMinutes": max(1, (len(re.sub(r"\s", "", body)) + 299) // 300),
+        },
     }
 
 
-@router.get("/wechat-mp/themes", dependencies=_LAYOUT)
-def list_themes(user: CurrentUser, db: DbSession) -> dict:
-    return _theme_list_payload(db, user)
-
-
-@router.get("/wechat-mp/themes/schema", dependencies=_LAYOUT)
-def theme_schema() -> dict:
-    """主题编辑器字段描述（校验范围以服务端 normalize 为准，前端不重复维护）。"""
-    return {"fields": wechat_layout.token_schema()}
-
-
-@router.get("/wechat-mp/components", dependencies=_LAYOUT)
-def layout_components() -> dict:
-    """小组件注册表：组件库页与发布抽屉的区块按钮共用这一份。"""
-    return {"components": [dict(item) for item in wechat_layout.LAYOUT_COMPONENTS]}
-
-
-# 注意：必须用 PUT。PATCH /wechat-mp/themes/{theme_id} 已存在，
-# 若这里声明成 PATCH /themes/preferences 会被 {theme_id} 路由抢先匹配。
-@router.put("/wechat-mp/themes/preferences", dependencies=_LAYOUT_WRITE)
-def update_theme_preferences(
-    payload: schemas.WeChatThemePrefsIn, user: CurrentUser, db: DbSession
+@router.get("/wechat-mp/layout-studio/articles/{content_item_id}", dependencies=_LAYOUT)
+def get_studio_settings(
+    content_item_id: str, user: CurrentUser, db: DbSession,
+    version_id: str | None = Query(default=None, alias="versionId"),
 ) -> dict:
-    """保存排版偏好（全量替换）：默认主题 / 收藏预设 / 隐藏预设。"""
-    favorites = list(dict.fromkeys(payload.favorite_preset_ids))
-    hidden = list(dict.fromkeys(payload.hidden_preset_ids))
-    unknown = [x for x in favorites + hidden if x not in wechat_layout.PRESET_THEMES]
-    if unknown:
-        raise ApiError(
-            "invalid_prefs",
-            f"收藏/隐藏只能作用于系统预设，未知 id：{'、'.join(unknown)}",
-            status_code=422,
-        )
-    default_id = (payload.default_theme_id or "").strip()
-    if default_id and default_id not in wechat_layout.PRESET_THEMES:
-        row = db.get(models.WeChatTheme, default_id)
-        if not row or row.owner_user_id != user.id:
-            raise ApiError("invalid_prefs", "默认主题不存在或无权访问", status_code=422)
-    # 刚选为默认的主题又藏起来是矛盾操作：默认获胜，从 hidden 剔除
-    if default_id and default_id in hidden:
-        hidden = [x for x in hidden if x != default_id]
-
-    row = _user_pref_row(db, user)
-    if row is None:
-        row = models.UserPreference(
-            owner_user_id=user.id,
-            theme="system",
-            wechat_layout={
-                "defaultThemeId": default_id,
-                "favoritePresetIds": favorites,
-                "hiddenPresetIds": hidden,
-            },
-        )
-        db.add(row)
-    else:
-        # JSON 列必须赋新 dict：原地改 SQLAlchemy 感知不到
-        row.wechat_layout = {
-            "defaultThemeId": default_id,
-            "favoritePresetIds": favorites,
-            "hiddenPresetIds": hidden,
-        }
-    db.commit()
-    return _theme_list_payload(db, user)
-
-
-@router.post("/wechat-mp/themes", status_code=201, dependencies=_LAYOUT_WRITE)
-def create_theme(
-    payload: schemas.WeChatThemeIn, user: CurrentUser, db: DbSession
-) -> dict:
-    """基于预设复制一份自定义主题；tokens 越界直接 422，不落库。"""
-    base = wechat_layout.theme_by_id(payload.base_theme_id)
-    merged = {**base["tokens"], **(payload.tokens or {})}
-    try:
-        tokens = wechat_layout.normalize_tokens(merged)
-    except wechat_layout.ThemeError as exc:
-        raise ApiError("invalid_theme", str(exc), status_code=422) from exc
-    row = models.WeChatTheme(
-        owner_user_id=user.id,
-        name=(payload.name or "").strip() or f"{base['name']} 副本",
-        tokens=tokens,
-        is_preset=False,
-    )
-    db.add(row)
-    db.commit()
-    return _custom_theme_out(row).model_dump(by_alias=True)
-
-
-@router.patch("/wechat-mp/themes/{theme_id}", dependencies=_LAYOUT_WRITE)
-def update_theme(
-    theme_id: str, payload: schemas.WeChatThemeIn, user: CurrentUser, db: DbSession
-) -> dict:
-    row = db.get(models.WeChatTheme, theme_id)
-    if not row or row.owner_user_id != user.id:
-        raise ApiError("theme_not_found", "主题不存在或无权修改（系统预设不可改）", status_code=404)
-    merged = {**(row.tokens or {}), **(payload.tokens or {})}
-    try:
-        row.tokens = wechat_layout.normalize_tokens(merged)
-    except wechat_layout.ThemeError as exc:
-        raise ApiError("invalid_theme", str(exc), status_code=422) from exc
-    if (payload.name or "").strip():
-        row.name = payload.name.strip()[:60]
-    db.commit()
-    return _custom_theme_out(row).model_dump(by_alias=True)
-
-
-@router.delete("/wechat-mp/themes/{theme_id}", status_code=204, dependencies=_LAYOUT_WRITE)
-def delete_theme(theme_id: str, user: CurrentUser, db: DbSession) -> None:
-    row = db.get(models.WeChatTheme, theme_id)
-    if not row or row.owner_user_id != user.id:
-        raise ApiError("theme_not_found", "主题不存在或无权删除（系统预设不可删）", status_code=404)
-    db.delete(row)
-    db.commit()
-
-
-@router.post("/wechat-mp/drafts/render", dependencies=_LAYOUT)
-def render_draft(
-    payload: schemas.WeChatRenderIn, user: CurrentUser, db: DbSession
-) -> dict:
-    """渲染预览：纯本地计算，不调微信、不落库。预览与推送共用同一渲染函数。
-
-    payload.tokens 非空时优先（主题编辑器实时预览未保存的草稿），校验路径与建主题一致。
-    """
-    if payload.tokens:
-        try:
-            tokens = wechat_layout.normalize_tokens(payload.tokens)
-        except wechat_layout.ThemeError as exc:
-            raise ApiError("invalid_theme", str(exc), status_code=422) from exc
-        theme_id = payload.theme_id or ""
-    else:
-        theme_id, tokens = _theme_tokens(db, user, payload.theme_id)
-    urls = [url for url in payload.image_urls if url]
-    if not urls and payload.asset_ids:
-        assets = _resolve_assets(db, user, payload.asset_ids)
-        # 素材还没上传到微信，先用 asset:// 占位，前端用本地 object URL 替换后预览
-        urls = [f"asset://{asset.id}" for asset in assets]
-    result = wechat_layout.render_document(payload.body, tokens, urls)
-    issues = wechat_layout.lint_html(result["html"], tokens)
-    if theme_id in wechat_layout.PRESET_THEMES:
-        theme_name = wechat_layout.theme_by_id(theme_id)["name"]
-    else:
-        # 自定义主题回传存储名；编辑器草稿预览（无落库 id）没有名字
-        row = db.get(models.WeChatTheme, theme_id) if theme_id else None
-        theme_name = row.name if row and row.owner_user_id == user.id else ""
+    item, version = _studio_version(db, user, content_item_id, version_id)
     return {
-        "platform": PLATFORM,
-        "themeId": theme_id,
-        "themeName": theme_name,
-        "tokens": tokens,
-        "html": result["html"],
-        "warnings": result["warnings"],
-        "issues": issues,
-        "stats": result["stats"],
+        "contentItemId": item.id, "versionId": version.id,
+        "options": _studio_options(version), "saved": bool(version.layout_options),
+        "updatedAt": version.updated_at.isoformat(),
     }
 
+
+@router.put("/wechat-mp/layout-studio/articles/{content_item_id}", dependencies=_LAYOUT_WRITE)
+def save_studio_settings(
+    content_item_id: str, payload: schemas.WeChatStudioSettingsIn,
+    user: CurrentUser, db: DbSession,
+    version_id: str | None = Query(default=None, alias="versionId"),
+) -> dict:
+    item, version = _studio_version(db, user, content_item_id, version_id)
+    version.layout_options = payload.options.model_dump(by_alias=True)
+    db.commit()
+    return {
+        "contentItemId": item.id, "versionId": version.id,
+        "options": version.layout_options, "saved": True,
+        "updatedAt": version.updated_at.isoformat(),
+    }
+
+
+@router.post("/wechat-mp/layout-studio/render", dependencies=_LAYOUT)
+def render_studio(
+    payload: schemas.WeChatStudioRenderIn, user: CurrentUser, db: DbSession,
+) -> dict:
+    options = payload.options.model_dump(by_alias=True)
+    if payload.title is not None:
+        options["title"] = payload.title
+    assets = _resolve_assets(db, user, payload.asset_ids) if payload.asset_ids else []
+    urls = payload.image_urls or [f"asset://{asset.id}" for asset in assets]
+    return {**_studio_render(payload.body, options, urls), "options": options}
+
+
+@router.get("/wechat-mp/layout-studio/catalog", dependencies=_LAYOUT)
+def layout_studio_catalog() -> dict:
+    """排版工作室目录：风格 / 配色 / SVG 卡的 id 与展示文案，来自渲染引擎常量。
+
+    正文预览和发布任务统一使用 render_studio_document。
+    """
+    return {
+        "styles": [
+            {"id": key, "name": value["name"], "desc": value["desc"]}
+            for key, value in STUDIO_STYLES.items()
+        ],
+        "themes": [
+            {
+                "id": key,
+                "name": value["name"],
+                "main": value["main"],
+                "soft": value["soft"],
+                "tint": value["tint"],
+            }
+            for key, value in STUDIO_THEMES.items()
+        ],
+        "svgCards": [
+            {"id": key, "name": value["name"], "lead": value["lead"]}
+            for key, value in STUDIO_SVG_CARD_INFO.items()
+        ],
+        "banners": [
+            {"id": "none", "name": "无横幅"},
+            {"id": "poster", "name": "海报横幅"},
+            {"id": "neo", "name": "质感横幅"},
+            {"id": "card", "name": "卡片横幅"},
+        ],
+        "defaults": _studio_options(),
+    }
 
 
 @router.get("/wechat-mp/egress-ip", dependencies=_CHANNEL_WRITE)
@@ -682,13 +557,16 @@ def preview_draft(
         asset_count=len(payload.asset_ids),
         content_source_url=payload.content_source_url,
     )
-    theme_id, tokens = _theme_tokens(db, user, payload.theme_id)
-    assets = _resolve_assets(db, user, payload.asset_ids) if payload.asset_ids else []
-    rendered = wechat_layout.render_document(
-        payload.body, tokens, [f"asset://{asset.id}" for asset in assets[1:]]
+    studio_options, version_id = _publish_studio_options(
+        db, user, payload.content_item_id, payload.version_id
     )
+    studio_options["title"] = payload.title or studio_options["title"]
+    assets = _resolve_assets(db, user, payload.asset_ids) if payload.asset_ids else []
+    urls = [f"asset://{asset.id}" for asset in assets[1:]]
+    rendered = _studio_render(payload.body, studio_options, urls)
     issues.extend(rendered["warnings"])
-    issues.extend(wechat_layout.lint_html(rendered["html"], tokens))
+    if rendered["stats"]["htmlChars"] > wechat_article.MAX_BODY_CHARS:
+        issues.append({"field": "body", "level": "error", "message": "排版后的正文超过微信 HTML 字符上限"})
     blocking = [item for item in issues if item["level"] == "error"]
     if payload.account_id:
         # 多账号：预览按指定账号的自有凭据判断可推送性
@@ -718,12 +596,6 @@ def preview_draft(
                 "message": "尚未绑定并验证公众号，请先点「绑定并验证」",
             }
         )
-    preset = wechat_layout.PRESET_THEMES.get(theme_id)
-    if preset:
-        theme_name = preset["name"]
-    else:
-        custom = db.get(models.WeChatTheme, theme_id)
-        theme_name = custom.name if custom and custom.owner_user_id == user.id else ""
     return {
         "platform": PLATFORM,
         "canPush": configured and bool(bound) and not blocking and not any(
@@ -734,8 +606,8 @@ def preview_draft(
         "thumbName": assets[0].original_name if assets else "",
         "inlineCount": max(0, len(assets) - 1),
         "renderedChars": rendered["stats"]["renderedChars"],
-        "themeId": theme_id,
-        "themeName": theme_name,
+        "studioOptions": studio_options,
+        "versionId": version_id,
         "stats": rendered["stats"],
         "html": rendered["html"],
         "note": "第一张素材作为封面（thumb_media_id），其余作为正文内图片",
@@ -779,11 +651,13 @@ def push_draft(
     if blocking:
         raise ApiError("draft_invalid", "；".join(blocking), status_code=422)
     _resolve_assets(db, user, payload.asset_ids)
-    theme_id, theme_tokens = _theme_tokens(db, user, payload.theme_id)
-    # 内联样式会显著增加 content 长度，而微信上限按 content 字符数计
-    estimated = wechat_layout.render_document(
-        payload.body, theme_tokens, [f"asset://{i}" for i in range(len(payload.asset_ids))]
+    studio_options, version_id = _publish_studio_options(
+        db, user, payload.content_item_id, payload.version_id
     )
+    studio_options["title"] = payload.title or studio_options["title"]
+    urls = [f"asset://{asset_id}" for asset_id in payload.asset_ids[1:]]
+    estimated = _studio_render(payload.body, studio_options, urls)
+    # 内联样式会显著增加 content 长度，而微信上限按 content 字符数计
     if estimated["stats"]["htmlChars"] > wechat_article.MAX_BODY_CHARS:
         raise ApiError(
             "draft_too_long",
@@ -792,12 +666,7 @@ def push_draft(
         )
 
     workspace = default_workspace(db, user)
-    content_item_id = None
-    if payload.content_item_id:
-        item = db.get(models.ContentItem, payload.content_item_id)
-        # 只允许关联本人稿件，跨用户传入按未关联处理
-        if item and item.owner_user_id == user.id:
-            content_item_id = item.id
+    content_item_id = payload.content_item_id
     job = models.PublishJob(
         owner_user_id=user.id,
         workspace_id=workspace.id,
@@ -809,8 +678,7 @@ def push_draft(
         status=publish_state.QUEUED,
         request_id=uuid.uuid4().hex,
         reviewed_by=user.id,
-        theme_id=theme_id,
-        layout_snapshot=theme_tokens,
+        layout_snapshot=dict(studio_options),
         payload_snapshot={
             "mode": "draft",
             # 草稿要推全文，不能像发布预览那样截断
@@ -822,9 +690,9 @@ def push_draft(
             "assetIds": list(payload.asset_ids),
             "needOpenComment": bool(payload.need_open_comment),
             "onlyFansCanComment": bool(payload.only_fans_can_comment),
-            # 排版快照：主题后续被改也能复现当时的排版
-            "themeId": theme_id,
-            "layoutTokens": theme_tokens,
+            # 排版快照：版本配置后续被改也能复现当时的排版
+            "studioOptions": dict(studio_options),
+            "versionId": version_id,
         },
         status_history=publish_state.initial_history(
             publish_state.QUEUED, actor="user", note="创建草稿推送任务"

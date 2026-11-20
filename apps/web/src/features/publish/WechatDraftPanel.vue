@@ -1,6 +1,6 @@
 <script setup>
 /**
- * WechatDraftPanel — 公众号专属草稿配置与排版面板
+ * WechatDraftPanel — 公众号专属草稿发布配置面板
  *
  * Props:
  *   open        Boolean — 是否打开
@@ -14,12 +14,10 @@
  *   close       — 关闭抽屉
  *   published   — 成功推送到草稿箱后
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { NAlert, NButton, NInput, NSelect } from 'naive-ui'
-import MarkdownEditor from '../../components/MarkdownEditor.vue'
-import { apiUrl, fetchBlobUrl } from '../../api/client'
+import { apiUrl } from '../../api/client'
 import { useWechatPublish } from '../../composables/useWechatPublish'
-import { useLayoutComponents } from '../../composables/useLayoutComponents'
 import { usePublishFlow } from './flow/usePublishFlow.js'
 import { toast } from '../../ui/feedback'
 
@@ -28,6 +26,7 @@ const props = defineProps({
   title: { type: String, default: '' },
   body: { type: String, default: '' },
   contentId: { type: String, default: '' },
+  versionId: { type: String, default: '' },
   // 自动配图产出的默认素材：封面 1 张 + 正文插图（按编号顺序）
   coverAssetId: { type: String, default: '' },
   inlineAssetIds: { type: Array, default: () => [] },
@@ -42,26 +41,14 @@ const {
   wechatPushError,
   wechatPreview,
   pushAccountOptions,
-  allThemes,
-  wechatThemeId,
-  layoutBusy,
-  layoutHtml,
-  layoutError,
   assets,
   imageAssets,
-  inlineOptions,
   loadWechat,
-  loadThemes,
   loadAssets,
-  scheduleLayout,
-  insertSnippet,
   previewWechatDraft,
   pushWechatDraft,
   initForm,
 } = useWechatPublish()
-
-// 区块按钮来自后端小组件注册表（与「微信排版 → 组件库」同一份），不要求每篇都用。
-const { components: BLOCK_COMPONENTS, load: loadBlockComponents } = useLayoutComponents()
 
 function syncDraftAdapter(account, form) {
   wechatAccountId.value = account.id
@@ -69,7 +56,6 @@ function syncDraftAdapter(account, form) {
   wechatForm.body = form.body
   wechatForm.coverId = form.coverAssetId || form.assetIds[0] || ''
   wechatForm.inlineIds = form.assetIds.slice(1)
-  wechatThemeId.value = form.themeId || wechatThemeId.value
 }
 
 const draftFlow = usePublishFlow({
@@ -157,7 +143,6 @@ function preparePublishImages() {
 function selectCover(id) {
   wechatForm.coverId = id
   closeAssetPicker()
-  scheduleLayout()
 }
 
 function selectAssetFromPicker(id) {
@@ -167,16 +152,8 @@ function selectAssetFromPicker(id) {
   }
   if (!wechatForm.inlineIds.includes(id)) {
     wechatForm.inlineIds.push(id)
-    scheduleLayout()
   }
   closeAssetPicker()
-}
-
-function toggleInline(id) {
-  const index = wechatForm.inlineIds.indexOf(id)
-  if (index >= 0) wechatForm.inlineIds.splice(index, 1)
-  else wechatForm.inlineIds.push(id)
-  scheduleLayout()
 }
 
 function moveInline(index, offset) {
@@ -184,52 +161,11 @@ function moveInline(index, offset) {
   if (target < 0 || target >= wechatForm.inlineIds.length) return
   const list = wechatForm.inlineIds
   ;[list[index], list[target]] = [list[target], list[index]]
-  scheduleLayout()
 }
 
 function removeInline(index) {
   wechatForm.inlineIds.splice(index, 1)
-  scheduleLayout()
 }
-
-// 预览里的 asset:// 占位换成可访问的本地图，避免正文配图显示为裂图
-const previewHtml = ref('')
-let previewObjectUrls = []
-let previewToken = 0
-
-async function hydratePreview() {
-  const token = ++previewToken
-  previewObjectUrls.forEach((url) => URL.revokeObjectURL(url))
-  previewObjectUrls = []
-  const html = layoutHtml.value
-  if (!html) {
-    previewHtml.value = ''
-    return
-  }
-  const ids = [...new Set([...html.matchAll(/asset:\/\/([\w-]+)/g)].map((m) => m[1]))]
-  let replaced = html
-  for (const id of ids) {
-    try {
-      const url = await fetchBlobUrl(`/assets/${id}/raw`)
-      if (token !== previewToken) {
-        URL.revokeObjectURL(url)
-        return
-      }
-      previewObjectUrls.push(url)
-      replaced = replaced.split(`asset://${id}`).join(url)
-    } catch {
-      // 单张素材取图失败不影响其余预览
-    }
-  }
-  if (token === previewToken) previewHtml.value = replaced
-}
-
-watch(layoutHtml, hydratePreview)
-
-onBeforeUnmount(() => {
-  previewObjectUrls.forEach((url) => URL.revokeObjectURL(url))
-  previewObjectUrls = []
-})
 
 const hasCover = computed(() => Boolean(wechatForm.coverId))
 const accountSelectOptions = computed(() =>
@@ -239,12 +175,10 @@ const accountSelectOptions = computed(() =>
 // 抽屉打开时初始化（每次打开都刷新素材，刚生成的配图才能立刻选到）
 watch(() => props.open, async (val) => {
   if (!val) return
-  loadBlockComponents().catch(() => { /* 区块按钮缺失不阻塞发布 */ })
-  await Promise.all([loadWechat(), loadThemes(), loadAssets()])
-  // 每次打开都用最新的 title/body 初始化表单
-  initForm({ title: props.title, body: props.body, contentId: props.contentId })
+  await Promise.all([loadWechat(), loadAssets()])
+  // 发布只编辑本次推送内容，不触发独立排版工作台的渲染。
+  initForm({ title: props.title, body: props.body, contentId: props.contentId, versionId: props.versionId })
   preparePublishImages()
-  scheduleLayout()
 })
 
 async function handlePush() {
@@ -255,6 +189,14 @@ async function handlePush() {
   pushing.value = true
   try {
     await draftFlow.load()
+    if (draftFlow.error.value) {
+      toast(draftFlow.error.value, 'error')
+      return
+    }
+    if (!draftFlow.accounts.value.some((account) => account.id === wechatAccountId.value && account.platform === 'wechat_official')) {
+      toast('请选择一个已连接的公众号账号', 'warning')
+      return
+    }
     draftFlow.reset({
       contentId: props.contentId,
       title: wechatForm.title,
@@ -262,7 +204,6 @@ async function handlePush() {
       mode: 'draft',
       accountIds: wechatAccountId.value ? [wechatAccountId.value] : [],
       assetIds: [wechatForm.coverId, ...wechatForm.inlineIds].filter(Boolean),
-      themeId: wechatThemeId.value,
       coverAssetId: wechatForm.coverId,
       inlineAssetIds: wechatForm.inlineIds,
     })
@@ -296,26 +237,7 @@ function handleClose() {
         </header>
 
         <div class="publish-drawer-body">
-          <!-- 左：文章预览 -->
-          <section class="publish-preview-pane">
-            <div class="publish-pane-head">
-              <span class="publish-pane-label">内容预览</span>
-              <span class="publish-pane-sub">来自最新保存版本</span>
-            </div>
-            <div v-if="layoutHtml" class="publish-layout-preview" v-html="previewHtml || layoutHtml" />
-            <div v-else-if="layoutBusy" class="publish-preview-loading">排版渲染中…</div>
-            <div v-else-if="layoutError" class="publish-preview-error">排版失败：{{ layoutError }}</div>
-            <div v-else class="publish-preview-fallback">
-              <MarkdownEditor
-                :model-value="body"
-                :readonly="true"
-                :toolbar="{}"
-                class="publish-preview-md"
-              />
-            </div>
-          </section>
-
-          <!-- 右：发布配置 -->
+          <!-- 发布输入与独立排版工作台分离 -->
           <aside class="publish-config-pane">
             <div class="publish-pane-head">
               <span class="publish-pane-label">发布配置</span>
@@ -381,32 +303,16 @@ function handleClose() {
                 <n-input id="pub-author" v-model:value="wechatForm.author" placeholder="作者名" />
               </div>
 
-              <!-- 排版主题 -->
               <div class="pub-field">
-                <label class="pub-label">排版主题</label>
-                <div class="pub-theme-list">
-                  <button
-                    v-for="theme in allThemes"
-                    :key="theme.id"
-                    class="pub-theme-btn"
-                    :class="{ 'is-active': wechatThemeId === theme.id }"
-                    @click="wechatThemeId = theme.id; scheduleLayout()"
-                  >{{ theme.name }}</button>
-                </div>
-              </div>
-
-              <!-- 区块插入：追加到当前这次推送的正文，不写回工作室稿件 -->
-              <div class="pub-field">
-                <label class="pub-label">插入区块</label>
-                <div class="pub-theme-list">
-                  <button
-                    v-for="block in BLOCK_COMPONENTS"
-                    :key="block.id"
-                    type="button"
-                    class="pub-theme-btn"
-                    @click="insertSnippet(block.snippet)"
-                  >{{ block.label }}</button>
-                </div>
+                <label class="pub-label" for="pub-body">正文</label>
+                <n-input
+                  id="pub-body"
+                  v-model:value="wechatForm.body"
+                  type="textarea"
+                  :autosize="{ minRows: 6, maxRows: 14 }"
+                  placeholder="本次发布正文（Markdown）"
+                />
+                <p class="pub-hint pub-hint-left">此处修改仅用于本次推送；排版请前往文章管理中的「排版预览」。</p>
               </div>
 
               <!-- 图片配置：封面与正文图分离，默认只展示已选内容 -->
@@ -537,7 +443,7 @@ function handleClose() {
 }
 
 .publish-drawer {
-  width: min(960px, 100vw);
+  width: min(560px, 100vw);
   height: 100vh;
   background: var(--color-surface);
   display: flex;
@@ -576,20 +482,16 @@ function handleClose() {
 .publish-drawer-body {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: 1fr 380px;
+  display: flex;
+  flex-direction: column;
 }
 
-.publish-preview-pane,
 .publish-config-pane {
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
-}
-
-.publish-preview-pane {
-  border-right: 1px solid var(--color-border);
 }
 
 .publish-pane-head {
@@ -605,36 +507,6 @@ function handleClose() {
   font-size: var(--font-sm);
   font-weight: 600;
   color: var(--color-text-primary);
-}
-
-.publish-pane-sub {
-  font-size: var(--font-xs);
-  color: var(--color-text-muted);
-}
-
-.publish-layout-preview {
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-5) var(--space-6);
-  font-size: 15px;
-  line-height: 1.85;
-}
-
-.publish-preview-loading,
-.publish-preview-error {
-  padding: var(--space-6);
-  color: var(--color-text-muted);
-  font-size: var(--font-sm);
-}
-
-.publish-preview-fallback {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.publish-preview-md {
-  min-height: 100%;
 }
 
 .publish-config-pane {
@@ -1096,30 +968,6 @@ function handleClose() {
   cursor: not-allowed;
 }
 
-
-.pub-theme-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.pub-theme-btn {
-  padding: 4px 10px;
-  font-size: var(--font-xs);
-  font-weight: 500;
-  font-family: inherit;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-}
-
-.pub-theme-btn.is-active {
-  background: var(--color-text-primary);
-  border-color: var(--color-text-primary);
-  color: var(--color-surface);
-}
 
 .pub-actions {
   display: flex;

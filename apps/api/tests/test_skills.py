@@ -29,7 +29,7 @@ def _create_style(client, headers, key: str, **overrides):
         "displayName": f"{key} 风格",
         "description": "测试用风格",
         "allowedToolIds": ["generate_article"],
-        "manifest": {"tone": "克制", "styleRules": ["少用形容词"], "defaultTheme": "blue-business"},
+        "manifest": {"tone": "克制", "styleRules": ["少用形容词"]},
     }
     payload.update(overrides)
     return client.post("/api/v1/skills", json=payload, headers=headers)
@@ -120,10 +120,12 @@ def test_manifest_schema_rejects_bad_values(client):
     )
     assert bad_rules.status_code == 422
 
-    bad_theme = _create_style(
-        client, headers, "bad-theme", manifest={"defaultTheme": "no-such-theme"}
-    )
-    assert bad_theme.status_code == 422
+    for index, key in enumerate(("defaultTheme", "theme", "themeId", "theme_id")):
+        bad_theme = _create_style(
+            client, headers, f"retired-theme-{index}", manifest={key: "ink-green"}
+        )
+        assert bad_theme.status_code == 422
+        assert bad_theme.json()["code"] == "invalid_manifest"
 
 
 def test_checksum_is_consistent_across_seed_and_fork(client):
@@ -150,7 +152,7 @@ def test_checksum_is_consistent_across_seed_and_fork(client):
 
     changed = client.put(
         f"/api/v1/skills/{fork['id']}",
-        json={"manifest": {"tone": "换一种语气", "defaultTheme": "mono"}},
+        json={"manifest": {"tone": "换一种语气"}},
         headers=headers,
     )
     assert changed.status_code == 200
@@ -306,7 +308,7 @@ def test_owner_fork_wins_over_builtin_at_runtime(client):
     )
     fork = client.post(
         f"/api/v1/skills/{builtin['id']}/customize",
-        json={"manifest": {"tone": "本人定制语气", "defaultTheme": "warm-orange"}},
+        json={"manifest": {"tone": "本人定制语气"}},
         headers=headers,
     ).json()
 

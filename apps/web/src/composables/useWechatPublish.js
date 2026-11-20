@@ -1,17 +1,11 @@
 import { computed, reactive, ref } from 'vue'
 import { api } from '../api/client'
 
-/**
- * 公众号草稿箱推送能力：排版渲染、校验预览、推送到草稿箱。
- * 在创作空间右侧「发布」面板中使用。
- */
+/** 公众号发布表单、提交校验与草稿箱推送；排版由独立工作台维护。 */
 export function useWechatPublish() {
-  // 公众号配置状态
   const wechat = ref(null)
   const wechatError = ref('')
   const wechatNotice = ref('')
-
-  // 推送表单
   const wechatForm = reactive({
     title: '',
     body: '',
@@ -24,11 +18,10 @@ export function useWechatPublish() {
   })
   const wechatAccountId = ref('')
   const wechatContentId = ref('')
+  const wechatVersionId = ref('')
   const wechatKey = ref('')
   const wechatPreview = ref(null)
   const wechatPushError = ref('')
-
-  // 可用的公众号账号（已连接）
   const wechatAccounts = ref([])
   const pushAccountOptions = computed(() =>
     wechatAccounts.value.map((a) => ({
@@ -38,40 +31,10 @@ export function useWechatPublish() {
         : `${a.displayName}（默认凭据）`,
     })),
   )
-
-  // 排版主题：偏好（默认/收藏/隐藏）由「微信排版」页维护，这里消费
-  const themes = ref({ presets: [], custom: [], defaultThemeId: 'ink-green' })
-  const wechatThemeId = ref('ink-green')
-  const allThemes = computed(() => {
-    const presets = (themes.value.presets || []).filter((t) => !t.hidden)
-    // 收藏置顶，其余保持预设声明顺序
-    const sorted = [...presets].sort((a, b) => Number(b.favorite) - Number(a.favorite))
-    return [...sorted, ...(themes.value.custom || [])]
-  })
-
-  // 实时排版预览
-  const layoutResult = ref(null)
-  const layoutBusy = ref(false)
-  const layoutError = ref('')
-  let layoutTimer = null
-  let layoutRequestId = 0
-  const bodyInput = ref(null)
-
-  const layoutHtml = computed(() => {
-    if (!layoutResult.value?.html) return ''
-    return `<div style="padding:16px 18px;background:#ffffff;color:#333;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;">${layoutResult.value.html}</div>`
-  })
-
-  // 素材库（封面图 / 正文内图）
   const assets = ref([])
   const imageAssets = computed(() =>
     assets.value.filter((a) => (a.mimeType || '').startsWith('image/')),
   )
-  const inlineOptions = computed(() =>
-    imageAssets.value.filter((a) => a.id !== wechatForm.coverId),
-  )
-
-  // ── 加载 ──────────────────────────────────────────────────────────────────
 
   async function loadWechat() {
     wechatError.value = ''
@@ -93,15 +56,6 @@ export function useWechatPublish() {
     }
   }
 
-  async function loadThemes() {
-    try {
-      themes.value = await api.get('/wechat-mp/themes')
-      wechatThemeId.value = themes.value.defaultThemeId || 'ink-green'
-    } catch (err) {
-      layoutError.value = err.message
-    }
-  }
-
   async function loadAssets() {
     try {
       assets.value = await api.get('/assets?limit=100')
@@ -110,74 +64,18 @@ export function useWechatPublish() {
     }
   }
 
-  // ── 排版渲染 ──────────────────────────────────────────────────────────────
-
-  async function renderLayout() {
-    const requestId = ++layoutRequestId
-    if (!wechatForm.body.trim()) {
-      layoutResult.value = null
-      layoutBusy.value = false
-      return
-    }
-    layoutBusy.value = true
-    layoutError.value = ''
-    try {
-      const result = await api.post('/wechat-mp/drafts/render', {
-        title: wechatForm.title,
-        body: wechatForm.body,
-        themeId: wechatThemeId.value,
-        assetIds: wechatForm.inlineIds,
-      })
-      if (requestId === layoutRequestId) layoutResult.value = result
-    } catch (err) {
-      if (requestId !== layoutRequestId) return
-      layoutError.value = err.message
-      layoutResult.value = null
-    } finally {
-      if (requestId === layoutRequestId) layoutBusy.value = false
-    }
-  }
-
-  function scheduleLayout() {
-    clearTimeout(layoutTimer)
-    layoutTimer = setTimeout(renderLayout, 300)
-  }
-
-  /** 在光标处插入排版语法；没有焦点时追加到末尾 */
-  function insertSnippet(snippet) {
-    const el = bodyInput.value
-    if (!el) {
-      wechatForm.body += snippet
-      scheduleLayout()
-      return
-    }
-    const start = el.selectionStart ?? wechatForm.body.length
-    const end = el.selectionEnd ?? start
-    wechatForm.body =
-      wechatForm.body.slice(0, start) + snippet + wechatForm.body.slice(end)
-    requestAnimationFrame(() => {
-      el.focus()
-      const caret = start + snippet.length
-      el.setSelectionRange(caret, caret)
-    })
-    scheduleLayout()
-  }
-
-  // ── 预览 / 推送 ────────────────────────────────────────────────────────────
-
   function wechatPayload() {
     return {
       accountId: wechatAccountId.value,
       contentItemId: wechatContentId.value || null,
+      versionId: wechatVersionId.value || null,
       title: wechatForm.title,
       body: wechatForm.body,
       digest: wechatForm.digest,
       author: wechatForm.author,
       contentSourceUrl: wechatForm.contentSourceUrl,
-      // 顺序有意义：第一张是封面，其余按选中顺序进入正文
+      // 顺序有意义：第一张是封面，其余按选中顺序进入正文。
       assetIds: [wechatForm.coverId, ...wechatForm.inlineIds].filter(Boolean),
-      needOpenComment: wechatForm.needOpenComment,
-      themeId: wechatThemeId.value,
     }
   }
 
@@ -185,43 +83,34 @@ export function useWechatPublish() {
     wechatPushError.value = ''
     wechatPreview.value = null
     try {
-      wechatPreview.value = await api.post(
-        '/wechat-mp/drafts/preview',
-        wechatPayload(),
-      )
+      wechatPreview.value = await api.post('/wechat-mp/drafts/preview', wechatPayload())
     } catch (err) {
       wechatPushError.value = err.message
     }
   }
 
-  /**
-   * 推送到草稿箱，返回创建的 job 对象；失败时返回 null。
-   */
+  /** 推送到草稿箱，返回创建的任务；失败时返回 null。 */
   async function pushWechatDraft() {
     wechatPushError.value = ''
     try {
-      const job = await api.post('/wechat-mp/drafts', {
+      return await api.post('/wechat-mp/drafts', {
         ...wechatPayload(),
+        needOpenComment: wechatForm.needOpenComment,
         idempotencyKey: wechatKey.value,
       })
-      return job
     } catch (err) {
       wechatPushError.value = err.message
       return null
     }
   }
 
-  // ── 初始化表单 ────────────────────────────────────────────────────────────
-
   /**
-   * 用稿件内容初始化发布表单，并触发排版渲染。
-   * @param {{ title?: string, body?: string, contentId?: string }} defaults
+   * 仅初始化本次发布输入，不读取主题或触发排版。
+   * @param {{ title?: string, body?: string, contentId?: string, versionId?: string }} defaults
    */
   function initForm(defaults = {}) {
-    clearTimeout(layoutTimer)
-    layoutRequestId += 1
-    layoutBusy.value = false
     wechatContentId.value = defaults.contentId || ''
+    wechatVersionId.value = defaults.versionId || ''
     wechatForm.title = defaults.title || ''
     wechatForm.body = defaults.body || ''
     wechatForm.digest = ''
@@ -232,42 +121,25 @@ export function useWechatPublish() {
     wechatForm.needOpenComment = false
     wechatPreview.value = null
     wechatPushError.value = ''
-    layoutResult.value = null
-    layoutError.value = ''
     wechatKey.value = `wx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    if (defaults.body) scheduleLayout()
   }
 
   return {
-    // 状态
     wechat,
     wechatError,
     wechatNotice,
     wechatForm,
     wechatAccountId,
+    wechatVersionId,
     wechatKey,
     wechatPreview,
     wechatPushError,
     wechatAccounts,
     pushAccountOptions,
-    themes,
-    wechatThemeId,
-    allThemes,
-    layoutResult,
-    layoutBusy,
-    layoutError,
-    layoutHtml,
     assets,
     imageAssets,
-    inlineOptions,
-    bodyInput,
-    // 动作
     loadWechat,
-    loadThemes,
     loadAssets,
-    renderLayout,
-    scheduleLayout,
-    insertSnippet,
     wechatPayload,
     previewWechatDraft,
     pushWechatDraft,

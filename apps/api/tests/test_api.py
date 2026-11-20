@@ -174,9 +174,7 @@ def test_builtin_writing_styles_seeded(client):
     # 与 builtin_skills.yaml 的 style- 条目数对齐；新增内置写作风格时同步改这里
     assert len(styles) == 11
     assert all(s["source"] == "builtin" for s in styles)
-    assert {
-        s["manifest"]["defaultTheme"] for s in styles
-    } <= {"ink-green", "warm-orange", "mono", "blue-business", "dispatch"}
+    assert all("defaultTheme" not in s["manifest"] for s in styles)
     for style in styles:
         manifest = style["manifest"]
         assert manifest["tone"]
@@ -525,7 +523,7 @@ def test_customize_builtin_style_creates_personal_fork(client):
         f"/api/v1/skills/{builtin['id']}/customize",
         json={
             "displayName": "科技数码·实测派（我的版本）",
-            "manifest": {"tone": "更口语化", "defaultTheme": "blue-business"},
+            "manifest": {"tone": "更口语化"},
         },
         headers=headers,
     )
@@ -546,7 +544,7 @@ def test_customize_builtin_style_creates_personal_fork(client):
     # 副本可通过 PUT 继续修改
     updated = client.put(
         f"/api/v1/skills/{fork['id']}",
-        json={"manifest": {"tone": "再口语一点", "defaultTheme": "blue-business"}},
+        json={"manifest": {"tone": "再口语一点"}},
         headers=headers,
     )
     assert updated.status_code == 200

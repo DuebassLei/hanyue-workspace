@@ -34,12 +34,13 @@ BUILTIN_RESOURCE = BASE_DIR / "app" / "resources" / "skills" / "builtin_skills.j
 # 唯一一份：内置资源、自定义 Skill 的兜底、ai_article 都从这里取，避免提示词漂移。
 DEFAULT_ARTICLE_PROMPT = (
     "你是资深公众号主笔。严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。"
-    "JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（公众号排版语法）\","
+    "JSON 结构：{\"title\":\"标题\",\"markdown\":\"正文（标准 Markdown）\","
     "\"summary\":\"摘要（≤120字）\",\"coverPrompt\":\"封面图英文提示词\","
     "\"inlinePrompts\":[\"插图1英文提示词\",\"插图2英文提示词\"]}。"
     "正文使用中文，{tone}，不用 emoji，不用绝对化承诺。"
-    "需要时可用 :::lead、:::stat、:::steps、:::compare、:::layers、:::checklist、:::quote-card，"
-    "行内用 | 分列，对比标题用「左 / 右」，清单状态只用 done、todo、warn，步骤不要手写编号。"
+    "正文使用标准 Markdown，提示块使用 > [!NOTE] 等 callout 引用语法。"
+    "需要视觉卡时使用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、"
+    "svg-compare、svg-concept、svg-phone 代码围栏，围栏内用 | 分列数据，不使用冒号扩展区块。"
     "封面图提示词用英文，描述画面主体、风格、色调。"
     "插图提示词数量与正文中 {{imageN}} 标记数量一致。"
 )
@@ -508,7 +509,7 @@ def fork_builtin(db, user, skill_id: str, payload: schemas.SkillUpdateIn) -> sch
             "skill_key_exists", "该内置风格已有个人定制副本，请直接编辑副本", status_code=409
         )
 
-    # 按顶层字段合并：前端通常只提交 tone/styleRules/defaultTheme，
+    # 按顶层字段合并：前端通常只提交 tone/styleRules，
     # 未提交的策略字段（workflow、reviewRules 等）继续沿用内置版本。
     manifest = dict(entry.manifest or {})
     if payload.manifest is not None:

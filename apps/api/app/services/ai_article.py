@@ -4,10 +4,8 @@
 用户可创建自定义 skill 覆盖语气与规则，不再硬编码。
 
 输出契约（与所有模型路径共享，避免格式漂移）：
-- Markdown 正文：公众号排版语法（# 标题、## 小标题、> 引用、- 列表、--- 分割线、
-  :::card 强调卡、:::follow 关注引导、:::sign 署名、可选 :::lead / :::stat /
-  :::steps / :::compare / :::layers / :::checklist / :::quote-card、{{image1}} 图片占位）
-- 公众号排版 HTML：调用 wechat_layout.render_document 生成
+- Markdown 正文：标准标题、引用、列表、分割线、callout、SVG 语义卡代码围栏及图片占位
+- 公众号排版 HTML：由当前排版工作台渲染生成
 - 封面图提示词：1 条（英文，适合生图模型）
 - 正文插图提示词：若干条
 
@@ -23,7 +21,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 
 from .. import models
-from . import ai_gateway, prompt_rules, skill_registry, wechat_layout, writing_rules
+from . import ai_gateway, prompt_rules, skill_registry, wechat_layout_engine, writing_rules
 
 # 内置默认风格（当 skill 未提供 manifest 时的兜底）
 ARTICLE_OUTPUT_CONTRACT = (
@@ -31,22 +29,18 @@ ARTICLE_OUTPUT_CONTRACT = (
     "严格只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字。"
     "JSON 必须包含以下字段："
     "title（文章标题）、"
-    "markdown（正文，使用公众号排版语法）、"
+    "markdown（正文，使用标准 Markdown）、"
     "summary（不超过 120 字的摘要）、"
     "coverPrompt（一条英文封面图提示词）、"
     "inlinePrompts（英文正文插图提示词数组）。"
     "正文使用中文，可使用 # 标题、## 小标题、> 引用、- 列表、--- 分割线、"
-    ":::card、:::follow、:::sign 和 {{imageN}} 图片占位符。"
-    "下面这些区块按内容选用，不要每篇都堆齐："
-    ":::lead 导语；:::stat 每行「数字 | 说明」；:::steps 每行「名称 | 说明」，不要自己写「1.」；"
-    ":::compare 左 / 右 再写「左 | 右」；:::layers 每行「标签 | 正文」；"
-    ":::checklist 每行「done、todo 或 warn | 事项」；"
-    ":::quote-card 出处 用来放金句，不要写成 > 引用。"
+    "以及 {{imageN}} 图片占位符。需要提示块时使用 > [!NOTE] 等 callout 引用语法。"
+    "可按内容选用 svg-table、svg-bars、svg-steps、svg-timeline、svg-breakdown、"
+    "svg-compare、svg-concept、svg-phone 语言标识的三反引号代码围栏，首行可附标题，"
+    "围栏内用 | 分列数据；不要堆砌视觉卡，不使用冒号扩展区块。"
     "封面图提示词用英文，描述画面主体、风格、色调。"
     "正文中的 {{imageN}} 数量必须与 inlinePrompts 数量保持一致。"
 )
-
-DEFAULT_THEME_ID = wechat_layout.DEFAULT_THEME_ID
 
 # 输出后处理：统一清洗所有模型路径的产物，避免 emoji / 代码块漂移
 _EMOJI_RE = re.compile(
@@ -94,7 +88,6 @@ class ArticleDraft:
     cover_prompt: str = ""
     inline_prompts: list[str] = field(default_factory=list)
     html: str = ""
-    theme_id: str = DEFAULT_THEME_ID
     stats: dict = field(default_factory=dict)
     error_code: str | None = None
     error_message: str = ""
@@ -118,8 +111,8 @@ def resolve_skill(
     return skill_registry.resolve_visible(db, user_id, skill_key)
 
 
-def resolve_skill_style(skill: models.SkillRegistryEntry | None) -> tuple[str, str, list[str], str]:
-    """从 skill.manifest 解析写作风格配置，返回 (prompt_template, tone, style_rules, theme_id)。
+def resolve_skill_style(skill: models.SkillRegistryEntry | None) -> tuple[str, str, list[str]]:
+    """从 skill.manifest 解析写作风格配置，返回 (prompt_template, tone, style_rules)。
 
     skill 为 None 或 manifest 缺字段时，回退到内置默认风格。
     运行期请改用 build_system_prompt(..., db=...)：它会先经规则表合成 manifest 再解析。
@@ -132,16 +125,15 @@ def resolve_skill_style(skill: models.SkillRegistryEntry | None) -> tuple[str, s
 
 def _style_from_manifest(
     manifest: dict, skill: models.SkillRegistryEntry | None = None
-) -> tuple[str, str, list[str], str]:
-    """manifest（已合成）→ 风格四元组；缺字段回退到代码兜底常量（R5）。"""
+) -> tuple[str, str, list[str]]:
+    """manifest（已合成）→ 风格三元组；缺字段回退到代码兜底常量（R5）。"""
     prompt_template = str(manifest.get("promptTemplate") or skill_registry.DEFAULT_ARTICLE_PROMPT)
     tone = str(manifest.get("tone") or skill_registry.DEFAULT_TONE)
     rules = manifest.get("styleRules")
     if not isinstance(rules, list):
         rules = skill_registry.DEFAULT_STYLE_RULES
     style_rules = [str(r) for r in rules if str(r).strip()]
-    theme_id = str(manifest.get("defaultTheme") or DEFAULT_THEME_ID)
-    return prompt_template, tone, style_rules, theme_id
+    return prompt_template, tone, style_rules
 
 
 def build_system_prompt(
@@ -163,7 +155,7 @@ def build_system_prompt(
     True 仅允许当前组件库中的组件；优先级高于 Skill 中的组件建议。
     """
     manifest = writing_rules.effective_manifest(db, skill, owner_user_id)
-    prompt_template, tone, style_rules, _ = _style_from_manifest(manifest, skill)
+    prompt_template, tone, style_rules = _style_from_manifest(manifest, skill)
     contract = (
         prompt_rules.get_prompt_rule(db, "article.output_contract", default=ARTICLE_OUTPUT_CONTRACT)
         if db is not None
@@ -188,16 +180,19 @@ def build_system_prompt(
     if use_layout_components is not None:
         # 本次生成选项优先于输出契约/Skill 中的组件建议，不改变其它调用方。
         if use_layout_components:
-            available = "、".join(f":::{item['id']}" for item in wechat_layout.LAYOUT_COMPONENTS)
+            available = "、".join(
+                f"{kind}（{wechat_layout_engine.SVG_CARD_INFO[kind]['name']}）"
+                for kind in wechat_layout_engine.SVG_CARD_KINDS
+            )
             parts.append(
                 "本次生成的排版小组件开关：开启。此设置优先于前文所有组件建议。"
-                f"仅可按内容需要选用以下组件：{available}，不要为使用而堆砌。"
-                "禁止使用已下架的 :::follow、:::sign、:::support。"
+                f"仅可按内容需要选用以下 SVG 语义视觉卡：{available}，不要为使用而堆砌。"
+                "使用对应语言标识的三反引号代码围栏，不使用冒号扩展区块。"
             )
         else:
             parts.append(
                 "本次生成的排版小组件开关：关闭。此设置优先于前文输出契约和所有 Skill 风格中的组件建议。"
-                "正文禁止使用任何 ::: 小组件区块（包括已有素材中的组件语法），"
+                "正文禁止使用 SVG 语义视觉卡代码围栏（包括已有素材中的视觉卡），"
                 "改用普通 Markdown 段落、标题、引用和列表表达其内容。"
                 "仍须遵守 JSON 输出结构和 {{imageN}} 图片占位符约定。"
             )
@@ -330,12 +325,6 @@ def review_contract(draft: ArticleDraft) -> dict:
     if contiguous and len(numbers) == inline_count:
         return {"ok": True, "issues": []}
     return {"ok": False, "issues": ["image_count_mismatch"]}
-
-
-def _resolve_theme(theme_id: str) -> dict:
-    """解析主题 tokens；预设主题直接取，不查库。"""
-    preset = wechat_layout.theme_by_id(theme_id)
-    return dict(preset["tokens"])
 
 
 def article_to_variant_body(draft: ArticleDraft) -> str:

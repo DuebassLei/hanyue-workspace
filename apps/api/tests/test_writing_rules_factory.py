@@ -68,20 +68,19 @@ def test_factory_rule_counts_match_yaml_source():
         "tone": 1,
         "prompt_template": 1,  # 成文流程也落模板行，Agent 路径才可配
         "style_rule": 5,  # 原 styleRules 5 条
-        "theme": 1,
         "workflow_step": 5,  # 原 workflow 5 步
         "review_rule": 2,  # 原 reviewRules 2 条
         "image_policy": 1,
         "fact_policy": 1,
         "repair_policy": 1,
     }
-    assert len(drafting) == 19
+    assert len(drafting) == 18
 
     for key, skill in skills.items():
         if not key.startswith("style-"):
             continue
         types = [rule["ruleType"] for rule in skill["rules"]]
-        assert types.count("tone") == 1 and types.count("theme") == 1
+        assert types.count("tone") == 1 and "theme" not in types
         # 模板必须逐 skill 成行：只靠 _build_builtin_manifest 注入的话，
         # 规则表里没有 prompt_template，管理页改不动、effective_manifest 也读不到。
         assert types.count("prompt_template") == 1
@@ -276,7 +275,7 @@ def test_reset_skill_rules_to_factory_restores_single_skill(client):
         row.source = "user"
         db.commit()
         writing_rules.delete_rule(
-            db, skill_key=key, owner_user_id=None, rule_type="theme", rule_key="default"
+            db, skill_key=key, owner_user_id=None, rule_type="prompt_template", rule_key="default"
         )
         db.commit()
         other_before = _global_count(db, "article-drafting")
@@ -430,7 +429,7 @@ def test_builtin_entries_keep_yaml_manifest_semantics(client):
         ).one()
         manifest = drafting.manifest
         assert manifest["targetLength"] == 1200
-        assert manifest["defaultTheme"] == "ink-green"
+        assert "defaultTheme" not in manifest
         assert len(manifest["styleRules"]) == 5
         assert len(manifest["workflow"]) == 5
         assert [r["id"] for r in manifest["reviewRules"]] == ["has-body", "no-absolute"]
@@ -456,7 +455,7 @@ def test_builtin_entries_keep_yaml_manifest_semantics(client):
         ).one()
         assert tech.manifest["promptTemplate"] == skill_registry.DEFAULT_ARTICLE_PROMPT
         assert len(tech.manifest["styleRules"]) == 10
-        assert tech.manifest["defaultTheme"] == "blue-business"
+        assert "defaultTheme" not in tech.manifest
         assert "workflow" not in tech.manifest
 
 

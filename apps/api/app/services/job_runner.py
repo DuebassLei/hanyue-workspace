@@ -1381,7 +1381,7 @@ def _handle_wechat_draft(
         html = wechat_article.render_html(
             snapshot.get("body") or "",
             inline_urls,
-            snapshot.get("layoutTokens") or None,
+            studio_options=snapshot.get("studioOptions"),
         )
         article = wechat_article.build_article(
             title=snapshot.get("title") or "",

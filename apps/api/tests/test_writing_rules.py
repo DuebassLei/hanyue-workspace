@@ -51,7 +51,8 @@ def test_validate_rule_normalizes_valid_rows():
     assert step["ruleKey"] == "wf-2"
     assert step["payload"]["args"] == {"maxSections": 4}
     assert writing_rules.validate_rule(_rule("target_length", {"value": 1200}))["payload"] == {"value": 1200}
-    assert writing_rules.validate_rule(_rule("theme", {"text": "ink-green"}))["payload"] == {"text": "ink-green"}
+    with pytest.raises(RuleInvalid, match="未知规则类型"):
+        writing_rules.validate_rule(_rule("theme", {"text": "ink-green"}))
 
 
 @pytest.mark.parametrize(
@@ -156,13 +157,25 @@ def test_compose_manifest_maps_every_rule_type():
     ]
     manifest = writing_rules.compose_manifest(entry, rows)
     assert manifest["promptTemplate"] == "你是主笔"
-    assert manifest["defaultTheme"] == "mono"
+    assert "defaultTheme" not in manifest, "已废弃规则不再参与合成"
     assert manifest["workflow"] == [{"tool": "create_outline", "args": {}}]
     assert manifest["imagePolicy"]["maxInlineImages"] == 2
     assert manifest["repairPolicy"] == {"retries": 1, "requireContract": True}
     assert manifest["exemplars"] == [{"title": "示例", "excerpt": "开头"}]
     # tone / styleRules 规则表里没有 → 迁移期仍带出 manifest 残留；有规则的类型不残留旧值
     assert manifest["tone"] == "旧语气" and manifest["styleRules"] == ["旧"]
+
+
+@pytest.mark.parametrize("key", ["defaultTheme", "theme", "themeId", "theme_id"])
+def test_retired_layout_fields_are_rejected_on_write_and_filtered_on_read(key):
+    from app.services.skill_manifest import ManifestInvalid
+
+    with pytest.raises(ManifestInvalid, match="已废弃"):
+        validate_manifest({key: "ink-green", "customMeta": 1})
+    entry = _entry({key: "ink-green", "customMeta": 1})
+    assert writing_rules.compose_manifest(entry, []) == {"customMeta": 1}
+    assert writing_rules.effective_manifest(None, entry) == {"customMeta": 1}
+    assert validate_manifest({"customMeta": 1}) == {"customMeta": 1}
 
 
 # ---------------- 3. 全局 / 个人覆盖 ----------------

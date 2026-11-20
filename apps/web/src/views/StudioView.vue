@@ -2796,6 +2796,7 @@ onBeforeUnmount(() => {
       :title="draftTitle"
       :body="draftBody"
       :content-id="detail?.item.id || ''"
+      :version-id="detail?.item.currentVersionId || detail?.versions?.[0]?.id || ''"
       :cover-asset-id="publishCoverAssetId"
       :inline-asset-ids="publishInlineAssetIds"
       @close="publishDrawerOpen = false"

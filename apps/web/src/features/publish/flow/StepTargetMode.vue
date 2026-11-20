@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { NCheckbox, NDatePicker, NEmpty, NInput, NRadio, NSelect } from 'naive-ui'
+import { NCheckbox, NDatePicker, NEmpty, NInput, NRadio } from 'naive-ui'
 
 const props = defineProps({
   form: { type: Object, required: true },
@@ -18,13 +18,6 @@ const groupedAccounts = computed(() => {
   })
   return Array.from(groups, ([label, accounts]) => ({ label, accounts }))
 })
-
-const themeOptions = [
-  { value: 'ink-green', label: '墨绿' },
-  { value: 'warm-orange', label: '暖橙' },
-  { value: 'mono', label: '简约' },
-  { value: 'dispatch', label: '公文' },
-]
 
 const scheduledTs = computed({
   get: () => (props.form.scheduledAt ? Date.parse(props.form.scheduledAt) : null),
@@ -103,7 +96,6 @@ const scheduledTs = computed({
       </label>
     </div>
     <div v-if="form.mode === 'draft'" class="draft-options">
-      <label class="field"><span class="field-label">排版主题</span><n-select v-model:value="form.themeId" :options="themeOptions" /></label>
       <label class="field"><span class="field-label">封面图片素材 ID</span><n-input v-model:value="form.coverAssetId" placeholder="从素材库选择的封面素材" /></label>
       <label class="field"><span class="field-label">正文图片素材 ID（逗号分隔）</span><n-input v-model:value="form.inlineAssetIdsText" placeholder="素材 ID，按正文顺序" /></label>
     </div>

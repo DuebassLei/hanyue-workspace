@@ -757,7 +757,6 @@ def _job_out(job: models.PublishJob) -> schemas.PublishJobOut:
         error_message=job.error_message,
         request_id=job.request_id,
         created_at=job.created_at,
-        theme_id=job.theme_id or "",
         mode=snapshot.get("mode") or "",
         permalink=snapshot.get("permalink") or "",
         updated_at=job.updated_at,
