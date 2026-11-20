@@ -9,6 +9,10 @@ const props = defineProps({
   modelValue: { type: String, default: '' },
   loading: Boolean,
   disabled: Boolean,
+  // 项目级选择器沿用默认文案；场景级弹窗通过 props 传入定制文案
+  title: { type: String, default: '统一画风' },
+  description: { type: String, default: '为新生成的镜头固定一套视觉语言' },
+  footNote: { type: String, default: '未选择时沿用原有出图方式。更换画风只影响之后新生成的镜头。' },
 })
 const emit = defineEmits(['update:modelValue'])
 const query = ref('')
@@ -73,7 +77,7 @@ onBeforeUnmount(() => {
     <div class="picker-head">
       <div class="picker-intro">
         <span class="picker-mark" aria-hidden="true">✎</span>
-        <div><h2>统一画风</h2><p>为新生成的镜头固定一套视觉语言</p></div>
+        <div><h2>{{ props.title }}</h2><p>{{ props.description }}</p></div>
       </div>
       <NButton v-if="props.modelValue" size="small" quaternary :disabled="props.disabled" @click="clear">清除选择</NButton>
     </div>
@@ -108,7 +112,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
     </div>
-    <p class="picker-foot">未选择时沿用原有出图方式。更换画风只影响之后新生成的镜头。</p>
+    <p class="picker-foot">{{ props.footNote }}</p>
   </section>
 </template>
 

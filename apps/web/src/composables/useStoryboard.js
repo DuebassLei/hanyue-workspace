@@ -127,6 +127,11 @@ export function useStoryboard() {
     return scene
   }
 
+  /** 场景级风格覆盖：styleConfig 传 { style_number } 设置覆盖，传 {} / null 清除并回落项目级。 */
+  async function saveSceneStyleConfig(sceneId, styleConfig) {
+    return patchScene(sceneId, { styleConfig: styleConfig || {} })
+  }
+
   async function deleteScene(sceneId) {
     await api.del(`/storyboards/scenes/${sceneId}`)
     project.value.scenes = project.value.scenes.filter((item) => item.id !== sceneId)
@@ -207,7 +212,7 @@ export function useStoryboard() {
     loading, saving, error, handdrawStyles, handdrawGroups, handdrawStylesLoading,
     loadProjects, loadProject, loadHanddrawStyles, saveStyleConfig,
     createProject, patchProject, deleteProject,
-    deletePermanently, restore, createScene, patchScene, deleteScene, createShot, patchShot, deleteShot, reorderShots, replaceShot,
+    deletePermanently, restore, createScene, patchScene, saveSceneStyleConfig, deleteScene, createShot, patchShot, deleteShot, reorderShots, replaceShot,
     selectScene, selectShot, refresh, breakDownProject, breakDownScene, saveAssets,
   }
 }

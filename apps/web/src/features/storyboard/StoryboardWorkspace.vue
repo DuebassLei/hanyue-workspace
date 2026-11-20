@@ -8,6 +8,8 @@ import AssetBoard from './AssetBoard.vue'
 import ShotImageViewer from './ShotImageViewer.vue'
 import ModelSelector from '../../components/ModelSelector.vue'
 import HanddrawStylePicker from './HanddrawStylePicker.vue'
+import SceneStyleModal from './SceneStyleModal.vue'
+import { sceneStylePayload } from './sceneStyle.js'
 
 const props = defineProps({ store: { type: Object, required: true } })
 const emit = defineEmits(['export-board', 'export-prompts', 'delete-project', 'delete-shot', 'delete-scene'])
@@ -42,6 +44,31 @@ async function saveStyleNumber(number) {
     styleError.value = err.message
   } finally {
     styleUpdating.value = false
+  }
+}
+
+// ---- 场景级画风覆盖：SceneTree 触发，弹窗内选择 / 清除 ----
+const sceneStyleSceneId = ref('')
+const sceneStyleSaving = ref(false)
+const sceneStyleError = ref('')
+const sceneStyleScene = computed(() => props.store.scenes.value.find((scene) => scene.id === sceneStyleSceneId.value) || null)
+const projectStyleName = computed(() => {
+  const number = currentStyleConfig.value.style_number || ''
+  if (!number) return ''
+  const style = props.store.handdrawStyles.value.find((item) => item.number === number)
+  return style?.generationName || number
+})
+
+async function saveSceneStyle(number) {
+  if (!sceneStyleScene.value) return
+  sceneStyleError.value = ''
+  sceneStyleSaving.value = true
+  try {
+    await props.store.saveSceneStyleConfig(sceneStyleScene.value.id, sceneStylePayload(number))
+  } catch (err) {
+    sceneStyleError.value = err.message
+  } finally {
+    sceneStyleSaving.value = false
   }
 }
 // 只记住镜头 id，提示词始终从最新项目数据取：轮询刷新后弹窗里的完整提示词会同步更新
@@ -108,7 +135,7 @@ async function runBreakdown(scope) {
     <div class="mobile-tabs"><button :class="{ active: showMobile === 'scenes' }" @click="showMobile = 'scenes'">场景</button><button :class="{ active: showMobile === 'shots' }" @click="showMobile = 'shots'">镜头</button><button :class="{ active: showMobile === 'edit' }" @click="showMobile = 'edit'">设定</button></div>
     <main class="editor-grid">
       <div class="panel-scenes" :class="{ 'mobile-active': showMobile === 'scenes' }">
-        <SceneTree :scenes="props.store.scenes.value" :active-scene-id="props.store.selectedSceneId.value" @select="props.store.selectScene" @create="props.store.createScene" @delete="emit('delete-scene', $event)" @create-shot="(id) => props.store.createShot(id, {})" />
+        <SceneTree :scenes="props.store.scenes.value" :active-scene-id="props.store.selectedSceneId.value" @select="props.store.selectScene" @create="props.store.createScene" @delete="emit('delete-scene', $event)" @create-shot="(id) => props.store.createShot(id, {})" @style="sceneStyleSceneId = $event" />
       </div>
       <div class="panel-shots" :class="{ 'mobile-active': showMobile === 'shots' }">
         <div v-if="props.store.selectedScene.value" class="scene-heading"><div><span>{{ chapterLabel }}</span><n-input :value="props.store.selectedScene.value.title" size="small" :bordered="false" @update:value="props.store.patchScene(props.store.selectedScene.value.id, { title: $event })" /></div><n-button type="primary" size="small" @click="props.store.createShot(props.store.selectedScene.value.id, {})">+ 镜头</n-button></div>
@@ -126,6 +153,19 @@ async function runBreakdown(scope) {
       @close="preview = null"
       @update:index="setPreviewIndex"
     />
+    <SceneStyleModal
+      v-if="sceneStyleScene"
+      :scene="sceneStyleScene"
+      :project-style-name="projectStyleName"
+      :styles="props.store.handdrawStyles.value"
+      :groups="props.store.handdrawGroups.value"
+      :loading="props.store.handdrawStylesLoading.value"
+      :saving="sceneStyleSaving"
+      @close="sceneStyleSceneId = ''"
+      @save="saveSceneStyle"
+      @clear="saveSceneStyle('')"
+    />
+    <p v-if="sceneStyleError" class="style-error">{{ sceneStyleError }}</p>
   </div>
 </template>
 
