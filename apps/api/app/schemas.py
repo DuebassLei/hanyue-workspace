@@ -1207,12 +1207,16 @@ class StoryboardSceneCreate(CamelModel):
     title: str = Field(default="新场景", min_length=1, max_length=200)
     summary: str = Field(default="", max_length=4000)
     chapter: str = Field(default="第一章", max_length=200)
+    # 场级风格覆盖：None/缺省 = 空覆盖（跟随项目级）
+    style_config: dict | None = None
 
 
 class StoryboardScenePatch(CamelModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     summary: str | None = Field(default=None, max_length=4000)
     chapter: str | None = Field(default=None, max_length=200)
+    # None = 不动；null/{} = 清除覆盖回落项目级；dict = 覆盖
+    style_config: dict | None = None
 
 
 class StoryboardShotCreate(CamelModel):
@@ -1293,6 +1297,8 @@ class StoryboardSceneOut(CamelModel):
     title: str
     summary: str
     chapter: str
+    # 场级风格覆盖：空 dict = 跟随项目级
+    style_config: dict | None = None
     shots: list[StoryboardShotOut] = Field(default_factory=list)
 
 
