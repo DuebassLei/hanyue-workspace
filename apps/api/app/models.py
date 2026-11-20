@@ -108,6 +108,9 @@ class UserPreference(Base, TimestampMixin):
     # 全局默认文本模型：model_catalog_entries.id。不选择模型时它排候选链首位，
     # 后面仍保留自动降级；失效时忽略但不清除偏好，恢复后自动生效。
     default_text_model_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 全局默认生图模型：model_catalog_entries.id。不指定 modelId 时优先用它，
+    # 优先于环境变量供应商；失效时忽略但不清除偏好，恢复后自动生效。
+    default_image_model_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # 创作空间 AI 自动配图偏好；读时兜底，写时整包替换
     studio_image_preferences: Mapped[dict] = mapped_column(JSON, default=dict)
 

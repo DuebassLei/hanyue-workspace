@@ -571,6 +571,7 @@ CREATE TABLE IF NOT EXISTS user_preferences (
 	owner_user_id VARCHAR(32) NOT NULL,
 	theme VARCHAR(16) NOT NULL,
 	default_text_model_id VARCHAR(32),
+	default_image_model_id VARCHAR(32),
 	studio_image_preferences JSON NOT NULL,
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,

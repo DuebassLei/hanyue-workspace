@@ -8,6 +8,10 @@
  *
  * 文本模型和生图模型是两条互不相干的链路（成文 / 出图），列表按类型分组，
  * 新增也走两个独立入口，弹窗里同时只出现一种类型的字段与提示，不把两种配置摆一起让人挑。
+ *
+ * 顶部「全局默认模型」决定不指定模型时的首选（/preferences 按用户存服务端）：
+ * 文本默认排候选链首位仍可降级，生图默认优先于 IMAGE_PROVIDER_* 环境变量，
+ * 两条偏好各存一份，切换后顶栏与各创作页的下拉立即跟着变。
  */
 import { computed, h, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import {
@@ -26,6 +30,7 @@ import {
 import { api } from '../api/client'
 import { toast } from '../ui/feedback'
 import { usePermission } from '../composables/usePermission'
+import { useModelSelectionStore } from '../stores/modelSelection'
 import StatusTag from '../components/StatusTag.vue'
 
 // 页面本身只要求 models.view：能确认「现在挂的是哪个模型、通不通」。
@@ -38,6 +43,22 @@ const connections = ref([])
 const statusRows = ref([])
 const error = ref('')
 const statusLoading = ref(false)
+
+/**
+ * 全局默认模型：服务端 /preferences 持久化，跨设备生效。
+ * 文本与生图是两条独立链路，各存各的，互不覆盖；不选（空值）表示按自动顺序降级。
+ */
+const defaults = reactive({
+  textId: null,
+  textLabel: null,
+  textIgnored: null,
+  imageId: null,
+  imageLabel: null,
+  imageIgnored: null,
+})
+// 正在保存的是哪一路，用来只禁用对应的下拉，不把两个一起锁住
+const savingKind = ref('')
+const modelSelection = useModelSelectionStore()
 
 const showConnection = ref(false)
 const editingId = ref('')
@@ -121,6 +142,93 @@ const statusCards = computed(() =>
     name: row.displayName || row.modelCode || '未配置',
   })),
 )
+
+/** 某条链路可选的默认模型：启用且能力匹配；带连接名，避免不同连接里的同名代号分不清 */
+function modelChoices(kind) {
+  const rows = []
+  for (const conn of connections.value) {
+    for (const model of conn.models || []) {
+      if (!model.enabled) continue
+      const capable =
+        kind === 'image'
+          ? (model.capabilities || []).includes('image.generate')
+          : model.isTextModel === true
+      if (!capable) continue
+      rows.push({ value: model.id, label: `${conn.displayName} · ${model.modelCode}` })
+    }
+  }
+  return rows
+}
+
+/** 失效的默认模型也要能在下拉里显示出来，否则界面像「没设置」而服务端其实还存着 */
+function withCurrentDefault(rows, currentId, label) {
+  if (!currentId || rows.some((row) => row.value === currentId)) return rows
+  return [...rows, { value: currentId, label: `${label || currentId}（已失效）` }]
+}
+
+const textDefaultOptions = computed(() => [
+  { value: '', label: '自动：按连接顺序选第一个可用文本模型（失败自动降级）' },
+  ...withCurrentDefault(modelChoices('text'), defaults.textId, defaults.textLabel),
+])
+
+const imageDefaultOptions = computed(() => [
+  { value: '', label: '自动：默认模型 → 环境变量 → 第一个可用生图模型' },
+  ...withCurrentDefault(modelChoices('image'), defaults.imageId, defaults.imageLabel),
+])
+
+function applyDefaults(pref) {
+  defaults.textId = pref.defaultTextModelId || null
+  defaults.textLabel = pref.defaultTextModelLabel || null
+  defaults.textIgnored = pref.defaultTextModelIgnored || null
+  defaults.imageId = pref.defaultImageModelId || null
+  defaults.imageLabel = pref.defaultImageModelLabel || null
+  defaults.imageIgnored = pref.defaultImageModelIgnored || null
+}
+
+async function loadDefaults() {
+  try {
+    applyDefaults(await api.get('/preferences'))
+  } catch (err) {
+    error.value = err.message
+  }
+}
+
+/**
+ * 切换全局默认模型（kind: text | image），保存后立即重算顶栏与「当前生效」。
+ * 失败时把下拉退回原值——不能让界面显示成「已切换」而服务端其实没存上。
+ */
+async function setDefault(kind, value) {
+  error.value = ''
+  const previous = kind === 'text' ? defaults.textId : defaults.imageId
+  savingKind.value = kind
+  try {
+    const pref = await api.patch(
+      '/preferences',
+      kind === 'text'
+        ? { defaultTextModelId: value || '' }
+        : { defaultImageModelId: value || '' },
+    )
+    applyDefaults(pref)
+    // 创作页下拉读的是同一个 store，刷新后「自动（默认：xxx）」立刻对齐
+    await modelSelection.load(true)
+    notifyModelStatus()
+    toast(
+      value
+        ? `已设为全局默认${kind === 'text' ? '文本' : '生图'}模型，未指定模型时优先使用。`
+        : `已清除默认${kind === 'text' ? '文本' : '生图'}模型，恢复按自动顺序选择。`,
+    )
+  } catch (err) {
+    if (kind === 'text') defaults.textId = previous
+    else defaults.imageId = previous
+    error.value = err.message
+  } finally {
+    savingKind.value = ''
+  }
+}
+
+function isDefaultModel(model) {
+  return model.id === defaults.textId || model.id === defaults.imageId
+}
 
 /** 单个模型的类型：空能力的历史模型按文本处理，与后端 is_text_model 口径一致 */
 function modelKind(model) {
@@ -591,10 +699,14 @@ async function syncModelCode(conn, code, isNew = false, capabilities = '') {
   }
   const capsChanged =
     existing && JSON.stringify(existing.capabilities || []) !== JSON.stringify(capList)
+  // 展示名没人手工维护过（等于旧代号）时跟着代号走，否则改完代号两处名字对不上
+  const nameStale =
+    existing && existing.modelCode !== trimmed && existing.displayName === existing.modelCode
   if (existing && (existing.modelCode !== trimmed || capsChanged)) {
     const model = await api.patch(`/models/catalog/${existing.id}`, {
       modelCode: trimmed,
       capabilities: capList,
+      ...(nameStale ? { displayName: trimmed } : {}),
     })
     conn.models = [model]
   } else if (!existing) {
@@ -637,6 +749,7 @@ const providerOptions = [
 onMounted(() => {
   loadConnections()
   loadStatus()
+  loadDefaults()
 })
 </script>
 
@@ -657,6 +770,66 @@ onMounted(() => {
       你当前只有「模型查看」权限：能看到正在使用的模型、连接状态与密钥掩码；
       新增连接、修改密钥、删除连接需要「模型管理」权限，请联系超级管理员。
     </n-alert>
+
+    <section class="card">
+      <div class="row">
+        <h2 class="card-title" style="margin: 0">全局默认模型</h2>
+        <div class="spacer" />
+        <span class="field-hint" style="margin: 0">保存即生效 · 跨设备同步</span>
+      </div>
+      <p class="page-sub">
+        这里决定「不指定模型时先用哪个」。创作页、小说、分镜、生图页的模型下拉都是会话级临时选择，
+        刷新后回到这里的默认值；文本与生图各存一份，互不覆盖。
+      </p>
+      <div class="default-grid">
+        <div class="default-item">
+          <div class="default-head">
+            <span class="model-dot is-ok" aria-hidden="true" style="color: var(--color-accent)" />
+            <span class="default-label">默认文本模型</span>
+          </div>
+          <n-select
+            :value="defaults.textId || ''"
+            :options="textDefaultOptions"
+            :disabled="savingKind === 'text'"
+            :loading="savingKind === 'text'"
+            size="small"
+            @update:value="(value) => setDefault('text', value)"
+          />
+          <p class="field-hint default-hint">
+            <template v-if="defaults.textIgnored">
+              当前默认已失效（{{ defaults.textIgnored.message }}），生成时会自动降级；修复连接后自动恢复。
+            </template>
+            <template v-else-if="defaults.textLabel">
+              当前默认：{{ defaults.textLabel }}；失败仍会按候选链自动降级。
+            </template>
+            <template v-else>未设置默认：按连接顺序取第一个可用文本模型，失败自动降级。</template>
+          </p>
+        </div>
+        <div class="default-item">
+          <div class="default-head">
+            <span class="model-dot is-ok" aria-hidden="true" style="color: var(--color-accent)" />
+            <span class="default-label">默认生图模型</span>
+          </div>
+          <n-select
+            :value="defaults.imageId || ''"
+            :options="imageDefaultOptions"
+            :disabled="savingKind === 'image'"
+            :loading="savingKind === 'image'"
+            size="small"
+            @update:value="(value) => setDefault('image', value)"
+          />
+          <p class="field-hint default-hint">
+            <template v-if="defaults.imageIgnored">
+              当前默认已失效（{{ defaults.imageIgnored.message }}），出图会按环境变量或第一个可用连接降级。
+            </template>
+            <template v-else-if="defaults.imageLabel">
+              当前默认：{{ defaults.imageLabel }}；显式选择优先于环境变量供应商 IMAGE_PROVIDER_*。
+            </template>
+            <template v-else>未设置默认：环境变量供应商优先，其次按连接顺序取第一个可用生图模型。</template>
+          </p>
+        </div>
+      </div>
+    </section>
 
     <section class="card">
       <div class="row">
@@ -733,15 +906,16 @@ onMounted(() => {
               密钥 {{ conn.keyMasked || '未配置' }}
             </div>
             <div v-if="conn.models.length" class="row row-tight" style="margin-top: 6px">
-              <n-tag
-                v-for="model in conn.models"
-                :key="model.id"
-                size="small"
-                :type="isOtherKind(conn) ? (modelKind(model) === 'image' ? 'info' : 'warning') : 'default'"
-                round
-              >
-                {{ modelTagText(conn, model) }}
-              </n-tag>
+              <template v-for="model in conn.models" :key="model.id">
+                <n-tag
+                  size="small"
+                  :type="isOtherKind(conn) ? (modelKind(model) === 'image' ? 'info' : 'warning') : 'default'"
+                  round
+                >
+                  {{ modelTagText(conn, model) }}
+                </n-tag>
+                <n-tag v-if="isDefaultModel(model)" size="small" type="success" round>默认</n-tag>
+              </template>
             </div>
             <div v-else class="list-meta" style="margin-top: 4px">未登记模型 · 编辑后填写模型代号</div>
           </div>
@@ -778,7 +952,8 @@ onMounted(() => {
       </div>
 
       <p v-if="section.value === 'image'" class="field-hint">
-        生图模型的 Key 与 Base URL 也可由环境变量 IMAGE_PROVIDER_* 提供；三项齐全时优先使用环境变量。
+        生图模型的 Key 与 Base URL 也可由环境变量 IMAGE_PROVIDER_* 提供；但上方「默认生图模型」
+        一旦指定，就优先于环境变量，避免界面里切了却不生效。
       </p>
     </section>
 
@@ -907,6 +1082,42 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 全局默认：两条链路各一格，窄屏自动竖排，不把两个下拉挤成半截 */
+.default-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.default-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  min-width: 0;
+}
+
+.default-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.default-label {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.default-hint {
+  margin: 0;
+  line-height: 1.5;
+}
+
 .model-current-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

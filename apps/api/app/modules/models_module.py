@@ -12,10 +12,9 @@ from sqlalchemy import select
 
 from .. import models, schemas
 from ..core import pagination, ssrf
-from ..services import ai_article, ai_gateway, prompt_rules, provider_probe
+from ..services import ai_article, ai_gateway, image_provider, prompt_rules, provider_probe
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.security import decrypt_secret, encrypt_secret, mask_secret
-from ..services import ai_gateway
 
 from ..core.rbac import require_permission
 
@@ -401,7 +400,41 @@ def _current_text_model(db, user_id: str) -> schemas.ModelStatusOut:
 
 
 def _current_image_model(db, user_id: str) -> schemas.ModelStatusOut:
-    """与 image_provider.resolve_image_provider 同口径：环境变量供应商优先。"""
+    """与 image_provider.resolve_image_provider 同口径。
+
+    未指定 modelId 时的优先级：全局默认生图模型 → 环境变量供应商 → 第一个可用连接。
+    默认模型失效只影响这一条偏好，不阻断出图：按原顺序降级并把原因写在状态文案里。
+    """
+    described = image_provider.describe_default_image_model(db, user_id)
+    default_id = described["id"]
+    ignored = described["ignored"]
+    prefix = f"默认生图模型不可用（{ignored['message']}），" if ignored else ""
+
+    if default_id and not ignored:
+        entry = db.get(models.ModelCatalogEntry, default_id)
+        conn = db.get(models.ModelConnection, entry.connection_id) if entry else None
+        failure = FAILED_CONNECTION_STATUS.get(conn.status) if conn else "连接已被删除"
+        if failure:
+            return _status_item(
+                "image",
+                state="blocked",
+                message=f"最近一次连接测试失败：{failure}",
+                entry=entry,
+                conn=conn,
+            )
+        state = "ok" if conn.status == "connected" else "unchecked"
+        return _status_item(
+            "image",
+            state=state,
+            message=(
+                "默认生图模型，出图时会优先使用"
+                if state == "ok"
+                else "默认生图模型；连接尚未测试，到设置里测试后才能确认可用"
+            ),
+            entry=entry,
+            conn=conn,
+        )
+
     env_model = os.getenv("IMAGE_PROVIDER_MODEL", "").strip()
     if env_model:
         ready = bool(
@@ -411,7 +444,8 @@ def _current_image_model(db, user_id: str) -> schemas.ModelStatusOut:
         return _status_item(
             "image",
             state="ok" if ready else "blocked",
-            message="环境变量供应商" if ready else "环境变量供应商配置不完整（缺少地址或密钥）",
+            message=prefix
+            + ("环境变量供应商" if ready else "环境变量供应商配置不完整（缺少地址或密钥）"),
             # 环境变量供应商没有 catalog 行，只借用展示字段
             entry=SimpleNamespace(model_code=env_model, display_name=env_model),
             conn=SimpleNamespace(display_name="环境变量", status=None),
@@ -442,25 +476,25 @@ def _current_image_model(db, user_id: str) -> schemas.ModelStatusOut:
                     conn=conn,
                 )
             state = "ok" if conn.status == "connected" else "unchecked"
-            message = (
-                "生图会使用该模型"
-                if state == "ok"
-                else "连接尚未测试，到设置里测试后才能确认可用"
-            )
+            if state == "ok":
+                message = prefix + "生图会使用该模型"
+            else:
+                message = prefix + "连接尚未测试，到设置里测试后才能确认可用"
             return _status_item("image", state=state, message=message, entry=entry, conn=conn)
     if candidate:
         entry, conn = candidate
         return _status_item(
             "image",
             state="blocked",
-            message="图像模型所属连接缺少地址或 API Key",
+            message=prefix + "图像模型所属连接缺少地址或 API Key",
             entry=entry,
             conn=conn,
         )
     return _status_item(
         "image",
         state="none",
-        message="未接入图像生成供应商，配图需指定已上传素材；可在设置里添加带生图能力的模型",
+        message=prefix
+        + "未接入图像生成供应商，配图需指定已上传素材；可在设置里添加带生图能力的模型",
     )
 
 

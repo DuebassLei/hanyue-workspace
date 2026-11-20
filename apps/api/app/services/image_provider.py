@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import os
 
 import httpx
@@ -18,6 +19,19 @@ from sqlalchemy import select
 from .. import models
 from ..core import ssrf
 from ..core.security import decrypt_secret
+
+logger = logging.getLogger(__name__)
+
+# 默认生图模型失效的原因文案：设置页与顶栏状态条共用一份，避免两处口径打架。
+DEFAULT_IMAGE_IGNORE_MESSAGES = {
+    "not_found": "模型不存在或已被删除",
+    "connection_missing": "模型所属连接已被删除",
+    "foreign": "模型不属于当前用户",
+    "disabled": "模型已停用",
+    "not_image": "该模型未登记 image.generate 能力",
+    "no_base_url": "连接缺少 Base URL",
+    "no_credential": "连接缺少 API Key",
+}
 
 SIZE_MAP = {
     "1:1": "1024x1024",
@@ -62,6 +76,86 @@ def _env_provider() -> dict | None:
     return None
 
 
+def _default_image_model_id(db, owner_user_id: str) -> str | None:
+    """读用户级全局默认生图模型偏好；无记录或未设置返回 None。"""
+    value = db.scalar(
+        select(models.UserPreference.default_image_model_id).where(
+            models.UserPreference.owner_user_id == owner_user_id
+        )
+    )
+    return str(value or "").strip() or None
+
+
+def _validate_image_entry(db, owner_user_id: str, model_id: str):
+    """校验一个 catalog 条目能不能用于生图。
+
+    返回 (connection, entry, reason)；reason 为 None 表示有效。
+    与文本侧的 _validate_entry 同风格：只看凭据是否登记，不解密，避免把解密异常
+    带进解析路径；真正出图时再解密，失败会明确报错而不是悄悄换供应商。
+    """
+    entry = db.get(models.ModelCatalogEntry, model_id)
+    if entry is None:
+        return None, None, "not_found"
+    connection = db.get(models.ModelConnection, entry.connection_id)
+    if connection is None:
+        return None, entry, "connection_missing"
+    if connection.owner_user_id != owner_user_id:
+        return None, entry, "foreign"
+    if not entry.enabled:
+        return connection, entry, "disabled"
+    if "image.generate" not in (entry.capabilities or []):
+        return connection, entry, "not_image"
+    if not (connection.base_url or "").strip():
+        return connection, entry, "no_base_url"
+    if not str(connection.credential_ciphertext or "").strip():
+        return connection, entry, "no_credential"
+    return connection, entry, None
+
+
+def default_image_model_reason(db, owner_user_id: str, model_id: str) -> str | None:
+    """设置默认生图模型前的校验：返回失效原因，None 表示可以设为默认。"""
+    return _validate_image_entry(db, owner_user_id, model_id)[2]
+
+
+def describe_default_image_model(db, owner_user_id: str) -> dict:
+    """给设置页 / 状态条用的默认生图模型展示信息。
+
+    失效时只返回 ignored 原因，**不清除偏好**：模型重新启用、密钥补上后自动恢复。
+    """
+    model_id = _default_image_model_id(db, owner_user_id)
+    if not model_id:
+        return {"id": None, "label": None, "ignored": None}
+    connection, entry, reason = _validate_image_entry(db, owner_user_id, model_id)
+    label = None
+    if entry is not None:
+        name = (connection.display_name if connection else None) or "已删除的连接"
+        label = f"{name} · {entry.model_code}"
+    if not reason:
+        return {"id": model_id, "label": label, "ignored": None}
+    detail = {
+        "reason": reason,
+        "message": DEFAULT_IMAGE_IGNORE_MESSAGES.get(reason, "默认生图模型当前不可用"),
+        "modelId": model_id,
+    }
+    logger.warning("[image] 默认生图模型 %s 配置失效，本次忽略：%s", model_id, reason)
+    return {"id": model_id, "label": label, "ignored": detail}
+
+
+def _provider_from_entry(connection, entry) -> dict | None:
+    """把 catalog 条目翻译成调用所需的供应商参数；密钥解不出来就当不可用。"""
+    key = decrypt_secret(connection.credential_ciphertext)
+    if not connection.base_url or not key:
+        return None
+    return {
+        "modelId": entry.id,
+        "baseUrl": connection.base_url.rstrip("/"),
+        "apiKey": key,
+        "modelCode": entry.model_code,
+        CAPABILITY_NEGATIVE_PROMPT: _option_is_true(entry, CAPABILITY_NEGATIVE_PROMPT),
+        CAPABILITY_SEED: _option_is_true(entry, CAPABILITY_SEED),
+    }
+
+
 def provider_supports_edits(db, owner_user_id: str, model_id: str | None) -> bool | None:
     """该供应商是否支持参考图编辑（/images/edits）。
 
@@ -97,9 +191,13 @@ def mark_edits_unsupported(db, model_id: str | None) -> None:
 def list_providers(db, owner_user_id: str) -> list[dict]:
     """列出当前用户可用于生图的供应商（环境变量 + 本人连接里带 image.generate 的模型）。
 
-    返回项：{modelId, modelCode, label, source}；modelId 为 None 表示环境变量供应商。
+    返回项：{modelId, modelCode, label, source, isDefault}；modelId 为 None 表示环境变量供应商。
+    全局默认生图模型排在最前：图片生成页 / 创作空间默认取第一项，这样「设了默认」
+    与「页面默认选中」才是同一个东西，不会出现切换后页面还是老供应商的错位。
     """
     providers: list[dict] = []
+    described = describe_default_image_model(db, owner_user_id)
+    default_id = described["id"] if not described["ignored"] else None
     env = _env_provider()
     if env:
         providers.append(
@@ -108,6 +206,7 @@ def list_providers(db, owner_user_id: str) -> list[dict]:
                 "modelCode": env["modelCode"],
                 "label": f"环境变量 · {env['modelCode']}",
                 "source": "env",
+                "isDefault": False,
                 # 环境变量供应商无从探测，保守按不支持处理，走兜底拼接。
                 CAPABILITY_NEGATIVE_PROMPT: False,
                 CAPABILITY_SEED: False,
@@ -132,8 +231,12 @@ def list_providers(db, owner_user_id: str) -> list[dict]:
                 CAPABILITY_SEED: _option_is_true(entry, CAPABILITY_SEED),
                 "label": f"{connection.display_name} · {entry.display_name or entry.model_code}",
                 "source": "connection",
+                "isDefault": entry.id == default_id,
             }
         )
+    if default_id:
+        # 稳定排序：默认项提到第一位，其余保持原有顺序（环境变量退到其后）。
+        providers.sort(key=lambda item: 0 if item.get("isDefault") else 1)
     return providers
 
 
@@ -141,29 +244,39 @@ def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) 
     """返回 {baseUrl, apiKey, modelCode}；无可用供应商返回 None。
 
     指定 model_id 时优先使用对应连接（支持多供应商动态切换），否则回退环境变量。
+
+    未指定时的优先级：用户级全局默认生图模型 → 环境变量供应商 → 第一个可用连接。
+    显式默认排最前是为了让「设为默认」真的生效：否则运营环境配了 IMAGE_PROVIDER_*，
+    用户在界面里怎么切都会被环境变量压住。
     """
     if model_id:
         entry = db.get(models.ModelCatalogEntry, model_id)
         if entry and entry.enabled and "image.generate" in (entry.capabilities or []):
             connection = db.get(models.ModelConnection, entry.connection_id)
             if connection and connection.owner_user_id == owner_user_id and connection.base_url:
-                key = decrypt_secret(connection.credential_ciphertext)
-                if key:
-                    return {
-                        "baseUrl": connection.base_url.rstrip("/"),
-                        "apiKey": key,
-                        "modelCode": entry.model_code,
-                        CAPABILITY_NEGATIVE_PROMPT: _option_is_true(entry, CAPABILITY_NEGATIVE_PROMPT),
-                        CAPABILITY_SEED: _option_is_true(entry, CAPABILITY_SEED),
-                    }
+                provider = _provider_from_entry(connection, entry)
+                if provider:
+                    return provider
         # 明确指定了供应商却不可用时不静默回退，避免「切了没生效」的错觉
         return None
+
+    default_id = _default_image_model_id(db, owner_user_id)
+    if default_id:
+        connection, entry, reason = _validate_image_entry(db, owner_user_id, default_id)
+        if not reason:
+            provider = _provider_from_entry(connection, entry)
+            if provider:
+                return provider
+            reason = "no_credential"
+        logger.warning("[image] 默认生图模型 %s 配置失效，本次按原顺序选择：%s", default_id, reason)
+
     env = _env_provider()
     if env:
         return {
             "baseUrl": env["baseUrl"],
             "apiKey": env["apiKey"],
             "modelCode": env["modelCode"],
+            "modelId": None,
             CAPABILITY_NEGATIVE_PROMPT: False,
             CAPABILITY_SEED: False,
         }
@@ -177,15 +290,9 @@ def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) 
         connection = db.get(models.ModelConnection, entry.connection_id)
         if not connection or connection.owner_user_id != owner_user_id:
             continue
-        key = decrypt_secret(connection.credential_ciphertext)
-        if connection.base_url and key:
-            return {
-                "baseUrl": connection.base_url.rstrip("/"),
-                "apiKey": key,
-                "modelCode": entry.model_code,
-                CAPABILITY_NEGATIVE_PROMPT: _option_is_true(entry, CAPABILITY_NEGATIVE_PROMPT),
-                CAPABILITY_SEED: _option_is_true(entry, CAPABILITY_SEED),
-            }
+        provider = _provider_from_entry(connection, entry)
+        if provider:
+            return provider
     return None
 
 

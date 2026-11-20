@@ -111,6 +111,12 @@ class PreferenceOut(CamelModel):
     default_text_model_label: str | None = None
     # 默认模型配置失效时给出原因，但不清除偏好（恢复后自动生效）
     default_text_model_ignored: dict | None = None
+    # 全局默认生图模型（model_catalog_entries.id）；未设置时为 None
+    default_image_model_id: str | None = None
+    # 「连接名 · modelCode」，供模型管理页直接显示当前默认
+    default_image_model_label: str | None = None
+    # 默认生图模型失效原因：解释为什么实际出图用的是别的供应商
+    default_image_model_ignored: dict | None = None
     studio_image_preferences: StudioImagePreferences = Field(default_factory=StudioImagePreferences)
 
 
@@ -120,6 +126,8 @@ class PreferencePatch(CamelModel):
     theme: Literal["system", "light", "dark"] | None = None
     # 传空字符串 / null 表示清除默认；不传该字段表示保持不变
     default_text_model_id: str | None = None
+    # 同上，作用于生图链路
+    default_image_model_id: str | None = None
     studio_image_preferences: StudioImagePreferences | None = None
 
 

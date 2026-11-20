@@ -98,6 +98,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("sticker_images", "generated_prompt", "TEXT"),
     # 全局默认文本模型（model_catalog_entries.id）
     ("user_preferences", "default_text_model_id", "VARCHAR(32)"),
+    # 全局默认生图模型（model_catalog_entries.id）
+    ("user_preferences", "default_image_model_id", "VARCHAR(32)"),
     # 创作空间 AI 自动配图偏好
     ("user_preferences", "studio_image_preferences", "JSON"),
     ("storyboard_shots", "asset_refs", "JSON"),
