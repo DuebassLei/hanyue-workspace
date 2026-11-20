@@ -390,7 +390,7 @@ def _first_pictured(assets, refs: list[str], category: str) -> dict | None:
 
 
 def _normalize_style_config(db, config: dict | None) -> dict:
-    """项目级统一风格：指向手绘风格库的 style_number。
+    """统一风格：指向手绘风格库的 style_number（项目级与场级共用同一口径）。
 
     空配置合法（不强制选风格）；非空时 style_number 必须存在且达到可用性口径
     （有参考图，或特征词强到无需参考图），否则明确报错，不静默存一个出不了图的配置。
@@ -415,7 +415,7 @@ def _normalize_style_config(db, config: dict | None) -> dict:
 
 
 def _style_context(db, style_config: dict | None, model_code: str | None, subject: str) -> dict:
-    """把项目级 style_config 展开成入队用的手绘风格上下文。
+    """把生效中的 style_config（场级覆盖或项目级）展开成入队用的手绘风格上下文。
 
     生效机制完整复用手绘库：resolve_activation 决定拼特征词还是带参考图，
     compose_style_segment 产出风格段，语言跟随镜头主体（detect_language）。
@@ -578,6 +578,15 @@ def _shot_out(db, shot):
     )
 
 
+def _scene_out(row, shots):
+    return schemas.StoryboardSceneOut(
+        id=row.id, sort_order=row.sort_order, deleted_at=row.deleted_at, title=row.title,
+        summary=row.summary, chapter=row.chapter,
+        style_config=row.style_config if isinstance(row.style_config, dict) else {},
+        shots=shots,
+    )
+
+
 def _project_out(db, project, *, scenes=True):
     scene_out = []
     if scenes:
@@ -598,10 +607,7 @@ def _project_out(db, project, *, scenes=True):
         by_scene = {}
         for shot in shots:
             by_scene.setdefault(shot.scene_id, []).append(_shot_out(db, shot))
-        scene_out = [schemas.StoryboardSceneOut(
-            id=row.id, sort_order=row.sort_order, deleted_at=row.deleted_at, title=row.title, summary=row.summary,
-            chapter=row.chapter, shots=by_scene.get(row.id, []),
-        ) for row in rows]
+        scene_out = [_scene_out(row, by_scene.get(row.id, [])) for row in rows]
     return schemas.StoryboardProjectOut(
         id=project.id, workspace_id=project.workspace_id, title=project.title,
         deleted_at=project.deleted_at, summary=project.summary, assets=_resolved_assets(db, project), status=project.status,
@@ -790,20 +796,29 @@ def permanently_delete_shot(shot_id: str, user: CurrentUser, db: DbSession):
 def create_scene(project_id: str, payload: schemas.StoryboardSceneCreate, user: CurrentUser, db: DbSession):
     project = _project(db, user, project_id)
     order = len(db.scalars(select(models.StoryboardScene.id).where(models.StoryboardScene.project_id == project.id)).all())
-    row = models.StoryboardScene(project_id=project.id, sort_order=order, **payload.model_dump())
+    row = models.StoryboardScene(
+        project_id=project.id, sort_order=order,
+        **payload.model_dump(exclude={"style_config"}),
+        # 场级风格覆盖：None/缺省 = 空覆盖（跟随项目级）；非空校验同项目级口径
+        style_config=_normalize_style_config(db, payload.style_config) if payload.style_config is not None else {},
+    )
     db.add(row)
     db.commit()
-    return schemas.StoryboardSceneOut(id=row.id, sort_order=row.sort_order, title=row.title, summary=row.summary, chapter=row.chapter, shots=[])
+    return _scene_out(row, [])
 
 
 @router.patch("/storyboards/scenes/{scene_id}", response_model=schemas.StoryboardSceneOut)
 def patch_scene(scene_id: str, payload: schemas.StoryboardScenePatch, user: CurrentUser, db: DbSession):
     row, _ = _scene(db, user, scene_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "style_config" in data:
+        # 传 None/{}/空 = 清除覆盖回落项目级；传 dict 则按项目级同口径校验后保存
+        data["style_config"] = _normalize_style_config(db, data["style_config"])
+    for key, value in data.items():
         if value is not None:
             setattr(row, key, value)
     db.commit()
-    return schemas.StoryboardSceneOut(id=row.id, sort_order=row.sort_order, title=row.title, summary=row.summary, chapter=row.chapter, shots=[])
+    return _scene_out(row, [])
 
 
 @router.delete("/storyboards/scenes/{scene_id}", status_code=204)
@@ -883,7 +898,7 @@ def reorder_shots(scene_id: str, payload: schemas.StoryboardOrderIn, user: Curre
     return {"ok": True}
 
 
-def _queue_generation(db, user, shot, project, stage, payload):
+def _queue_generation(db, user, shot, scene, project, stage, payload):
     assets = _resolved_assets(db, project)
     _selected_assets(assets, shot.asset_refs or [])
     present = _present_characters(assets, shot)
@@ -900,7 +915,13 @@ def _queue_generation(db, user, shot, project, stage, payload):
         ]
         if names:
             subject = subject + " " + " ".join(names)
-    style = _style_context(db, project.style_config, payload.model_id, subject)
+    # 场级风格覆盖：场级 style_config 非空时优先，为空时回落项目级统一风格。
+    # None/非 dict 防御，老数据或异常值一律按未覆盖处理。
+    scene_style = scene.style_config if isinstance(scene.style_config, dict) else {}
+    project_style = project.style_config if isinstance(project.style_config, dict) else {}
+    effective_style = scene_style if scene_style else project_style
+    style_source = "scene" if scene_style else "project"
+    style = _style_context(db, effective_style, payload.model_id, subject)
     slots = _storyboard_references(assets, shot, stage, style_reserved=style["need_reference"])
     refs = [
         shot.sketch_asset_id if kind == "sketch" else _item_asset_id(item)
@@ -944,8 +965,8 @@ def _queue_generation(db, user, shot, project, stage, payload):
             + ", ".join(listed) + "."
         )
     # 手绘风格段置于 prompt 最前，作为整组镜头的画风锚点；其后依次是
-    # 画面主体、参考图标注、角色一致性句。风格来自项目 style_config，改风格后
-    # 新入队的镜头即应用新风格，历史镜头靠 payload 快照追溯旧风格。
+    # 画面主体、参考图标注、角色一致性句。风格按场级优先、项目级回落解析，
+    # 改风格后新入队的镜头即应用新风格，历史镜头靠 payload 快照追溯旧风格。
     prompt = "\n".join(part for part in (style["segment"], subject, *labels, consistency) if part)
     # 生成时把实际用到的角色数据快照进 payload：之后改全局角色或删角色，
     # 历史镜头的「实际出图提示词」与当时用的参考图仍可追溯。
@@ -979,11 +1000,14 @@ def _queue_generation(db, user, shot, project, stage, payload):
             "characterSnapshot": character_snapshot,
             # 手绘统一风格：风格参考图沿用 job_runner 的 _builtin_reference 路径
             # （按 builtinReferenceStyleNumber 补到参考图第 1 槽，缺失即明确失败）；
-            # styleSnapshot 原样透传进 job.result 供历史镜头追溯当时风格。
+            # styleSnapshot 原样透传进 job.result 供历史镜头追溯当时风格，source
+            # 记录本次实际生效的配置来源（场级 scene / 项目级 project）。
             "builtinReferenceStyleNumber": (
                 style["snapshot"]["styleNumber"] if style["need_reference"] else None
             ),
-            "styleSnapshot": style["snapshot"],
+            "styleSnapshot": (
+                {**style["snapshot"], "source": style_source} if style["snapshot"] else None
+            ),
         },
     )
     setattr(shot, f"{stage}_job_id", job_id)
@@ -997,29 +1021,29 @@ def _queue_generation(db, user, shot, project, stage, payload):
 
 @router.post("/storyboards/shots/{shot_id}/generate-sketch", status_code=202)
 def generate_sketch(shot_id: str, payload: schemas.StoryboardGenerateIn, user: CurrentUser, db: DbSession):
-    shot, _, project = _shot(db, user, shot_id)
+    shot, scene, project = _shot(db, user, shot_id)
     if shot.sketch_status in ("queued", "generating") or shot.final_status in ("queued", "generating"):
         raise ApiError("shot_busy", "该镜头已有生成任务在运行", status_code=409)
-    return {"jobId": _queue_generation(db, user, shot, project, "sketch", payload), "status": "queued"}
+    return {"jobId": _queue_generation(db, user, shot, scene, project, "sketch", payload), "status": "queued"}
 
 
 @router.post("/storyboards/shots/{shot_id}/generate-final", status_code=202)
 def generate_final(shot_id: str, payload: schemas.StoryboardGenerateIn, user: CurrentUser, db: DbSession):
-    shot, _, project = _shot(db, user, shot_id)
+    shot, scene, project = _shot(db, user, shot_id)
     if shot.final_status in ("queued", "generating"):
         raise ApiError("shot_busy", "正式候选正在生成", status_code=409)
     if not shot.sketch_asset_id:
         raise ApiError("sketch_required", "先生成草图，正式图要锁住构图。", status_code=409)
-    return {"jobId": _queue_generation(db, user, shot, project, "final", payload), "status": "queued"}
+    return {"jobId": _queue_generation(db, user, shot, scene, project, "final", payload), "status": "queued"}
 
 
 @router.post("/storyboards/shots/{shot_id}/retry", status_code=202)
 def retry_shot(shot_id: str, payload: schemas.StoryboardGenerateIn, user: CurrentUser, db: DbSession):
-    shot, _, project = _shot(db, user, shot_id)
+    shot, scene, project = _shot(db, user, shot_id)
     stage = "sketch" if shot.sketch_status == "failed" else "final"
     if stage == "final" and not shot.sketch_asset_id:
         raise ApiError("sketch_required", "先生成草图，正式图要锁住构图。", status_code=409)
-    return {"jobId": _queue_generation(db, user, shot, project, stage, payload), "status": "queued", "stage": stage}
+    return {"jobId": _queue_generation(db, user, shot, scene, project, stage, payload), "status": "queued", "stage": stage}
 
 
 def _ordered_project(db, user, project_id):

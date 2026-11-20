@@ -112,6 +112,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("prompt_templates", "source", "VARCHAR(16) DEFAULT 'manual'"),
     # 分镜组级统一风格配置（JSON 快照）
     ("storyboard_projects", "style_config", "JSON DEFAULT '{}'"),
+    # 场级风格覆盖：空 = 跟随项目级 style_config
+    ("storyboard_scenes", "style_config", "JSON DEFAULT '{}'"),
     ("storyboard_projects", "deleted_at", "TIMESTAMP"),
     ("storyboard_scenes", "deleted_at", "TIMESTAMP"),
     ("storyboard_shots", "deleted_at", "TIMESTAMP"),

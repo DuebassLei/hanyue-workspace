@@ -939,6 +939,8 @@ class StoryboardScene(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(200), default="新场景")
     summary: Mapped[str] = mapped_column(Text, default="")
     chapter: Mapped[str] = mapped_column(String(200), default="第一章")
+    # 场级风格覆盖：空 = 跟随项目级 style_config；非空时覆盖项目级风格。
+    style_config: Mapped[dict] = mapped_column(JSON, default=dict)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
