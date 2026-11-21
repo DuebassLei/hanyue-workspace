@@ -7,9 +7,9 @@
 -- CI 校验一致性（模型改了但忘了重新生成会失败）：
 --   cd apps/api && python scripts/export_pg_schema.py -o ../../infra/postgres/schema.sql --check
 --
--- 适用：全新数据库一次性建表 + 播种引导超管账号。幂等（IF NOT EXISTS / ON CONFLICT
---       DO NOTHING），已有库重跑只补缺失对象、绝不覆盖已有数据——老库补列仍由应用
---       启动时的 init_db() 负责。
+-- 适用：全新数据库一次性建表。幂等（IF NOT EXISTS），已有库重跑只补缺失对象、
+--       绝不覆盖已有数据——老库补列仍由应用启动时的 init_db() 负责。
+-- 部署后必须立即运行 bootstrap 设置独立强密码，见 docs/setup.md；本文件不播种账号。
 -- 说明：本脚本按「当前模型的理想全新库」建表，个别列会比渐进迁移的老库更严格
 --       （如新列是 NOT NULL，而老库经 ALTER TABLE ADD COLUMN 补列时为可空）——这是
 --       正确且预期的差异，不影响功能；表/列/索引的集合与老库完全一致。
@@ -1815,51 +1815,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_owner_key ON skill_registry_entries (
 
 -- users：邮箱大小写不敏感唯一；NULL（历史开发态账号）不参与唯一性。
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email ON users (lower(email)) WHERE email IS NOT NULL;
-
-
--- ---------- 引导超管账号（幂等种子） ----------
--- 初始密码为公开固定值，首次登录后必须立即修改！改密命令：
---   cd apps/api && python scripts/create_user.py reset-password --email 1130122701@qq.com
-
--- 内置超管角色（与 rbac_service.ROLE_META 一致；应用启动播种可兼容补齐其余字段）
-INSERT INTO roles (id, role_key, name, description, is_superadmin, is_system, sort, created_at, updated_at)
-VALUES (
-    'bootstrap_superadmin000000000000',
-    'superadmin',
-    '超级管理员',
-    '拥有全部权限，不受菜单与权限点限制',
-    TRUE,
-    TRUE,
-    0,
-    now(),
-    now()
-)
-ON CONFLICT (role_key) DO NOTHING;
-
--- 超管账号
-INSERT INTO users (id, auth_subject, display_name, timezone, email, password_hash, password_changed_at, failed_login_attempts, locked_until, is_active, created_at, updated_at)
-VALUES (
-    'bootstrap_admin00000000000000000',
-    'password:1130122701@qq.com',
-    '钥见AI',
-    'Asia/Shanghai',
-    '1130122701@qq.com',
-    'scrypt$16384$8$1$aGFueXVlLWFkbWluLWJvb3Q$v2QCp2RipXEdXWNVKY9IvKjpKH6KSby7zHGDmAvyuVg',
-    now(),
-    0,
-    NULL,
-    TRUE,
-    now(),
-    now()
-)
-ON CONFLICT (auth_subject) DO NOTHING;
-
--- 绑定超管角色（user_roles 主键冲突即跳过）
-INSERT INTO user_roles (user_id, role_id)
-SELECT u.id, r.id FROM users u, roles r
-WHERE u.auth_subject = 'password:1130122701@qq.com' AND r.role_key = 'superadmin'
-ON CONFLICT DO NOTHING;
-
--- 全部完成。用上面的邮箱与初始密码登录后请立即改密。
 
 COMMIT;
