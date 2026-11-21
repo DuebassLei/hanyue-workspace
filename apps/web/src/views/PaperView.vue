@@ -368,23 +368,25 @@ onBeforeUnmount(stopPolling)
       <main class="paper-sheet" :aria-busy="loading">
         <div v-if="loading" class="sheet-loading">正在展开稿纸…</div>
         <template v-else-if="article">
-          <div class="sheet-head">
-            <NInput v-model:value="article.title" size="large" placeholder="给文章一个标题" @blur="changeTitle(article.title)" />
-            <div class="sheet-meta">
-              <span>{{ readiness.done }}/{{ readiness.total }} 就绪</span>
-              <span v-for="item in readiness.items" :key="item.id" class="ready-chip" :class="{ done: item.done }">
-                {{ item.label }}
-              </span>
+          <div class="sheet-toolbar">
+            <div class="sheet-head">
+              <NInput v-model:value="article.title" size="large" placeholder="给文章一个标题" @blur="changeTitle(article.title)" />
+              <div class="sheet-meta">
+                <span>{{ readiness.done }}/{{ readiness.total }} 就绪</span>
+                <span v-for="item in readiness.items" :key="item.id" class="ready-chip" :class="{ done: item.done }">
+                  {{ item.label }}
+                </span>
+              </div>
             </div>
-          </div>
 
-          <div class="sheet-switch" role="tablist" aria-label="查看方式">
-            <button role="tab" :aria-selected="sheetMode === 'paper'" :class="{ active: sheetMode === 'paper' }" @click="sheetMode = 'paper'">段号稿纸</button>
-            <button role="tab" :aria-selected="sheetMode === 'layout'" :class="{ active: sheetMode === 'layout' }" @click="openLayout">排版预览</button>
-            <span class="hint">
-              {{ sheetMode === 'layout' ? '这是公众号里的最终效果，右侧「排版」调样式。' : '点任意一段，右侧「素材」就能给它配插图。' }}
-            </span>
-            <button v-if="sheetMode === 'paper'" class="text-button" @click="openMedia">配插图 →</button>
+            <div class="sheet-switch" role="tablist" aria-label="查看方式">
+              <button role="tab" :aria-selected="sheetMode === 'paper'" :class="{ active: sheetMode === 'paper' }" @click="sheetMode = 'paper'">段号稿纸</button>
+              <button role="tab" :aria-selected="sheetMode === 'layout'" :class="{ active: sheetMode === 'layout' }" @click="openLayout">排版预览</button>
+              <span class="hint">
+                {{ sheetMode === 'layout' ? '这是公众号里的最终效果，右侧「排版」调样式。' : '点任意一段，右侧「素材」就能给它配插图。' }}
+              </span>
+              <button v-if="sheetMode === 'paper'" class="text-button" @click="openMedia">配插图 →</button>
+            </div>
           </div>
 
           <div v-if="job" class="job-bar" role="status">
@@ -586,16 +588,16 @@ onBeforeUnmount(stopPolling)
 .paper-view {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 24px;
+  gap: 12px;
+  padding: 14px 24px 24px;
   min-height: 100%;
   color: var(--color-text-primary, #1c1c1c);
 }
-.paper-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-.eyebrow { margin: 0 0 6px; font-size: 11px; letter-spacing: .18em; color: var(--color-text-tertiary, #8a8a8a); }
-.paper-head h1 { margin: 0; font-size: 26px; font-weight: 650; }
-.paper-head h1 span { margin-left: 10px; font-size: 13px; font-weight: 400; color: var(--color-text-tertiary, #8a8a8a); }
-.head-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.paper-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.eyebrow { margin: 0 0 2px; font-size: 10px; letter-spacing: .16em; color: var(--color-text-tertiary, #8a8a8a); }
+.paper-head h1 { margin: 0; font-size: 19px; line-height: 1.25; font-weight: 650; }
+.paper-head h1 span { margin-left: 8px; font-size: 12px; font-weight: 400; color: var(--color-text-tertiary, #8a8a8a); }
+.head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .paper-alert {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -627,15 +629,32 @@ onBeforeUnmount(stopPolling)
 .create-actions { display: flex; justify-content: flex-end; }
 
 .paper-sheet {
+  --sheet-pad-x: 26px;
+  --sheet-pad-y: 22px;
   background: var(--paper-bg, #fffdf8);
   border: 1px solid var(--paper-line, #ece3d3);
   border-radius: 14px;
-  padding: 22px 26px 30px;
+  /* 顶部留白改由 .sheet-toolbar 自己承担，这样工具条吸顶时能贴到滚动容器顶部 */
+  padding: 0 var(--sheet-pad-x) 30px;
   min-height: 520px;
   box-shadow: 0 12px 30px rgba(80, 62, 30, .05);
 }
-.sheet-head { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
-.sheet-switch { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+/* 吸顶工具条：标题行 + 就绪徽标 + 段号稿纸/排版预览切换，随内容滚动固定在顶部 */
+.sheet-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  margin: 0 calc(var(--sheet-pad-x) * -1) 6px;
+  padding: var(--sheet-pad-y) var(--sheet-pad-x) 8px;
+  background: var(--paper-bg);
+  border-bottom: 1px solid var(--paper-line);
+  border-radius: 13px 13px 0 0;
+}
+.sheet-head { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; }
+/* 无工具条的状态（加载中/未选稿件）自己补上顶部留白 */
+.paper-sheet > .sheet-loading,
+.paper-sheet > .empty { padding-top: var(--sheet-pad-y); }
+.sheet-switch { display: flex; align-items: center; gap: 6px; margin-bottom: 0; flex-wrap: wrap; }
 .sheet-switch button {
   padding: 4px 14px; font-size: 12px; border-radius: 999px; cursor: pointer;
   border: 1px solid var(--paper-line-strong, #d8cdb6); background: transparent;
