@@ -125,3 +125,30 @@ def test_readiness_counts_pending_quality():
     meta = AB.list_meta(article)
     assert meta["review"] == 1
     assert [item["done"] for item in meta["readiness"]["items"]] == [True, True, False, False, False]
+
+
+def test_editor_insert_syntax_survives_split_and_roundtrip():
+    """编辑器「插入」菜单产出的片段：分段后各自成块，回拼不丢字符。
+
+    这条守的是「插入一张卡片 → 保存 → 段落数变多但内容还在」这个链路：
+    分段按空行切，围栏里的空行不能把代码块切断；回拼要能还原原文。
+    """
+    fence = "`" * 3
+    markdown = "\n\n".join([
+        "# 标题",
+        "正文。",
+        "> [!TIP] 小技巧",
+        "> [!QUOTE] 金句",
+        fence + "bash 命令\necho hi\n\necho 空行之后\n" + fence,
+        fence + "promptbox 滑动查看\n第一行\n\n第二行\n" + fence,
+        '![图注](<https://example.com/a.png> "long")',
+        "**加粗** ==色块== ++下划线++",
+        "---",
+    ])
+    article = AB.build_article(markdown=markdown)
+    assert [block["kind"] for block in article["blocks"]] == [
+        "para", "quote", "quote", "code", "code", "media", "para", "rule",
+    ]
+    assert "echo 空行之后" in article["blocks"][3]["text"]
+    assert "第二行" in article["blocks"][4]["text"]
+    assert AB.to_markdown(article).strip() == markdown.strip()

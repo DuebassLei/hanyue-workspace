@@ -5,7 +5,7 @@ import { NAV_GROUPS, breadcrumbsFor, flattenWorkspaceMenus, navEntries } from '.
 test('workspace fallback pages are flat and retain every feature', () => {
   const workspace = NAV_GROUPS.find((group) => group.key === 'workspace')
   assert.deepEqual(workspace.items.map((item) => item.name), [
-    'studio', 'originality', 'prompts', 'articles', 'cards', 'images',
+    'studio', 'paper', 'originality', 'prompts', 'articles', 'cards', 'images',
     'stickers', 'storyboards', 'assets', 'novels', 'characters',
   ])
   assert.ok(workspace.items.every((item) => !item.children))

@@ -60,6 +60,46 @@ def test_patch_block_splits_paragraphs_and_rejects_stale_edit(client):
     assert any(row["label"] == "手动改稿" for row in revisions["revisions"])
 
 
+def test_patch_block_deletes_when_text_is_empty(client):
+    headers, article = _client_with_article(client, "studio-delete-block")
+    assert len(article["blocks"]) == 4
+    block = article["blocks"][0]
+    removed_id = block["id"]
+
+    response = client.patch(
+        f"/api/v1/studio/articles/{article['id']}/blocks/{removed_id}",
+        json={"text": "   ", "expectedText": block["text"]},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    blocks = response.json()["blocks"]
+    assert len(blocks) == 3
+    assert removed_id not in [item["id"] for item in blocks]
+
+    revisions = client.get(f"/api/v1/studio/articles/{article['id']}/revisions", headers=headers).json()
+    assert any(row["label"] == "手动改稿" for row in revisions["revisions"])
+
+
+def test_patch_block_rejects_while_job_running(client, monkeypatch):
+    from app.services import studio_pipeline as SP
+
+    headers, article = _client_with_article(client, "studio-busy-block")
+    block = article["blocks"][0]
+    # 模拟这篇文章已有任务在跑：后端 _busy() 必须先于乐观锁检查拒绝编辑
+    monkeypatch.setattr(SP.JOBS, "busy", lambda _article_id: True)
+
+    response = client.patch(
+        f"/api/v1/studio/articles/{article['id']}/blocks/{block['id']}",
+        json={"text": "任务结束后再保存", "expectedText": block["text"]},
+        headers=headers,
+    )
+    assert response.status_code == 409, response.text
+    body = response.json()
+    # 后端 ApiError 直接把 detail 对象作为响应体（不再是 {"detail": {...}}），两种形态都兼容
+    detail = body.get("detail") if isinstance(body.get("detail"), dict) else body
+    assert "任务在跑" in (detail.get("message") or "")
+
+
 def test_chat_route_appends_user_message(client, monkeypatch):
     from app.services import studio_pipeline as SP
 

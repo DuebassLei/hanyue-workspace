@@ -10,14 +10,18 @@
  * 页面所有状态都来自后端返回的整篇快照；后台任务跑起来后按 job 字段轮询，
  * 不做乐观更新，避免和后台改稿互相覆盖。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { NButton, NInput, NSelect, NSwitch } from 'naive-ui'
 import { studioApi, uploadReport } from '../api/studio'
+import { markdownToHtml } from '../utils/markdownSerializer'
 import { toast } from '../ui/feedback'
+import { useParagraphDrafts } from '../composables/useParagraphDrafts'
 import PaperLayoutPreview from '../components/paper/PaperLayoutPreview.vue'
 import PaperLayoutPanel from '../components/paper/PaperLayoutPanel.vue'
 import PaperMediaPanel from '../components/paper/PaperMediaPanel.vue'
 import PaperPublishPanel from '../components/paper/PaperPublishPanel.vue'
+import PaperBlockEditor from '../components/paper/PaperBlockEditor.vue'
+import PaperAnnotation from '../components/paper/PaperAnnotation.vue'
 
 const articles = ref([])
 const article = ref(null)
@@ -28,7 +32,13 @@ const error = ref('')
 const tab = ref('chat')
 const message = ref('')
 const actionBusy = ref('')
-const editing = reactive({})
+// 同一时刻只展开一段：参考项目也是单段编辑，多段同时挂 textarea 会互相抢焦点，
+// 而且草稿已经落到本机，没必要用「同时开几段」来保住修改。
+const editingBlockId = ref('')
+const { draftVersion, storageFailed, draftsFor, listUnsaved, lastParagraph, setLastParagraph } = useParagraphDrafts()
+const lastBlockId = ref('')
+const showUnsaved = ref(false)
+const showOutline = ref(false)
 const showCreate = ref(false)
 const createForm = reactive({ topic: '', material: '', markdown: '' })
 const reportText = ref('')
@@ -57,6 +67,44 @@ const sourceLabel = computed(() => {
   return '尚未检测'
 })
 const job = computed(() => article.value?.job || null)
+// 草稿变化不会改 article 对象，这里显式订阅 draftVersion，
+// 否则「有未保存的修改」和工具条上的计数要等下一次快照才更新。
+const dirtyIds = computed(() => {
+  draftVersion.value
+  const id = article.value?.id
+  return new Set(id ? draftsFor(id).keys() : [])
+})
+const unsavedList = computed(() => {
+  draftVersion.value
+  return article.value ? listUnsaved(article.value) : []
+})
+const unsavedCount = computed(() => unsavedList.value.length)
+// 后台任务或别的动作在跑时不给进编辑：两种情况下保存都会被后端拒，
+// 让用户写完再吃一个 409 是最差的选择（参考项目 pending 期间同样禁用入口）
+const editingLocked = computed(() => Boolean(job.value || actionBusy.value))
+const waitingBlocks = computed(() => checkable.value.filter((block) => blockStatus(block) === 'flag'))
+const lastBlock = computed(() => {
+  const blocks = article.value?.blocks || []
+  const index = blocks.findIndex((block) => block.id === lastBlockId.value)
+  return index < 0 ? null : { block: blocks[index], number: index + 1 }
+})
+// 「下一处待处理」从当前编辑段（没有就看上次停下的段）往后找第一个标红段，
+// 到末尾绕回开头：改到最后一段时不用再滚回顶部找剩下的标红段。
+const nextWaiting = computed(() => {
+  const blocks = article.value?.blocks || []
+  if (!waitingBlocks.value.length) return null
+  const anchorId = editingBlockId.value || lastBlockId.value
+  const position = blocks.findIndex((block) => block.id === anchorId)
+  const next = position < 0
+    ? waitingBlocks.value[0]
+    : waitingBlocks.value.find((block) => blocks.findIndex((item) => item.id === block.id) > position) || waitingBlocks.value[0]
+  return { block: next, number: blocks.findIndex((item) => item.id === next.id) + 1 }
+})
+const outline = computed(() =>
+  (article.value?.blocks || [])
+    .map((block, index) => ({ block, number: index + 1 }))
+    .filter((item) => item.block.kind === 'heading'),
+)
 // 就绪度前端算：接口只给正文/质检/标题/封面/横幅五项，不额外多一次请求
 const readiness = computed(() => {
   const current = article.value
@@ -98,7 +146,13 @@ async function openArticle(id) {
     article.value = await studioApi.get(id)
     layoutOptions.value = { ...(article.value.layoutOptions || {}) }
     selectedBlockId.value = ''
-    Object.keys(editing).forEach((key) => delete editing[key])
+    // 草稿存在本机，切走再切回来还能接着改；这里只清「正在展开哪一段」的瞬态
+    editingBlockId.value = ''
+    lastBlockId.value = lastParagraph(id) || ''
+    showUnsaved.value = false
+    showOutline.value = false
+    // 从列表切进来时可能还有后台任务在跑（比如别的窗口点了「一键处理」）
+    if (article.value.job) startPolling()
   } catch (err) {
     error.value = err.message
   } finally {
@@ -177,17 +231,51 @@ const sendChat = () =>
     return studioApi.chat(article.value.id, text)
   })
 
-const saveBlock = (block) =>
-  run('block', async () => {
-    const text = editing[block.id]
-    if (text === undefined) return null
-    const snapshot = await studioApi.updateBlock(article.value.id, block.id, {
-      text,
-      expectedText: block.text,
-    })
-    delete editing[block.id]
-    return snapshot
-  })
+// ---- 段落编辑：进入 / 退出只有一条路径 ----
+//
+// 点正文任意位置就进编辑（参考项目的约定）。进入时把「下一段」记下来，
+// 因为保存后快照会整体替换，那时再按 editingBlockId 反查已经查不到（本段可能被删）。
+const editorNextId = ref('')
+
+function openEditor(block) {
+  // 后台任务正在改这一篇、或别的动作还没结束时不让进：后端 _busy 会 409，
+  // 与其让人写完再被拒，不如点不进去
+  if (editingLocked.value) return
+  if (!block) return
+  editingBlockId.value = block.id
+  selectedBlockId.value = block.id // 素材面板跟着走：进哪一段就是在给哪一段配图
+  lastBlockId.value = block.id
+  if (article.value) setLastParagraph(article.value.id, block.id)
+  const blocks = article.value?.blocks || []
+  editorNextId.value = blocks[blocks.findIndex((item) => item.id === block.id) + 1]?.id || ''
+  nextTick(() => document.getElementById(`paper-block-${block.id}`)?.scrollIntoView({ block: 'nearest' }))
+}
+
+function closeEditor(payload = {}) {
+  const editId = editingBlockId.value
+  if (editId) {
+    // 编辑态是瞬态，退出时顺手把这一段也记成「上次停下的位置」
+    lastBlockId.value = editId
+    if (article.value) setLastParagraph(article.value.id, editId)
+  }
+  editingBlockId.value = ''
+  if (!payload.advance) return
+  const next = (article.value?.blocks || []).find((block) => block.id === editorNextId.value)
+  if (next) nextTick(() => openEditor(next))
+}
+
+function onBlockSaved(snapshot) {
+  if (snapshot?.id) applySnapshot(snapshot)
+}
+
+function jumpTo(blockId, open = false) {
+  showUnsaved.value = false
+  showOutline.value = false
+  const block = (article.value?.blocks || []).find((item) => item.id === blockId)
+  if (!block) return
+  if (open) openEditor(block)
+  else nextTick(() => document.getElementById(`paper-block-${block.id}`)?.scrollIntoView({ block: 'center' }))
+}
 
 const fixBlock = (block) => run('fix', () => studioApi.fixBlock(article.value.id, block.id))
 const keepBlock = (block) => run('keep', () => studioApi.keepBlock(article.value.id, block.id), { poll: false })
@@ -199,10 +287,6 @@ const stop = () => run('stop', () => studioApi.stop(article.value.id), { poll: f
 const regenTitles = () => run('titles', () => studioApi.titles(article.value.id))
 const pickTitle = (text) => run('title', () => studioApi.pickTitle(article.value.id, text), { poll: false })
 const makeBanner = () => run('banner', () => studioApi.banner(article.value.id, bannerStyle.value))
-
-function cancelEdit(block) {
-  delete editing[block.id]
-}
 
 function changeTitle(value) {
   const next = String(value || '').trim()
@@ -221,8 +305,45 @@ function applyPanelSnapshot(next) {
   if (next?.id) applySnapshot(next)
 }
 
-function selectBlock(block) {
-  selectedBlockId.value = block.id
+// 后台任务可能把正在编辑的这一段删掉或整段替换掉（fixall 会改 text 但 id 不变，
+// 只有「空段保存」或外部删段才会消失）。段没了就把编辑器收起来，
+// 不然 textarea 会挂在一段已经不存在的正文上，保存必然 404。
+watch(
+  () => (article.value?.blocks || []).map((block) => block.id).join(','),
+  () => {
+    if (!editingBlockId.value) return
+    if (!(article.value?.blocks || []).some((block) => block.id === editingBlockId.value)) editingBlockId.value = ''
+  },
+)
+
+// 段内 Markdown 直接渲染成样式（加粗、小标题、引用），不再是 <pre> 直出原文。
+// 与「创作空间」的正文预览共用同一个渲染器，避免两处 Markdown 表现不一致。
+const renderBody = (text) => markdownToHtml(text)
+
+// 目录/未保存列表里的摘要：去掉图片与标记符号，只留能认出是哪一段的文字
+const plainText = (text) =>
+  String(text || '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '[图片]')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/[*`_~>]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60)
+
+// 两个下拉都靠外部点击收起：稿纸很长，用户点到别处时菜单不该一直浮在上面
+function closeNav(event) {
+  if (!showUnsaved.value && !showOutline.value) return
+  if (event.target.closest?.('.nav-pop')) return
+  showUnsaved.value = false
+  showOutline.value = false
+}
+
+// 只在本机暂存失败时才拦关闭：草稿正常写进 localStorage 的话，
+// 刷新页面不丢修改，没必要每次都弹一个浏览器确认框。
+function onBeforeUnload(event) {
+  if (!storageFailed.value || !unsavedCount.value) return
+  event.preventDefault()
+  event.returnValue = ''
 }
 
 // 切到「排版预览」时顺手把右栏切到排版设置：用户点一次就能看到效果并调样式，
@@ -297,7 +418,7 @@ const submitReport = () =>
       body: JSON.stringify({ text: reportText.value }),
     })
     const payload = await response.json()
-    if (!response.ok) throw new Error(payload?.detail?.message || '报告回填失败')
+    if (!response.ok) throw new Error(payload?.message || payload?.detail?.message || '报告回填失败')
     startPolling()
     return payload
   })
@@ -307,11 +428,17 @@ function pickReport(event) {
 }
 
 onMounted(async () => {
+  window.addEventListener('beforeunload', onBeforeUnload)
+  document.addEventListener('pointerdown', closeNav)
   await loadState()
   if (articles.value.length) await openArticle(articles.value[0].id)
 })
 
-onBeforeUnmount(stopPolling)
+onBeforeUnmount(() => {
+  stopPolling()
+  window.removeEventListener('beforeunload', onBeforeUnload)
+  document.removeEventListener('pointerdown', closeNav)
+})
 </script>
 
 <template>
@@ -383,9 +510,44 @@ onBeforeUnmount(stopPolling)
               <button role="tab" :aria-selected="sheetMode === 'paper'" :class="{ active: sheetMode === 'paper' }" @click="sheetMode = 'paper'">段号稿纸</button>
               <button role="tab" :aria-selected="sheetMode === 'layout'" :class="{ active: sheetMode === 'layout' }" @click="openLayout">排版预览</button>
               <span class="hint">
-                {{ sheetMode === 'layout' ? '这是公众号里的最终效果，右侧「排版」调样式。' : '点任意一段，右侧「素材」就能给它配插图。' }}
+                {{ sheetMode === 'layout' ? '这是公众号里的最终效果，右侧「排版」调样式。' : '点正文任意一处就能改这一段，右侧「素材」给它配插图。' }}
               </span>
               <button v-if="sheetMode === 'paper'" class="text-button" @click="openMedia">配插图 →</button>
+            </div>
+
+            <!-- 稿纸导航：目录 / 下一处待处理 / 接着改 / 未保存，参考项目也是把这几件事
+                 放在正文最上面，改稿时不用来回滚。 -->
+            <div v-if="sheetMode === 'paper'" class="paper-nav">
+              <div class="nav-pop">
+                <button class="nav-btn" :aria-expanded="showOutline" @click="showOutline = !showOutline; showUnsaved = false">正文目录</button>
+                <nav v-if="showOutline" class="nav-list" aria-label="正文小标题">
+                  <button v-for="item in outline" :key="item.block.id" @click="jumpTo(item.block.id)">
+                    <b>{{ item.number }}</b><span>{{ plainText(item.block.text) }}</span>
+                  </button>
+                  <p v-if="!outline.length" class="hint">这篇还没有小标题。</p>
+                </nav>
+              </div>
+              <button v-if="nextWaiting" class="nav-btn" @click="jumpTo(nextWaiting.block.id, true)">
+                下一处待处理 <span class="nav-count">· {{ waitingBlocks.length }}</span>
+              </button>
+              <button v-if="lastBlock" class="nav-btn" :disabled="editingLocked" @click="openEditor(lastBlock.block)">
+                接着改第 {{ lastBlock.number }} 段
+              </button>
+              <span class="nav-grow" />
+              <div v-if="unsavedCount" class="nav-pop">
+                <button
+                  class="nav-btn warn"
+                  :disabled="!!job"
+                  :aria-expanded="showUnsaved"
+                  :title="storageFailed ? '本地暂存失败，退出前请保存正文' : '未保存的修改已暂存在本机'"
+                  @click="showUnsaved = !showUnsaved; showOutline = false"
+                >{{ unsavedCount }} 段未保存</button>
+                <div v-if="showUnsaved" class="nav-list" aria-label="未保存段落">
+                  <button v-for="item in unsavedList" :key="item.block.id" @click="jumpTo(item.block.id, true)">
+                    <b>第 {{ item.number }} 段</b><span>{{ plainText(item.draft.text) || '已清空' }}</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -398,13 +560,18 @@ onBeforeUnmount(stopPolling)
           <ol v-if="sheetMode === 'paper'" class="blocks">
             <li
               v-for="(block, index) in article.blocks"
+              :id="`paper-block-${block.id}`"
               :key="block.id"
               class="block"
-              :class="[block.check?.status || '', { editing: editing[block.id] !== undefined, selected: selectedBlockId === block.id }]"
-              @click="selectBlock(block)"
+              :class="[block.check?.status || '', { editing: editingBlockId === block.id, selected: selectedBlockId === block.id }]"
             >
               <div class="block-head">
-                <span class="block-no">{{ index + 1 }}</span>
+                <button
+                  class="block-no"
+                  :disabled="editingLocked"
+                  :aria-label="`编辑第 ${index + 1} 段`"
+                  @click="openEditor(block)"
+                >{{ index + 1 }}<span class="pencil" aria-hidden="true">✎</span></button>
                 <span class="block-kind">{{ kindLabel[block.kind] || block.kind }}</span>
                 <span v-if="block.check?.status" class="badge" :class="block.check.status">
                   {{ statusLabel[block.check.status] || block.check.status }}
@@ -412,25 +579,42 @@ onBeforeUnmount(stopPolling)
                   <template v-if="block.check.fixes">· 改过 {{ block.check.fixes }} 轮</template>
                 </span>
                 <span v-if="block.check?.worse" class="badge danger">比上一版更重</span>
-                <span class="block-actions">
-                  <button v-if="editing[block.id] === undefined" class="text-button" @click="editing[block.id] = block.text">改</button>
-                  <template v-else>
-                    <button class="text-button" :disabled="actionBusy === 'block'" @click="saveBlock(block)">保存</button>
-                    <button class="text-button" @click="cancelEdit(block)">取消</button>
-                  </template>
-                  <button v-if="block.check?.status === 'flag'" class="text-button" :disabled="!!job" @click="fixBlock(block)">改这一段</button>
-                  <button v-if="block.check?.status === 'flag'" class="text-button" @click="keepBlock(block)">就这样</button>
-                  <button v-if="block.prevText" class="text-button" :disabled="!!job" @click="revertBlock(block)">退回上一版</button>
-                </span>
+                <span v-if="dirtyIds.has(block.id)" class="badge unsaved">未保存</span>
+                <span v-if="editingBlockId === block.id" class="block-hint">正在编辑第 {{ index + 1 }} 段</span>
               </div>
-              <textarea
-                v-if="editing[block.id] !== undefined"
-                v-model="editing[block.id]"
-                class="block-editor"
-                rows="6"
-                spellcheck="false"
+
+              <PaperBlockEditor
+                v-if="editingBlockId === block.id"
+                :article-id="article.id"
+                :block="block"
+                :number="index + 1"
+                :next-block="article.blocks[index + 1] || null"
+                :busy="!!job || Boolean(actionBusy)"
+                @saved="onBlockSaved"
+                @done="closeEditor"
               />
-              <pre v-else class="block-text">{{ block.text }}</pre>
+              <div
+                v-else
+                class="block-body"
+                :class="{ locked: editingLocked }"
+                :role="editingLocked ? undefined : 'button'"
+                :tabindex="editingLocked ? -1 : 0"
+                :title="editingLocked ? '后台任务正在改这篇，等它结束再编辑' : '点一下直接改这一段'"
+                @click="openEditor(block)"
+                @keydown.enter.prevent="openEditor(block)"
+              >
+                <div class="block-html" v-html="renderBody(block.text)" />
+                <span v-if="dirtyIds.has(block.id)" class="block-unsaved">有未保存的修改</span>
+              </div>
+
+              <PaperAnnotation
+                :block="block"
+                :job="job"
+                :number="index + 1"
+                @fix="fixBlock(block)"
+                @keep="keepBlock(block)"
+                @revert="revertBlock(block)"
+              />
             </li>
           </ol>
           <PaperLayoutPreview
@@ -679,17 +863,79 @@ onBeforeUnmount(stopPolling)
 .block.fixed { background: var(--paper-accent-tint, #fbf6e9); border-color: var(--paper-accent-soft, #e6ddc8); }
 .block.editing { background: var(--color-surface, #fff); border-color: var(--paper-accent, #b08d57); }
 .block.selected { background: var(--paper-accent-tint, #f7f3e8); border-color: var(--paper-accent-soft, #e6ddc8); }
+/* 编辑态不再重复「选中」的底色：描边已经说明是哪一段，双层底色反而糊成一片 */
+.block.editing.selected { background: var(--color-surface, #fff); }
 .block-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 11px; color: var(--color-text-tertiary, #8a8a8a); }
-.block-no { position: absolute; left: 12px; top: 10px; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--paper-ink-soft, #9a8f7a); }
-.block-kind { letter-spacing: .04em; }
-.block-actions { margin-left: auto; display: flex; gap: 8px; opacity: 0; transition: opacity .15s; }
-.block:hover .block-actions, .block.flag .block-actions { opacity: 1; }
-.block-text { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-body, inherit); font-size: 15px; line-height: 1.85; color: var(--paper-ink, #2b2b2b); }
-.block-editor {
-  width: 100%; box-sizing: border-box; resize: vertical; padding: 10px 12px;
-  font-family: var(--font-body, inherit); font-size: 15px; line-height: 1.8;
-  border: 1px solid var(--paper-line-strong, #d8cdb6); border-radius: 8px; background: #fff; color: inherit;
+/* 段号兼作编辑入口：鼠标移上去才露铅笔，平时保持稿纸的干净 */
+.block-no {
+  position: absolute; left: 8px; top: 7px;
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 5px; border: none; border-radius: 5px; background: none;
+  font-family: inherit; font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 600;
+  color: var(--paper-ink-soft, #9a8f7a); cursor: pointer;
 }
+.block-no:hover { background: var(--paper-accent-tint, #f7f3e8); color: var(--paper-accent, #b08d57); }
+.block-no:disabled { cursor: default; }
+.block-no .pencil { font-size: 10px; color: var(--paper-accent, #b08d57); opacity: 0; transition: opacity .15s; }
+.block:hover .block-no .pencil { opacity: 1; }
+.block-kind { letter-spacing: .04em; }
+.block-hint { margin-left: auto; color: var(--paper-accent, #b08d57); }
+
+/* 正文：整块可点，点哪儿都进编辑；内部链接不响应点击，否则一改稿就跳走 */
+.block-body { position: relative; padding: 2px 6px; margin: 0 -6px; border-radius: 6px; outline: none; cursor: text; }
+.block-body:focus-visible { box-shadow: 0 0 0 2px var(--paper-accent-soft, #e6ddc8); }
+/* 任务期锁住正文：不给「可点」的光标，避免点了没反应 */
+.block-body.locked { cursor: not-allowed; opacity: .72; }
+.block-body :deep(a) { pointer-events: none; }
+.block-html { font-size: 15px; line-height: 1.85; color: var(--paper-ink, #2b2b2b); word-break: break-word; }
+.block-html :deep(p) { margin: 0 0 6px; }
+.block-html :deep(p:last-child) { margin-bottom: 0; }
+.block-html :deep(h1), .block-html :deep(h2), .block-html :deep(h3) { margin: 4px 0; font-size: 16px; font-weight: 650; line-height: 1.5; }
+.block-html :deep(blockquote) { margin: 0; padding-left: 10px; border-left: 3px solid var(--paper-line-strong, #d8cdb6); color: var(--color-text-secondary, #555); }
+.block-html :deep(ul), .block-html :deep(ol) { margin: 4px 0; padding-left: 20px; }
+.block-html :deep(img) { max-width: 100%; border-radius: 6px; }
+.block-html :deep(code) { padding: 1px 4px; border-radius: 4px; background: var(--paper-accent-tint, #f7f3e8); font-size: 13px; }
+.block-html :deep(hr) { margin: 8px 0; border: none; border-top: 1px solid var(--paper-line, #ece3d3); }
+/* 角标挂在正文块右上角：一眼看出这段改过但还没写进正文 */
+.block-unsaved {
+  position: absolute; right: 2px; top: -9px;
+  padding: 0 6px; border-radius: 999px;
+  font-size: 10px; line-height: 16px; color: #fff; background: var(--color-warning, #b26a00);
+}
+
+/* 稿纸导航条：目录、下一处待处理、接着改、未保存 */
+.paper-nav {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed var(--paper-line, #ece3d3);
+}
+.nav-grow { flex: 1; }
+.nav-pop { position: relative; }
+.nav-btn {
+  padding: 3px 9px; font-size: 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--paper-line-strong, #d8cdb6); background: transparent;
+  color: var(--color-text-secondary, #555);
+}
+.nav-btn:hover { border-color: var(--paper-accent, #b08d57); color: var(--paper-accent, #b08d57); }
+.nav-btn:disabled { opacity: .5; cursor: not-allowed; }
+.nav-btn.warn { border-color: var(--color-warning, #b26a00); color: var(--color-warning, #b26a00); }
+.nav-count { color: var(--color-text-tertiary, #8a8a8a); }
+.nav-list {
+  position: absolute; z-index: 12; top: calc(100% + 6px); left: 0;
+  min-width: 260px; max-width: 340px; max-height: 320px; overflow: auto;
+  display: flex; flex-direction: column; gap: 2px; padding: 6px;
+  border: 1px solid var(--paper-line, #ece3d3); border-radius: 10px;
+  background: var(--color-surface, #fff); box-shadow: 0 12px 28px rgba(40, 32, 16, .12);
+}
+/* 未保存那个菜单靠右对齐，否则会顶到稿纸外面 */
+.paper-nav > .nav-pop:last-child .nav-list { left: auto; right: 0; }
+.nav-list button {
+  display: flex; gap: 8px; width: 100%; padding: 6px 8px; text-align: left;
+  border: none; border-radius: 6px; background: none; font-size: 12px; color: inherit; cursor: pointer;
+}
+.nav-list button:hover { background: var(--paper-accent-tint, #f7f3e8); }
+.nav-list b { flex: none; color: var(--paper-ink-soft, #9a8f7a); font-variant-numeric: tabular-nums; }
+.nav-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .paper-side { display: flex; flex-direction: column; gap: 10px; position: sticky; top: 16px; }
 .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; border-radius: 10px; background: var(--color-surface-muted, #f2f2f2); }
@@ -723,6 +969,7 @@ onBeforeUnmount(stopPolling)
 .badge.fixed, .badge.danger { color: var(--color-warning, #b26a00); }
 .badge.pass { color: var(--paper-success, #3f7a4f); }
 .badge.kept { color: var(--color-text-tertiary, #8a8a8a); }
+.badge.unsaved { color: var(--color-warning, #b26a00); }
 .hint { margin: 0; font-size: 11px; color: var(--color-text-tertiary, #8a8a8a); line-height: 1.6; }
 .empty { font-size: 12px; color: var(--color-text-tertiary, #8a8a8a); }
 .sheet-loading { font-size: 13px; color: var(--color-text-tertiary, #8a8a8a); }

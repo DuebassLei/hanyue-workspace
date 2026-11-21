@@ -183,3 +183,18 @@ def test_reference_quote_and_scrolling_cards():
     assert 'max-height:320px' in result['html']
     assert 'max-height:420px' in result['html']
     SafetyParser().feed(result['html'])
+
+
+def test_editor_inserted_image_title_long_renders_scrolling_card():
+    """编辑器「长图卡」插入的是 `![图注](url "long")`，不是 ```longimage 围栏。
+
+    两条路径得通到同一个卡片，否则用户在成稿台插的长图保存后只剩一张普通图片。
+    """
+    body = '# 示例\n\n![图注文字](<https://example.com/a.png> "long")\n\n![普通图](https://example.com/b.png)'
+    result = engine.render_studio_document(body, {'style': 'std', 'outro': False})
+    assert '图注文字' in result['html']
+    assert '↕ 滑动' in result['html']
+    assert 'max-height:420px' in result['html']
+    # 只有长图进滚动容器，普通图不能被一起套进去
+    assert result['html'].count('max-height:420px') == 1
+    SafetyParser().feed(result['html'])

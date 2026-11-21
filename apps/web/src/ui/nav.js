@@ -25,6 +25,8 @@ export const NAV_GROUPS = [
     items: [
       // 工作区功能直接平铺，不再按内容类型折叠。
       { name: 'studio', label: '创作空间', short: '创作', permission: 'studio.use' },
+      // 成稿台是「逐段改」的主入口，和创作空间同级；兜底导航漏了它，菜单接口失败时用户就找不到入口
+      { name: 'paper', label: '成稿台', short: '成稿', permission: 'studio.use' },
       { name: 'originality', label: '原创检测', short: '检测', permission: 'studio.use' },
       { name: 'prompts', label: '提示词库', short: '提示词', permission: 'prompts.use', aliases: ['handdraw'] },
       { name: 'articles', label: '文章管理', short: '文章', permission: 'studio.use' },

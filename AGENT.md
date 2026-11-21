@@ -4,6 +4,18 @@
 
 ---
 
+## 可用项目技能（自动引用）
+
+项目技能放在 `.workbuddy/skills/`（已链接到 `.claude/skills/`，两处内容同源）。遇到下列任务时，先加载对应技能再动手：
+
+| 技能 | 触发场景 | 内容位置 |
+| --- | --- | --- |
+| `project-analysis-team` | 「分析这个项目 / 项目体检 / 接手陌生仓库」出只读分析报告；或「用专家团实现这个规划 / 多角色并行开发」按计划落地 | `.claude/skills/project-analysis-team/SKILL.md` |
+
+加载方式：优先用 Skill 工具按技能名调用；若该技能未出现在可用技能列表（缓存未刷新），直接读取上表 `SKILL.md` 并严格按其流程执行。技能的 `name`/`description` 与 WorkBuddy 兼容，无需改写。
+
+---
+
 ## 项目一句话描述
 
 **汉月工作台**：面向自媒体创作者的全栈 AI 创作平台。纵向切片：灵感 → AI 创作 → 配图 → 发布审核 → 数据复盘，含受控 Agent 执行层（原「选题库」已下线，创作由创作空间的 AI 写作承接）。
@@ -144,8 +156,10 @@ hanyue-workspace/
 | `CalendarView.vue`   | `/calendar`   | 内容日历（`/topics` 已重定向到创作空间）                                   |
 | `HotTopicsView.vue`  | `/hot-topics` | 热点选题：多平台事件的合并、评分、筛选与一键成稿                                    |
 | `StudioView.vue`     | `/studio`     | AI 创作主界面（大纲/正文/润色/配图）                                       |
-| `PaperView.vue`      | `/paper`      | 成稿台：段号稿纸/排版预览双视图，逐段改稿、对话改稿、质检修复、标题、横幅、封面插图、发布复盘（一页完成） |
-| `components/paper/`  | —             | 成稿台右栏面板与预览：`PaperLayoutPanel` / `PaperLayoutPreview` / `PaperMediaPanel` / `PaperPublishPanel` |
+| `PaperView.vue`      | `/paper`      | 成稿台：段号稿纸/排版预览双视图，点整段进编辑、逐段改稿、对话改稿、质检修复、标题、横幅、封面插图、发布复盘（一页完成） |
+| `components/paper/`  | —             | 成稿台组件：右栏四个面板 + 单段编辑器 `PaperBlockEditor`（显式保存/快捷键/本机草稿）、卡片插入弹窗 `PaperCardInsert`（图片/长图/长提示词）、批注条 `PaperAnnotation`（改写建议与主操作）、逐段 diff `PaperDiffDialog` |
+| `composables/useParagraphDrafts.js` | — | 成稿台段落草稿：模块级单例 + localStorage 暂存，切稿/刷新不丢未保存的修改 |
+| `utils/editorFormat.js` | — | 成稿台格式化规则：强调三件套（`**`/`==`/`++`）、三组插入项、`cardMarkdown`、`formatSelection`；纯函数，由 `tests/editorFormat.test.mjs` 守着 |
 | `CardsView.vue`      | `/cards`      | 图文卡片生成与导出                                                   |
 | `PromptsView.vue`    | `/prompts`    | 提示词库维护（生图提示词模板）                                             |
 | `HanddrawView.vue`   | `/handdraw`   | 手绘风格提示词库                                                    |
@@ -354,6 +368,9 @@ cd ../web && npm run build                             # 前端生产构建
 | `docs/wechat-layout.md`   | 公众号排版渲染管线（标签约束、主题参数、语法规范）          |
 | `docs/studio-redesign.md` | Studio 创作页重设计说明                    |
 | `docs/hot-topics.md`      | 热点选题：采集源、合并算法、评分口径、接口与降级显示         |
+| `docs/paper-studio.md`    | 成稿台产品说明：段落模型、改稿流程、质检与发布           |
+| `docs/paper-studio-contract.md` | 成稿台与参考项目的接口契约、实施偏差表                |
+| `docs/paper-editing-contract.md` | 成稿台段落编辑契约：组件接口、快捷键、草稿生命周期、批注与 diff 规则 |
 | `README.md`               | 全量功能说明、部署指南、已实现/未实现能力边界            |
 
 ---

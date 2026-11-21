@@ -55,7 +55,8 @@ export async function uploadReport(articleId, file) {
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(payload?.detail?.message || `报告解析失败（HTTP ${response.status}）`)
+    // 后端错误体是扁平的 {code, message}（ApiError），detail.message 只用于兜住 FastAPI 原生校验错误
+    throw new Error(payload?.message || payload?.detail?.message || `报告解析失败（HTTP ${response.status}）`)
   }
   return payload
 }
