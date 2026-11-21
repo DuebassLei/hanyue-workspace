@@ -1922,3 +1922,137 @@ class RulesPreviewOut(CamelModel):
     kind: str
     text: str = ""
     rule_sources: list = Field(default_factory=list)
+
+
+# ---------- 成稿台：段落级编辑编排 ----------
+#
+# 结构与 dsh-wechat-studio 的 article/block 契约保持一致（前端照搬时可少改），
+# 只是把整篇 JSON 拆成了数据库行：article 是稿件头，blocks 是有稳定 id 的段落。
+
+
+class StudioBlockOut(CamelModel):
+    id: str
+    ordinal: int = 0
+    text: str = ""
+    kind: str = "para"
+    check: dict | None = None
+    prev_text: str | None = None
+    inserted_diagram_id: str | None = None
+
+
+class StudioJobOut(CamelModel):
+    """正在跑的流水线任务。kind: draft|titles|chat|fix|fixall|banner|report。"""
+
+    kind: str
+    label: str = ""
+    text: str = ""
+    target: str | None = None
+    targets: list[str] = Field(default_factory=list)
+    progress: dict | None = None
+    stopping: bool = False
+
+
+class StudioArticleOut(CamelModel):
+    id: str
+    topic: str = ""
+    material: str = ""
+    front: str = ""
+    title: str = ""
+    hook: str | None = None
+    titles: list = Field(default_factory=list)
+    summary: str = ""
+    banner_style: str = "poster"
+    banners: dict = Field(default_factory=dict)
+    layout_options: dict = Field(default_factory=dict)
+    follow_card: bool = False
+    zhuque: dict = Field(default_factory=dict)
+    chat: list = Field(default_factory=list)
+    notice: dict | None = None
+    cover: dict = Field(default_factory=dict)
+    inline_diagrams: list = Field(default_factory=list)
+    scheduled_for: datetime | None = None
+    published_at: datetime | None = None
+    publish_marked_at: datetime | None = None
+    archived: bool = False
+    last_view: str = "paper"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    blocks: list[StudioBlockOut] = Field(default_factory=list)
+    job: StudioJobOut | None = None
+
+
+class StudioMetaOut(CamelModel):
+    id: str
+    title: str = ""
+    topic: str = ""
+    updated_at: datetime | None = None
+    chars: int = 0
+    blocks: int = 0
+    hook: str | None = None
+    last_view: str = "paper"
+    archived_at: datetime | None = None
+    cover_id: str | None = None
+    review: int = 0
+    checked: bool = False
+    scheduled_for: datetime | None = None
+    published_at: datetime | None = None
+    publish_marked_at: datetime | None = None
+    readiness: dict = Field(default_factory=dict)
+
+
+class StudioStateOut(CamelModel):
+    articles: list[StudioMetaOut] = Field(default_factory=list)
+    settings: dict = Field(default_factory=dict)
+
+
+class StudioNewIn(CamelModel):
+    topic: str = ""
+    material: str = ""
+    markdown: str = ""
+    # 建好就写正文；给了 markdown 时按导入处理，不再让模型写
+    draft: bool = False
+    titles: bool = True
+
+
+class StudioChatIn(CamelModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class StudioBlockPatchIn(CamelModel):
+    text: str = Field(max_length=40000)
+    # 乐观锁：带上读到的原文，服务端发现被改过就拒绝，避免覆盖别人的修改
+    expected_text: str | None = None
+
+
+class StudioTitlePickIn(CamelModel):
+    text: str = Field(min_length=1, max_length=80)
+
+
+class StudioBannerIn(CamelModel):
+    style: str = "poster"
+
+
+class StudioScheduleIn(CamelModel):
+    at: datetime | None = None
+
+
+class StudioSettingsIn(CamelModel):
+    """朱雀质检凭据。key 为空表示不配置，检测自动降级为本地启发式。"""
+
+    zhuque_key: str | None = None
+    zhuque_endpoint: str | None = None
+
+
+class StudioRevisionOut(CamelModel):
+    index: int
+    label: str = ""
+    at: datetime | None = None
+    rows: list = Field(default_factory=list)
+
+
+class StudioRevisionsOut(CamelModel):
+    revisions: list[StudioRevisionOut] = Field(default_factory=list)
+
+
+class StudioMarkdownOut(CamelModel):
+    markdown: str

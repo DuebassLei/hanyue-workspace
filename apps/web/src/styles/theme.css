@@ -397,6 +397,12 @@ button {
   margin-top: var(--space-1);
 }
 
+/* 次级说明（如「谁在定时采集」）：比主副标题再淡一档，不抢标题的层级 */
+.page-sub--muted {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-xs);
+}
+
 /* ---------- 组件 ---------- */
 .card {
   background: var(--color-surface);

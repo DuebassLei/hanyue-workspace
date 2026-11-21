@@ -293,6 +293,18 @@ def test_patch_updates_next_run_and_disable_clears_it(client, test_type):
     assert on.json()["nextRunAt"] is not None
 
 
+def test_hour_span_cron_has_readable_label():
+    """白天每小时跑（8-22）是热点采集这类任务的形态，界面不能只剩一串 cron。"""
+    from app import models
+    from app.modules.schedules import _human_schedule
+
+    def label(cron: str) -> str:
+        return _human_schedule(models.ScheduledTask(cron=cron, schedule_kind="cron"))
+
+    assert label("5 8-22 * * *") == "每天 08:05–22:05 每小时"
+    assert label("0 9-18 * * *") == "每天 09:00–18:00 每小时"
+
+
 def test_task_read_only_when_configured(client, test_type, monkeypatch):
     """SCHEDULER_SYSTEM_WRITE=never 时定时配置一律只读（统一 system 后覆盖所有任务）。"""
     from app.modules import schedules as schedules_module

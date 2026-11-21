@@ -39,6 +39,26 @@ def test_examples_have_unique_keys_and_contract():
 def test_example_executes_and_rolls_back(client, owner_id, key, code, monkeypatch):
     """逐个回滚执行：示例必须真实可跑，且不留数据。"""
     params = {}
+    if key == "hot_board_refresh":
+        # 采集示例会打 22 个外网源：外部可用性不该决定 CI 成败，打桩成一条 fixture
+        from app.services import hot_sources
+
+        monkeypatch.setattr(
+            hot_sources,
+            "collect",
+            lambda platforms=None: (
+                [
+                    {
+                        "platform": platforms[0] if platforms else "微博",
+                        "rank": 1,
+                        "title": "示例用的热点标题",
+                        "hot": 1000,
+                        "url": "",
+                    }
+                ],
+                ["fixture：1 条"],
+            ),
+        )
     if key == "http_fetch":
         # 外部网络不可作为测试依赖：打桩 requests.get（示例代码 import 的是同一模块）
         import requests

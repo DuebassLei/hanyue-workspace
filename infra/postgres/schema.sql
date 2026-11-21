@@ -1074,6 +1074,42 @@ CREATE TABLE IF NOT EXISTS storyboard_scenes (
 	FOREIGN KEY(project_id) REFERENCES storyboard_projects (id)
 );
 
+-- studio_articles
+CREATE TABLE IF NOT EXISTS studio_articles (
+	id VARCHAR(32) NOT NULL,
+	owner_user_id VARCHAR(32) NOT NULL,
+	workspace_id VARCHAR(32),
+	content_item_id VARCHAR(32),
+	topic VARCHAR(400) NOT NULL,
+	material TEXT NOT NULL,
+	front TEXT NOT NULL,
+	title VARCHAR(200) NOT NULL,
+	hook VARCHAR(8),
+	titles JSONB NOT NULL,
+	summary TEXT NOT NULL,
+	banner_style VARCHAR(24) NOT NULL,
+	banners JSONB NOT NULL,
+	layout_options JSONB NOT NULL,
+	follow_card BOOLEAN DEFAULT 'false' NOT NULL,
+	zhuque JSONB NOT NULL,
+	chat JSONB NOT NULL,
+	notice JSONB,
+	cover JSONB NOT NULL,
+	inline_diagrams JSONB NOT NULL,
+	scheduled_for TIMESTAMP WITH TIME ZONE,
+	published_at TIMESTAMP WITH TIME ZONE,
+	publish_marked_at TIMESTAMP WITH TIME ZONE,
+	archived BOOLEAN DEFAULT 'false' NOT NULL,
+	archived_at TIMESTAMP WITH TIME ZONE,
+	last_view VARCHAR(16) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE CASCADE,
+	FOREIGN KEY(workspace_id) REFERENCES workspaces (id) ON DELETE SET NULL,
+	FOREIGN KEY(content_item_id) REFERENCES content_items (id) ON DELETE SET NULL
+);
+
 -- agent_approvals
 CREATE TABLE IF NOT EXISTS agent_approvals (
 	id VARCHAR(32) NOT NULL,
@@ -1123,6 +1159,31 @@ CREATE TABLE IF NOT EXISTS agent_tool_calls (
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	PRIMARY KEY (id),
 	FOREIGN KEY(run_id) REFERENCES agent_runs (id)
+);
+
+-- article_blocks
+CREATE TABLE IF NOT EXISTS article_blocks (
+	id VARCHAR(32) NOT NULL,
+	article_id VARCHAR(32) NOT NULL,
+	ordinal INTEGER NOT NULL,
+	text TEXT NOT NULL,
+	kind VARCHAR(16) NOT NULL,
+	"check" JSONB,
+	prev_text TEXT,
+	inserted_diagram_id VARCHAR(32),
+	PRIMARY KEY (id),
+	FOREIGN KEY(article_id) REFERENCES studio_articles (id) ON DELETE CASCADE
+);
+
+-- article_revisions
+CREATE TABLE IF NOT EXISTS article_revisions (
+	id VARCHAR(32) NOT NULL,
+	article_id VARCHAR(32) NOT NULL,
+	label VARCHAR(120) NOT NULL,
+	payload JSONB NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(article_id) REFERENCES studio_articles (id) ON DELETE CASCADE
 );
 
 -- content_assets
@@ -1651,6 +1712,18 @@ CREATE INDEX IF NOT EXISTS ix_storyboard_scenes_deleted_at ON storyboard_scenes 
 -- storyboard_scenes.ix_storyboard_scenes_project_id
 CREATE INDEX IF NOT EXISTS ix_storyboard_scenes_project_id ON storyboard_scenes (project_id);
 
+-- studio_articles.ix_studio_articles_archived
+CREATE INDEX IF NOT EXISTS ix_studio_articles_archived ON studio_articles (archived);
+
+-- studio_articles.ix_studio_articles_owner_archived
+CREATE INDEX IF NOT EXISTS ix_studio_articles_owner_archived ON studio_articles (owner_user_id, archived);
+
+-- studio_articles.ix_studio_articles_owner_user_id
+CREATE INDEX IF NOT EXISTS ix_studio_articles_owner_user_id ON studio_articles (owner_user_id);
+
+-- studio_articles.ix_studio_articles_workspace_id
+CREATE INDEX IF NOT EXISTS ix_studio_articles_workspace_id ON studio_articles (workspace_id);
+
 -- agent_approvals.ix_agent_approvals_run_id
 CREATE INDEX IF NOT EXISTS ix_agent_approvals_run_id ON agent_approvals (run_id);
 
@@ -1659,6 +1732,18 @@ CREATE INDEX IF NOT EXISTS ix_agent_events_run_id ON agent_events (run_id);
 
 -- agent_tool_calls.ix_agent_tool_calls_run_id
 CREATE INDEX IF NOT EXISTS ix_agent_tool_calls_run_id ON agent_tool_calls (run_id);
+
+-- article_blocks.ix_article_blocks_article_id
+CREATE INDEX IF NOT EXISTS ix_article_blocks_article_id ON article_blocks (article_id);
+
+-- article_blocks.ix_article_blocks_article_ordinal
+CREATE INDEX IF NOT EXISTS ix_article_blocks_article_ordinal ON article_blocks (article_id, ordinal);
+
+-- article_revisions.ix_article_revisions_article_id
+CREATE INDEX IF NOT EXISTS ix_article_revisions_article_id ON article_revisions (article_id);
+
+-- article_revisions.ix_article_revisions_created_at
+CREATE INDEX IF NOT EXISTS ix_article_revisions_created_at ON article_revisions (created_at);
 
 -- content_embeddings.ix_content_embeddings_content_version_id
 CREATE INDEX IF NOT EXISTS ix_content_embeddings_content_version_id ON content_embeddings (content_version_id);

@@ -116,8 +116,38 @@ class TaskType:
 | `content_stats` | 按状态统计我的稿件数量 | `ctx.db` + SQLAlchemy 聚合 |
 | `content_weekly` | 最近 N 天更新的稿件清单 | 时间窗口查询 + summary |
 | `hot_snapshot` | 当前热榜 Top N | 读系统级数据 `hot_items` |
+| `hot_board_refresh` | **官方**：抓一轮默认数据源写热点库 | 薄封装服务层 + 平台名校验 + 降级摘要 |
 | `http_fetch` | GET 外部 JSON 接口带回结果 | requests 全依赖可用 + 参数校验 |
 | `batch_drafts` | 按标题清单批量建稿（同名跳过） | 写业务数据（ContentItem + 版本） |
+
+#### 热点采集就是一条普通脚本任务
+
+热点选题的默认数据源（`app/hot_sources/catalog.yaml` 里的全部启用源，当前 22 路）不再有
+专属任务类型，而是**一条普通脚本定时任务**：
+
+```
+script_examples.HOT_BOARD_REFRESH（仓库里的脚本代码）
+  → scheduled_scripts（草稿 + 发布快照，执行只认快照）
+  → scheduled_tasks（task_type=user-script.<scriptId>，scope=system）
+  → 到点投 background_jobs → 进程内跑脚本 → services.hot_topics.refresh（采集 → 灌库 → 聚簇 → 评分）
+```
+
+- **建/补一次**：`python scripts/seed_hot_schedule.py`（`apps/api` 目录下）。
+  幂等：脚本按 (归属人, 名称) 复用、代码没变不涨版本号、已有任务的 cron/参数不覆盖，
+  停用态也不会被强行改回启用。`--cron` 才改时间，`--republish` 强制重发一版，
+  `--user me@example.com` 指定归属账号（默认取有密码的主账号）。
+- **日常调参**：界面「定时任务」里改时间或参数即可，不用动代码。
+  默认 `5 8-22 * * *`（08:05–22:05 每小时一轮，15 轮/天）——评分里的「名次升降」要
+  同一天 ≥2 轮、「日内新鲜度」要 ≥3 轮，15 轮留足余量又不至于把上游打成压测。
+  只想跑部分平台：任务参数写 `{"platforms": ["微博", "知乎"]}`，留空跑全部启用源。
+- **改采集口径**：加/减源改 `catalog.yaml`，改链路改 `services/hot_topics.py`；脚本本身
+  只做「参数拆包 + 调用」，两者都不需要动它。
+- **手动补一轮**：界面点「立即执行」，或 `POST /hot-topics/refresh`（有 15s 冷却，
+  脚本路径没有冷却）。
+
+> CLI 只写库；API 进程内 APScheduler 是内存 jobstore，**下次启动/reload** 才装载新任务
+> （界面里已经能看到，可直接点「立即执行」验证）。
+
 
 ### 2.2 调度器装配（`services/scheduler.py`）
 
@@ -336,6 +366,7 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
 | 脚本运行时（契约校验 + 进程内执行 + 测试会话） | `services/script_runtime.py` |
 | ScriptContext / ScriptFailure 公共契约 | `app/scheduled_scripts/base.py`（内置 runner 已删除，仅留公共定义） |
 | 常用脚本示例 | `app/resources/script_examples.py` + `tests/test_script_examples.py` |
+| 热点采集任务的建/补（幂等） | `app/services/hot_schedule.py` + `scripts/seed_hot_schedule.py` |
 | 页面 | `apps/web/src/views/SchedulesView.vue` |
 | 测试 | `apps/api/tests/test_scheduled_tasks.py` + `test_script_schedules.py` + `test_script_examples.py` |
 
@@ -348,5 +379,6 @@ runs 是触发账本，`background_jobs` 是执行真相。runs 的 `status` 由
    （`ensure_system_tasks` / `SCHEDULER_SEED_SYSTEM_TASKS`）随内置类型移除一并删除。
 4. **内置任务整体移除**：manifest / `script_registry.py` / `scheduled_scripts/hot_topics.py` /
    `health_check.py` / `job_runner` 的 `hot-topics` / `topic-digest` / `script` handler 全部删除。
-   热点能力保留为手动接口（`POST /hot-topics/refresh` 等，`modules/hot_topics.py`）。
+   热点能力先保留为手动接口（`POST /hot-topics/refresh` 等，`modules/hot_topics.py`），
+   现已改为**普通脚本定时任务**（见 §2.1 「热点采集就是一条普通脚本任务」），
    内置定时需求一律改写成用户脚本实现（参考 §2.1.1 示例）。

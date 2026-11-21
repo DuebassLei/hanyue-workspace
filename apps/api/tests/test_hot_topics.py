@@ -333,6 +333,54 @@ def test_summary_and_degraded(client, monkeypatch):
     assert {"rise", "fresh", "hot"} <= dims
 
 
+def test_over_long_title_is_clipped_and_uid_stays_within_column(client, monkeypatch):
+    """超长「标题」（酷安/微信热文其实是整段正文）不能把整轮采集打成 500。
+
+    线上表现：item_uid 拼了完整归一化标题 → 超过 VARCHAR(255) →
+    StringDataRightTruncation，refresh 直接 500。
+    """
+    from app.services import hot_topics
+
+    monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
+    long_title = "双十一在横道店买的k100promax，大伙儿都说他家后封，" + "手机屏幕有点弯曲，" * 40
+    _patch_collect(monkeypatch, [
+        {"platform": "酷安", "rank": 3, "title": long_title, "url": "https://www.coolapk.com/feed/1"},
+    ])
+    _patch_now(monkeypatch)
+    headers = _login(client, "hot-long-title")
+
+    response = client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers)
+    assert response.status_code == 200, response.text
+
+    from app.core.db import SessionLocal
+    from app.models import HotItem
+
+    db = SessionLocal()
+    try:
+        item = db.query(HotItem).filter(HotItem.platform == "酷安").one()
+        assert len(item.item_uid) <= hot_topics.ITEM_UID_MAX_CHARS
+        assert len(item.title) <= hot_topics.TITLE_MAX_CHARS
+        assert len(item.title_norm) <= hot_topics.TITLE_MAX_CHARS
+    finally:
+        db.close()
+
+
+def test_make_item_uid_is_stable_and_collision_free_for_long_titles():
+    from app.services import hot_topics
+
+    short = hot_topics.make_item_uid("微博", "赵丽颖哄自己上班")
+    assert short == "微博\x1f赵丽颖哄自己上班"
+
+    head = "甲" * 400
+    a = hot_topics.make_item_uid("酷安", head + "结尾一")
+    b = hot_topics.make_item_uid("酷安", head + "结尾二")
+    assert len(a) == hot_topics.ITEM_UID_MAX_CHARS
+    # 同一标题每次算出来必须一致，否则幂等失效
+    assert a == hot_topics.make_item_uid("酷安", head + "结尾一")
+    # 前缀相同、结尾不同的两条长帖必须是两个身份，不能被截断合并成一条
+    assert a != b
+
+
 def test_all_sources_failed_returns_502(client, monkeypatch):
     monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
     from app.services import hot_sources

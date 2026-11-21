@@ -111,6 +111,70 @@ def run(params, ctx):
     }
 '''
 
+# 官方脚本（不是玩具示例）：热点选题页的数据就靠它定时刷新。
+# 采集口径的唯一真相是 app/hot_sources/catalog.yaml，链路真相是 services.hot_topics.refresh；
+# 脚本本身只做「参数拆包 + 调用」，所以加平台、改评分都不用动它。
+HOT_BOARD_REFRESH = '''"""热点榜单采集（官方脚本）：抓一轮默认数据源，写入/更新热点库。
+
+链路：catalog.yaml 里启用的源 → 采集 → hot_items(新增/更新) → 聚簇 → 评分。
+具体逻辑全在 app.services.hot_topics.refresh，这里只负责参数与摘要。
+
+参数（都可省略）：
+    platforms  平台名数组，如 ["微博", "知乎", "酷安"]；留空 = catalog 里全部启用源
+
+想加/减平台、调采集细节：改 app/hot_sources/catalog.yaml 或 hot_topics 服务，
+不用改这个脚本；只想临时少跑几个平台，就在任务参数里写 platforms。
+"""
+from app.hot_sources import load_catalog
+from app.services import hot_topics
+
+
+def run(params, ctx):
+    raw = params.get("platforms")
+    if raw in (None, "", []):
+        platforms = None  # None = catalog 里全部启用源
+    elif isinstance(raw, list):
+        platforms = [str(name).strip() for name in raw if str(name).strip()]
+    else:
+        raise ValueError('platforms 必须是平台名数组，例如 ["微博", "知乎"]')
+
+    if platforms:
+        known = {source["name"] for source in load_catalog()["sources"]}
+        unknown = [name for name in platforms if name not in known]
+        if unknown:
+            raise ValueError(
+                "平台名不在 catalog 里：" + "、".join(unknown)
+                + "；可选：" + "、".join(sorted(known))
+            )
+
+    result = hot_topics.refresh(ctx.db, platforms=platforms)
+    notes = result.get("notes") or []
+    # notes 每个源都会有一条（「微博：50 条」是成功计数），摘要里只挑真降级的那些，
+    # 否则界面上会写「22 条降级」，把正常采集说成故障。
+    degraded = [
+        note for note in notes
+        if any(mark in note for mark in ("失败", "selector_may_changed", "已跳过", "未知采集类型"))
+    ]
+    summary = (
+        f"{result['day']} {result['capturedAt']} 采集 {result['items']} 条 · "
+        f"归并 {result['clusters']} 个事件"
+        f"（新 {result['newClusters']} / 并入 {result['matchedClusters']}）"
+    )
+    if degraded:
+        summary += f" · {len(degraded)} 个源降级：" + "；".join(degraded[:3])
+    return {
+        "summary": summary,
+        "day": result["day"],
+        "capturedAt": result["capturedAt"],
+        "items": result["items"],
+        "clusters": result["clusters"],
+        "newClusters": result["newClusters"],
+        "matchedClusters": result["matchedClusters"],
+        "degraded": degraded,
+        "notes": notes,
+    }
+'''
+
 BATCH_DRAFTS = '''"""批量建稿：为参数里的标题清单各建一篇草稿，同名已存在则跳过。"""
 from sqlalchemy import select
 
@@ -192,6 +256,13 @@ EXAMPLES: list[dict] = [
         "title": "外部接口采集",
         "description": "GET 一个 JSON 接口带回结果，不落库。演示：requests 全依赖可用 + 参数校验。",
         "code": HTTP_FETCH,
+    },
+    {
+        "key": "hot_board_refresh",
+        "title": "热点榜单采集（官方）",
+        "description": "抓一轮默认数据源写入热点库（新增/更新条目 → 聚簇 → 评分）。"
+        "可配 platforms 只跑部分平台，留空跑 catalog.yaml 全部启用源。",
+        "code": HOT_BOARD_REFRESH,
     },
     {
         "key": "batch_drafts",

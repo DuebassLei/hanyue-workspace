@@ -303,6 +303,9 @@ onMounted(loadAll)
         <p class="page-sub">
           今天大家搜什么 → 我该写哪一个。分数由服务端算好，悬停分数条看证据。
         </p>
+        <p class="page-sub page-sub--muted">
+          榜单由「定时任务」里的脚本按点自动采集，频率与平台在那里调；右上角按钮只补一轮。
+        </p>
       </div>
       <n-space :size="8">
         <n-button secondary :disabled="loading" @click="overviewOpen = true">

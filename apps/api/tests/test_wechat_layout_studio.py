@@ -53,7 +53,8 @@ class SafetyParser(HTMLParser):
             assert not name.startswith('on')
             assert name not in ('id', 'class')
             if name in ('src', 'href'):
-                assert value.startswith(('https://', 'http://', 'asset://'))
+                # GIF_URL_HERE 是参考实现的页面占位符，预览页脚本会替换成用户头像地址
+                assert value == 'GIF_URL_HERE' or value.startswith(('https://', 'http://', 'asset://'))
 
 
 @pytest.mark.parametrize('style', engine.STYLES)
@@ -65,11 +66,18 @@ def test_style_complete_document(style):
     assert '<code' in rendered['html']
     assert rendered['stats']['tables'] == 1
     assert rendered['stats']['images'] == 1
-    assert rendered['stats']['lists'] == 1
+    assert rendered['stats']['lists'] == 2  # 无序与有序列表切换时按参考语义分成两个列表块
     assert rendered['stats']['codeBlocks'] == 2
     assert rendered['stats']['headings'] == 3
     assert rendered['stats']['title'] == '排版示例'
     assert '参考链接' in rendered['html']
+
+
+def test_title_chain_follows_reference_order():
+    # 参考 renderPage：meta.title || H1；API 稿件标题只做兜底，不抢占 H1
+    assert engine.render_studio_document('# 正文标题\n\n正文', {'title': '接口标题', 'outro': False})['stats']['title'] == '正文标题'
+    assert engine.render_studio_document('---\ntitle: 前置标题\n---\n# 正文标题\n\n正文', {'title': '接口标题', 'outro': False})['stats']['title'] == '前置标题'
+    assert engine.render_studio_document('正文', {'title': '接口标题', 'outro': False})['stats']['title'] == '接口标题'
 
 
 def test_ten_styles_differ_without_banner_or_author():

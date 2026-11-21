@@ -95,6 +95,14 @@ def _human_schedule(task: models.ScheduledTask) -> str:
             return f"每小时第 {int(minute):02d} 分"
         if hour.startswith("*/") and hour[2:].isdigit():
             return f"每 {int(hour[2:])} 小时第 {int(minute):02d} 分"
+        # 小时区间（8-22）：白天每小时跑一次是热点采集这类任务的常见形态，
+        # 不认的话界面只剩一串 cron，没人愿意读。
+        span = hour.split("-")
+        if len(span) == 2 and all(piece.isdigit() for piece in span):
+            start, end = int(span[0]), int(span[1])
+            if int(minute) == 0:
+                return f"每天 {start:02d}:00–{end:02d}:00 每小时"
+            return f"每天 {start:02d}:{int(minute):02d}–{end:02d}:{int(minute):02d} 每小时"
         if all(piece.isdigit() for piece in hour.split(",")):
             times = "、".join(f"{int(piece):02d}:{int(minute):02d}" for piece in hour.split(","))
             if minute == "0":

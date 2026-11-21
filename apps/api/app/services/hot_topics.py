@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -217,8 +218,45 @@ def source_status() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 工具
+# 入库前的列宽守卫
 # ══════════════════════════════════════════════════════════════════════
+#
+# 表结构里 title / title_norm 是 VARCHAR(300)，item_uid 是带唯一索引的
+# VARCHAR(255)。多数热榜源给的是短标题，但酷安、微信热文这类「标题」其实是
+# 整段正文——归一化后动辄两三百字，拼进 item_uid 直接超列宽，PostgreSQL 抛
+# StringDataRightTruncation，整轮采集 500（和当年 url 那个坑同型）。
+#
+# 口径分两种，不能用同一招：
+# - 展示/存储字段（title / title_norm）：按列宽裁剪。超宽的部分对选题没价值，
+#   砍掉比塞爆列好。
+# - 身份键（item_uid）：**不能**简单裁剪——两条长帖很可能前 255 字一样、后面
+#   才是差别，裁完就成了同一条。改成「可读前缀 + 归一化标题的全量 SHA-1」，
+#   截掉的部分仍然参与判等；短标题保持原样，历史行身份不变。
+TITLE_MAX_CHARS = 300
+ITEM_UID_MAX_CHARS = 255
+_UID_HASH_CHARS = 20
+
+
+def _clip(text: str, limit: int) -> str:
+    """按列宽裁剪。不加省略号：库里存的是能直接判等的前缀。"""
+    return text if len(text) <= limit else text[:limit]
+
+
+def make_item_uid(platform: str, norm: str) -> str:
+    """条目身份键 = platform + 归一化标题，长度恒在 item_uid 列宽以内。
+
+    短标题（历史数据里最长 72 字）完全保持原样；只有拼出来超宽时才截前缀，
+    尾接归一化标题的 SHA-1 摘要——同一条内容每次算出来的键必须一致，
+    否则幂等就废了。
+    """
+    uid = f"{platform}\x1f{norm}"
+    if len(uid) <= ITEM_UID_MAX_CHARS:
+        return uid
+    digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:_UID_HASH_CHARS]
+    # 留出分隔符与 '#' 的位置；platform 来自 catalog，最长 32 字，这里只是兜底
+    budget = ITEM_UID_MAX_CHARS - len(platform) - 2 - _UID_HASH_CHARS
+    return f"{platform}\x1f{norm[:max(0, budget)]}#{digest}"
+
 
 def now_stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -270,7 +308,11 @@ def _ingest(db: Session, day: str, rows: list[dict], captured_at: str) -> list[d
         if not norm:
             continue
         platform = row.get("platform") or ""
-        uid = platform + "\x1f" + norm
+        # 身份键用**完整**归一化标题（超长时取前缀+哈希），落库字段按列宽裁剪：
+        # 酷安/微信热文的标题可能是整段正文，直接入库会 StringDataRightTruncation。
+        uid = make_item_uid(platform, norm)
+        title = _clip(title, TITLE_MAX_CHARS)
+        norm = _clip(norm, TITLE_MAX_CHARS)
         rank = row.get("rank")
         hot = row.get("hot")
         hot = hot if isinstance(hot, int) and hot > 0 else None

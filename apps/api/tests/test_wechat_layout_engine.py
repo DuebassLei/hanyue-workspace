@@ -142,8 +142,9 @@ def test_invalid_style_and_theme_fall_back():
 
 def test_unknown_card_kind_does_not_crash():
     out = engine.render_svg_card("svg-nope", "示例", [])
-    assert out["html"] == ""
-    assert out["warnings"]
+    assert out["html"], "未知卡种也要回退成可读代码框"
+    assert "background:#0B0B0C" in out["html"]
+    assert "TypeError" in out["warnings"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +159,7 @@ def test_unknown_card_kind_does_not_crash():
         ("svg-compare", []),
         ("svg-table", []),
         ("svg-bars", []),
+        ("svg-bars", ["只有名字"]),
         ("svg-concept", ["只有一句话"]),
         ("svg-phone", ["只有副标题"]),
     ],
@@ -165,7 +167,7 @@ def test_unknown_card_kind_does_not_crash():
 def test_bad_format_degrades_to_code_box(kind, lines):
     out = engine.render_svg_card(kind, "示例", lines)
     assert out["warnings"], "malformed input must produce a warning"
-    assert "<pre" in out["html"]
+    assert "background:#0B0B0C" in out["html"]
     assert "<svg" not in out["html"]
     safe(out["html"])
 
@@ -178,7 +180,7 @@ def test_bad_format_degrades_to_code_box(kind, lines):
 def test_check_banner_catches_poster_overlength():
     spec = {
         "style": "poster",
-        "poster": {"eyebrow": "眉" * 11, "title1": "标" * 9, "title2": "副" * 9, "big": "大" * 3},
+        "poster": {"eyebrow": "眉" * 11, "title1": "标" * 9, "title2": "副" * 9, "big": "大" * 3, "right": "stat"},
     }
     warnings = engine.check_banner(spec)
     assert len(warnings) == 4
@@ -187,20 +189,22 @@ def test_check_banner_catches_poster_overlength():
 
 def test_check_banner_catches_card_overlength():
     warnings = engine.check_banner(
-        {"style": "card", "card": {"eyebrow": "眉" * 11, "title": "标" * 13, "subtitle": "副" * 17}}
+        {"style": "card", "card": {"eyebrow": "眉" * 16, "title1": "标" * 10, "title2": "副" * 10, "sub": "词" * 21}}
     )
-    assert len(warnings) == 3
+    assert len(warnings) == 4
 
 
 def test_check_banner_unknown_style_and_bad_spec():
-    assert any("poster" in w for w in engine.check_banner({"style": "mystery"}))
+    # 非 poster/neo/card 会走参考实现的场景模板自检分支（scene 渲染未移植）
+    assert any("场景模板" in w for w in engine.check_banner({"style": "mystery"}))
     assert engine.check_banner("not a dict")
 
 
 @pytest.mark.parametrize("theme", ["orange", "blue", "teal", "__bad__"])
 @pytest.mark.parametrize("spec", [
-    {"style": "poster", "poster": {"eyebrow": "开篇", "title1": "你好", "title2": "世界", "big": "新"}},
-    {"style": "card", "card": {"eyebrow": "导语", "title": "标题", "subtitle": "副标题"}},
+    {"style": "poster", "poster": {"eyebrow": "开篇", "title1": "你好", "title2": "世界", "big": "新",
+                                   "right": "flow", "ask": "帮我排好", "result": "排好了"}},
+    {"style": "card", "card": {"eyebrow": "导语", "title1": "标题", "title2": "副题", "sub": "副标题"}},
 ])
 def test_render_banner_is_wechat_safe(spec, theme):
     out = engine.render_banner(spec, theme=theme)

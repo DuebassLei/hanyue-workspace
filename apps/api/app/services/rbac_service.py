@@ -71,6 +71,7 @@ MENU_SEED: tuple[MenuSeed, ...] = (
         (
             # 跨类型的入口留在顶级：创作空间是编辑枢纽，提示词库被文章/图片共用
             _page("studio", "创作空间", "创作", "studio", "studio.use"),
+            _page("paper", "成稿台", "成稿", "paper", "studio.use"),
             _page("prompts", "提示词库", "提示词", "prompts", "prompts.use"),
             _group(
                 "group-articles",

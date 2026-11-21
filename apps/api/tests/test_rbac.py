@@ -721,6 +721,7 @@ def test_workspace_menu_split_into_three_groups(client):
 
     assert [item["name"] for item in workspace["items"]] == [
         "studio",
+        "paper",
         "prompts",
         "group-articles",
         "group-images",
@@ -794,13 +795,14 @@ def test_workspace_groups_migration_reparents_legacy_menus(client):
                 page = db.scalar(select(models.Menu).where(models.Menu.menu_key == key))
                 assert page.parent_id == group.id
 
-        # 创作空间、提示词库仍留在顶级，且排在三个分类之前
+        # 创作空间、成稿台、提示词库仍留在顶级，且排在三个分类之前
         top = db.scalars(
             select(models.Menu)
             .where(models.Menu.parent_id == workspace.id)
             .order_by(models.Menu.sort)
         ).all()
-        assert [menu.menu_key for menu in top[:2]] == ["studio", "prompts"]
+        # 成稿台与创作空间同属「创作」入口，留在顶级并排在分类之前
+        assert [menu.menu_key for menu in top[:3]] == ["studio", "paper", "prompts"]
 
 
 def test_storyboards_move_from_videos_to_images(client):

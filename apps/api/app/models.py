@@ -776,10 +776,13 @@ class HotItem(Base, TimestampMixin):
     __tablename__ = "hot_items"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # 身份键不要直接拼完整标题：部分源（酷安/微信热文）的标题是整段正文，
+    # 拼出来会超 255 让整轮采集 500。入库前统一走 hot_topics.make_item_uid。
     item_uid: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     day: Mapped[str] = mapped_column(String(10), index=True)
     platform: Mapped[str] = mapped_column(String(32), index=True)
     rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 超长标题由 hot_topics._clip 按列宽裁剪（title/title_norm 同为 VARCHAR(300)）
     title: Mapped[str] = mapped_column(String(300))
     title_norm: Mapped[str] = mapped_column(String(300), index=True)
     hot: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1505,3 +1508,99 @@ class AnalysisTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
+
+
+# ---------------- 成稿台：段落级编辑编排 ----------------
+#
+# 与 ContentVersion 的区别：ContentVersion 是「整篇快照」，用于发布与历史版本；
+# 这里的 StudioArticle 是「可编辑工作副本」，正文拆成有稳定 id 的段落，
+# 对话改稿、标红修复、撤销都只落到具体段落上，改一段不会碰到别的段。
+#
+# article_blocks 存当前段落；article_revisions 存每次改动前的快照（撤销与版本对比用）。
+# 段落 id 在增删改之间保持不变，版本对比才能按 id 对齐，而不是按位置。
+
+
+class StudioArticle(Base, TimestampMixin):
+    """成稿台稿件：选题/素材 + 拆分后的段落 + 改稿对话 + 质检轮次。"""
+
+    __tablename__ = "studio_articles"
+    __table_args__ = (Index("ix_studio_articles_owner_archived", "owner_user_id", "archived"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True)
+    content_item_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("content_items.id", ondelete="SET NULL"), nullable=True)
+
+    topic: Mapped[str] = mapped_column(String(400), default="")
+    material: Mapped[str] = mapped_column(Text, default="")
+    front: Mapped[str] = mapped_column(Text, default="")
+    title: Mapped[str] = mapped_column(String(200), default="")
+    # 标题钩子：A 自我打脸 / B 反转 / C 被求助 / D 技术发现 / other
+    hook: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # [{"text": "...", "hook": "C", "recommended": true, "reason": "..."}]
+    titles: Mapped[list] = mapped_column(JSONBDoc, default=list)
+    summary: Mapped[str] = mapped_column(Text, default="")
+
+    # 开头横幅：风格 + 每种风格各自的规格（切回旧风格不必重做）
+    banner_style: Mapped[str] = mapped_column(String(24), default="poster")
+    banners: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 排版工作台选项（复用 LayoutView 的 studioOptions 结构）
+    layout_options: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    follow_card: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+    # 朱雀质检：{"round": 1, "lastAt": "...", "overall": {...}, "flagged": 3, "passed": 8, "source": "api"}
+    zhuque: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 对话记录：[{"role": "user"|"assistant", "text": "...", "receipts": [...], "at": "..."}]
+    chat: Mapped[list] = mapped_column(JSONBDoc, default=list)
+    # 一次性提示条，前端读完清空
+    notice: Mapped[dict | None] = mapped_column(JSONBDoc, nullable=True)
+    # 封面与正文插图（结构与 dsh 一致，图片实体仍走既有 assets/ai_images）
+    cover: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    inline_diagrams: Mapped[list] = mapped_column(JSONBDoc, default=list)
+
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    publish_marked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_view: Mapped[str] = mapped_column(String(16), default="paper")
+
+    blocks: Mapped[list["ArticleBlock"]] = relationship(
+        back_populates="article", cascade="all, delete-orphan", order_by="ArticleBlock.ordinal"
+    )
+
+
+class ArticleBlock(Base):
+    """稿件的一段正文。id 稳定，序号只表示当前顺序。"""
+
+    __tablename__ = "article_blocks"
+    __table_args__ = (Index("ix_article_blocks_article_ordinal", "article_id", "ordinal"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    article_id: Mapped[str] = mapped_column(String(32), ForeignKey("studio_articles.id", ondelete="CASCADE"), index=True)
+    ordinal: Mapped[int] = mapped_column(Integer, default=0)
+    text: Mapped[str] = mapped_column(Text, default="")
+    kind: Mapped[str] = mapped_column(String(16), default="para")
+    # 质检结论：{"status": "flag"|"pass"|"fixed", "score": 0.87, "level": "ai"|"suspect",
+    #           "source": "api"|"pdf"|"local", "round": 1, "fixes": 1, "worse": false}
+    check: Mapped[dict | None] = mapped_column(JSONBDoc, nullable=True)
+    # 改写前的原文，供「退回上一版」使用
+    prev_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 若这一段是正文插图插入产生的图片块，记插图 id，便于插图删除时反查
+    inserted_diagram_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    article: Mapped[StudioArticle] = relationship(back_populates="blocks")
+
+
+class ArticleRevision(Base):
+    """改动前的快照。撤销与「改了什么」都从这里读。"""
+
+    __tablename__ = "article_revisions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    article_id: Mapped[str] = mapped_column(String(32), ForeignKey("studio_articles.id", ondelete="CASCADE"), index=True)
+    label: Mapped[str] = mapped_column(String(120), default="")
+    # {"title": "...", "hook": "...", "titles": [...], "blocks": [{"id","text","check","prev_text"}]}
+    payload: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
