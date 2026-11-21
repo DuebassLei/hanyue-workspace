@@ -14,13 +14,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
+import ipaddress
 import math
 import re
 import unicodedata
 
 import httpx
 
+from ..core.deps import ApiError
+from ..core.ssrf import UnsafeUrl, pin_url, validate_base_url
 from .article_blocks import is_checkable, plain_of
 
 # 朱雀 API：通过腾讯云 EdgeOne Makers 的内置模型 @makers/zhuque-text 检测文本。
@@ -43,14 +47,28 @@ class QualityError(Exception):
 
 
 def check_endpoint(value: str) -> str:
-    """密钥会随请求发到这个地址，所以只允许 https。"""
+    """携带密钥的质检端点：HTTPS + 统一 SSRF 校验，不开放本机模型例外。"""
     from urllib.parse import urlsplit
 
-    parts = urlsplit(str(value or ""))
-    if not parts.scheme or not parts.netloc:
-        raise QualityError("接口地址不是有效的网址", 400)
-    if parts.scheme != "https":
-        raise QualityError("接口地址必须以 https:// 开头", 400)
+    try:
+        parts = urlsplit(str(value or ""))
+        if not parts.scheme or not parts.netloc:
+            raise UnsafeUrl("接口地址不是有效的网址")
+        if parts.scheme != "https":
+            raise UnsafeUrl("接口地址必须以 https:// 开头")
+        host = (parts.hostname or "").lower().rstrip(".")
+        # core.ssrf 为本机模型显式放行环回地址；质检端点来自普通用户，不适用该例外。
+        if host in {"localhost", "localhost.localdomain"}:
+            raise UnsafeUrl("禁止访问本机地址")
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            ip = None
+        if ip is not None and ip.is_loopback:
+            raise UnsafeUrl("禁止访问本机地址")
+        validate_base_url(str(value))
+    except (UnsafeUrl, ValueError) as exc:
+        raise ApiError("unsafe_endpoint", f"质检接口地址不安全：{exc}", 400) from exc
     return str(value)
 
 
@@ -62,13 +80,22 @@ async def detect(text: str, *, key: str, endpoint: str | None = None) -> dict:
         raise QualityError("没有可以检测的文字", 400)
     url = check_endpoint(endpoint or DEFAULT_ENDPOINT)
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
+        # 请求前解析并校验 DNS，把连接固定到校验过的 IP（防 rebinding），不跟随重定向
+        target, pinned_headers, extensions = await asyncio.to_thread(pin_url, url)
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, follow_redirects=False) as client:
             response = await client.post(
-                url,
-                headers={"content-type": "application/json", "authorization": f"Bearer {key}"},
+                target,
+                headers={
+                    "content-type": "application/json",
+                    "authorization": f"Bearer {key}",
+                    **pinned_headers,
+                },
+                extensions=extensions,
                 # is_merge=false 才会逐段给结果；合并模式整篇只有一个结论，没法定位到段落
                 json={"text": text, "is_merge": False},
             )
+    except UnsafeUrl as exc:
+        raise ApiError("unsafe_endpoint", f"质检接口地址不安全：{exc}", 400) from exc
     except httpx.TimeoutException as exc:
         raise QualityError("朱雀接口超时，稍后再试") from exc
     except httpx.HTTPError as exc:

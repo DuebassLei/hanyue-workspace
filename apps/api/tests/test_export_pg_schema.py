@@ -69,27 +69,12 @@ def test_committed_schema_is_in_sync_with_models():
     )
 
 
-def test_schema_seeds_bootstrap_admin():
-    """生成物必须包含引导超管账号种子：角色、用户、绑定三段齐全且幂等。"""
-    from scripts.export_pg_schema import ADMIN_EMAIL, ADMIN_SUBJECT, build_admin_seed
-
+def test_schema_does_not_seed_bootstrap_credentials():
+    """结构导出不得写入可登录的固定口令账号或绑定。"""
     out = _generate()
-    assert "INSERT INTO roles" in out and "'superadmin'" in out
-    assert f"INSERT INTO users" in out and ADMIN_SUBJECT in out
-    assert "INSERT INTO user_roles" in out
-    assert out.count("ON CONFLICT (auth_subject) DO NOTHING;") == 1
-    assert out.count("ON CONFLICT (role_key) DO NOTHING;") == 1
-
-    # 种子里的哈希必须能被应用侧 verify_password 验证通过（否则登录不了）
-    seed = build_admin_seed()
-    hash_line = next(
-        line.strip().rstrip(",")
-        for line in seed.splitlines()
-        if line.strip().startswith("'scrypt$")
-    )
-    from app.core.security import verify_password
-
-    assert verify_password("Ztesoft_1234", hash_line.strip("'")), (
-        "引导超管的 scrypt 哈希与初始密码不匹配，登录会失败"
-    )
-    assert ADMIN_EMAIL in seed
+    assert "INSERT INTO users" not in out
+    assert "INSERT INTO roles" not in out
+    assert "INSERT INTO user_roles" not in out
+    assert "bootstrap_admin" not in out
+    assert "password:1130122701@qq.com" not in out
+    assert "scrypt$" not in out
