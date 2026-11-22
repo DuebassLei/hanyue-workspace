@@ -29,12 +29,14 @@ from .modules import (
     models_module,
     originality,
     originality_reports,
+    pet_chat,
     platform_auth,
     preferences,
     prompts,
     publishing,
     rbac,
     script_schedules,
+    skill_center,
     skills,
     novels,
     schedules,
@@ -48,11 +50,10 @@ from .modules import (
     topics,
     wechat_mp,
     workspaces,
-    writing_rules,
 )
 from .services import handdraw as handdraw_import
 from .services import originality_service
-from .services import rbac_service, scheduled_tasks, scheduler, skill_registry, writing_rules_factory
+from .services import rbac_service, scheduled_tasks, scheduler, skill_registry
 
 settings = get_settings()
 configure_logging(settings)
@@ -66,8 +67,6 @@ async def lifespan(app: FastAPI):
         # RBAC 播种：补权限点/内置角色/菜单，并保证存量用户至少有一个角色
         rbac_service.seed(session)
         handdraw_import.import_library(session)
-        # 出厂规则导入（缺什么建什么，R3）先于内置条目同步；读接口不再承担写库/迁移职责
-        writing_rules_factory.import_factory(session)
         skill_registry.sync_builtin_skills(session)
         # 出厂配图风格：固化封面模板，Studio 的封面模板下拉开箱即用
         image_styles.seed_factory_styles(session)
@@ -166,7 +165,8 @@ for module in (
     script_schedules,
     schedules,
     rbac,
-    writing_rules,
+    skill_center,
+    pet_chat,
 ):
     app.include_router(module.router, prefix=settings.api_prefix)
 

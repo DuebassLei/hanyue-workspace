@@ -534,7 +534,7 @@ onBeforeUnmount(() => {
           </n-form-item>
           <n-form-item label="启用">
             <n-switch v-model:value="form.enabled" />
-            <span class="field-hint">停用的提示词不会出现在创作空间的风格列表中。</span>
+            <span class="field-hint">停用的提示词不会出现在生成时的风格列表中。</span>
           </n-form-item>
         </div>
         <n-form-item label="正向提示词" class="prompt-editor-body">

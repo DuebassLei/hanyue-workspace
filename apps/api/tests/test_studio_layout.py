@@ -147,7 +147,8 @@ def test_render_options_returns_full_catalog(client):
 
     assert all({"id", "name", "desc"} <= set(item) for item in styles)
     assert all({"id", "name", "main", "soft", "tint"} <= set(item) for item in themes)
-    assert all({"id", "name", "lead"} <= set(item) for item in cards)
+    assert all({"id", "name", "lead", "previewHtml"} <= set(item) for item in cards)
+    assert all("<svg" in item["previewHtml"] for item in cards)
     assert "svg-steps" in {item["id"] for item in cards}
 
     banners = body["catalog"]["banners"]

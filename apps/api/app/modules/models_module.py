@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -41,6 +42,7 @@ def _model_out(
         model_code=entry.model_code,
         display_name=entry.display_name or entry.model_code,
         capabilities=entry.capabilities or [],
+        supported_image_sizes=image_provider.exact_image_sizes({"supportedImageSizes": (entry.options or {}).get("supportedImageSizes")}),
         enabled=entry.enabled,
         supports_streaming=entry.supports_streaming,
         connection_id=entry.connection_id,
@@ -255,6 +257,21 @@ def list_catalog(user: CurrentUser, db: DbSession) -> list[schemas.CatalogOut]:
     return [_model_out(row, db, default_id) for row in rows]
 
 
+def _validate_image_sizes(sizes: dict[str, str], capabilities: list[str]) -> dict[str, str]:
+    allowed = {"2.35:1", "16:9", "4:3", "1:1", "3:4", "9:16"}
+    if sizes and "image.generate" not in capabilities:
+        raise ApiError("invalid_image_sizes", "只有生图模型可以登记图片尺寸")
+    for ratio, size in sizes.items():
+        match = re.fullmatch(r"([1-9][0-9]{0,3})x([1-9][0-9]{0,3})", size)
+        if ratio not in allowed or not match:
+            raise ApiError("invalid_image_sizes", f"图片比例或尺寸格式不合法：{ratio}={size}")
+        width, height = map(int, match.groups())
+        rw, rh = map(float, ratio.split(":"))
+        if width * height > image_provider.MAX_PIXELS or abs(width / height - rw / rh) >= 0.001:
+            raise ApiError("invalid_image_sizes", f"尺寸 {size} 与比例 {ratio} 不符或超过像素限制")
+    return sizes
+
+
 @router.post("/models/catalog", response_model=schemas.CatalogOut, status_code=201, dependencies=_ADMIN_ONLY)
 def add_catalog(
     payload: schemas.CatalogIn, user: CurrentUser, db: DbSession
@@ -268,6 +285,7 @@ def add_catalog(
         display_name=payload.display_name or payload.model_code,
         capabilities=payload.capabilities,
         supports_streaming=payload.supports_streaming,
+        options={"supportedImageSizes": _validate_image_sizes(payload.supported_image_sizes, payload.capabilities)},
     )
     db.add(entry)
     db.commit()
@@ -287,6 +305,11 @@ def update_catalog(
     data = payload.model_dump(exclude_unset=True)
     if "model_code" in data and not str(data["model_code"] or "").strip():
         raise ApiError("invalid_model_code", "模型代号不能为空")
+    if "supported_image_sizes" in data:
+        sizes = data.pop("supported_image_sizes")
+        if sizes is None:
+            raise ApiError("invalid_image_sizes", "图片尺寸配置不能为 null，请用空对象清空")
+        entry.options = {**(entry.options or {}), "supportedImageSizes": _validate_image_sizes(sizes, data.get("capabilities") or entry.capabilities or [])}
     for key, value in data.items():
         setattr(entry, key, value)
     db.commit()

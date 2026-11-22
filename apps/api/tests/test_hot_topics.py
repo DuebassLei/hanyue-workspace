@@ -1,28 +1,47 @@
-"""热点选题：聚簇/评分纯函数 + 采集→聚簇→评分→成稿的完整链路。
+"""热点选题：聚簇/评分纯函数 + 入库 → 聚簇 → 评分 → 成稿的完整链路。
 
-采集一律走 monkeypatch，测试不打外网——外部榜单的可用性不该决定 CI 成败。
+采集不在服务端：每个平台一条定时任务，自己请求、自己解析，再调 ingest。
+所以这里不打外网，直接验 ingest 契约——外部榜单的可用性不该决定 CI 成败。
 """
 
 from __future__ import annotations
 
 PREFIX = "/api/v1"
-
-FIXTURE_ROWS = [
-    {"platform": "微博", "rank": 1, "title": "赵丽颖哄自己上班引热议", "hot": 1200000, "url": "https://s.weibo.com/1"},
-    {"platform": "知乎", "rank": 3, "title": "如何看待赵丽颖说自己每天哄自己上班？", "hot": None, "url": ""},
-    {"platform": "抖音", "rank": 2, "title": "赵丽颖哄自己上班", "hot": 9800000, "url": "https://www.douyin.com/hot/1"},
-    {"platform": "微博", "rank": 2, "title": "OpenAI 发布新一代推理模型，成本下降 40%", "hot": 900000, "url": ""},
-    {"platform": "百度", "rank": 1, "title": "多地官宣调整中小学上学时间", "hot": 500000, "url": ""},
-    {"platform": "微博", "rank": 5, "title": "网传某地一商场发生爆炸", "hot": 300000, "url": ""},
-    {"platform": "今日头条", "rank": 1, "title": "央行宣布降准0.5个百分点", "hot": 800000, "url": ""},
-    {"platform": "今日头条", "rank": 2, "title": "央行宣布降息0.5个百分点", "hot": 700000, "url": ""},
-]
+# 同一轮 ingest 共用一个采集时刻：评分基准固定，结果才可复现
+CAPTURED = "2026-11-13 11:00"
+DEFAULT_SOURCE = "https://example.com/hot"
 
 
 def _login(client, subject="hot-user"):
     response = client.post(f"{PREFIX}/auth/login", json={"subject": subject})
     assert response.status_code == 200, response.text
     return {"Authorization": f"Bearer {response.json()['token']}"}
+
+
+def _ingest(
+    client,
+    headers,
+    platform,
+    items,
+    *,
+    source_url=DEFAULT_SOURCE,
+    captured_at=CAPTURED,
+    date=None,
+):
+    """按固定格式入库一批。`date` 用来隔离各用例的数据（测试共用一个库）。"""
+    body = {
+        "platform": platform,
+        "sourceUrl": source_url,
+        "capturedAt": captured_at,
+        "items": items,
+    }
+    if date:
+        body["date"] = date
+    return client.post(f"{PREFIX}/hot-topics/ingest", json=body, headers=headers)
+
+
+def _clusters(client, headers, day):
+    return client.get(f"{PREFIX}/hot-topics/clusters?date={day}", headers=headers).json()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -154,115 +173,306 @@ def test_risk_flags_skip_unverified_when_multi_platform():
     assert multi_penalty > single_penalty
 
 
-# ══════════════════════════════════════════════════════════════════════
-# 接口链路
-# ══════════════════════════════════════════════════════════════════════
-
-def _patch_collect(monkeypatch, rows=None):
-    from app.services import hot_sources
-
-    payload = FIXTURE_ROWS if rows is None else rows
-
-    def fake_collect(platforms=None):
-        return [dict(row) for row in payload], ["fixture：%d 条" % len(payload)]
-
-    monkeypatch.setattr(hot_sources, "collect", fake_collect)
-
-
-def _patch_now(monkeypatch, stamp="2026-11-13 11:00"):
+def test_make_item_uid_is_stable_and_collision_free_for_long_titles():
     from app.services import hot_topics
 
-    monkeypatch.setattr(hot_topics, "now_stamp", lambda: stamp)
+    short = hot_topics.make_item_uid("微博", "赵丽颖哄自己上班")
+    assert short == "微博\x1f赵丽颖哄自己上班"
+
+    head = "甲" * 400
+    a = hot_topics.make_item_uid("酷安", head + "结尾一")
+    b = hot_topics.make_item_uid("酷安", head + "结尾二")
+    assert len(a) == hot_topics.ITEM_UID_MAX_CHARS
+    # 同一标题每次算出来必须一致，否则幂等失效
+    assert a == hot_topics.make_item_uid("酷安", head + "结尾一")
+    # 前缀相同、结尾不同的两条长帖必须是两个身份，不能被截断合并成一条
+    assert a != b
 
 
-def test_refresh_is_idempotent(client, monkeypatch):
-    monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
-    _patch_collect(monkeypatch)
-    _patch_now(monkeypatch)
-    headers = _login(client, "hot-refresh")
+# ══════════════════════════════════════════════════════════════════════
+# 入库契约
+# ══════════════════════════════════════════════════════════════════════
 
-    first = client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers)
+def test_ingest_rejects_missing_or_invalid_source_url(client):
+    """sourceUrl 必填且必须是 http/https 绝对地址：缺了整批 422，不入库。"""
+    headers = _login(client, "hot-contract")
+    body = {"platform": "微博", "items": [{"title": "某标题"}]}
+    missing = client.post(f"{PREFIX}/hot-topics/ingest", json=body, headers=headers)
+    assert missing.status_code == 422
+
+    for bad in ("", "   ", "weibo/hot", "ftp://example.com/hot", "javascript:alert(1)"):
+        response = client.post(
+            f"{PREFIX}/hot-topics/ingest",
+            json={**body, "sourceUrl": bad},
+            headers=headers,
+        )
+        assert response.status_code == 422, f"{bad!r} 应被拒绝"
+
+    blank_platform = client.post(
+        f"{PREFIX}/hot-topics/ingest",
+        json={"platform": "  ", "sourceUrl": DEFAULT_SOURCE, "items": []},
+        headers=headers,
+    )
+    assert blank_platform.status_code == 422
+
+
+def test_ingest_drops_blank_titles_without_failing_batch(client):
+    headers = _login(client, "hot-blank")
+    day = "2026-02-01"
+    response = _ingest(
+        client,
+        headers,
+        "微博-空标题",
+        [{"title": "   "}, {"title": ""}, {"title": "空标题不该让整批失败", "rank": 2}],
+        date=day,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["items"] == 1
+
+    rows = _clusters(client, headers, day)
+    assert len(rows) == 1
+    assert rows[0]["title"] == "空标题不该让整批失败"
+
+
+def test_second_platform_ingest_keeps_first_platform_items(client):
+    """先写平台 A 再写平台 B：A 的条目仍在，同一事件合成一个跨平台簇。
+
+    这是「按平台拆任务」的前提：后写入的一轮要读当天全部条目重算，
+    而不是只算自己这一批。
+    """
+    headers = _login(client, "hot-cross")
+    day = "2026-02-02"
+
+    first = _ingest(
+        client, headers, "微博-跨平台", [{"title": "某地宣布延长供暖期", "rank": 1}], date=day
+    )
     assert first.status_code == 200, first.text
-    first_body = first.json()
-    assert first_body["items"] == len(FIXTURE_ROWS)
-    # 赵丽颖 3 条合并成 1 个事件；其余 5 条各自成簇（降准/降息不合并）
-    assert first_body["clusters"] == 6
+    assert first.json()["clusters"] == 1
 
-    listed_first = client.get(f"{PREFIX}/hot-topics/clusters", headers=headers).json()
-    scores_first = {row["title"]: row["score"] for row in listed_first}
-
-    second = client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers)
+    second = _ingest(
+        client,
+        headers,
+        "知乎-跨平台",
+        [{"title": "如何看待某地宣布延长供暖期？", "rank": 3}],
+        date=day,
+    )
     assert second.status_code == 200, second.text
-    listed_second = client.get(f"{PREFIX}/hot-topics/clusters", headers=headers).json()
-    scores_second = {row["title"]: row["score"] for row in listed_second}
+    # 平台 B 入库后仍是同一个事件，不是两个
+    assert second.json()["clusters"] == 1
+    assert second.json()["matchedClusters"] == 1
+
+    rows = _clusters(client, headers, day)
+    assert len(rows) == 1
+    assert rows[0]["platformCount"] == 2
+    detail = client.get(
+        f"{PREFIX}/hot-topics/clusters/{rows[0]['id']}", headers=headers
+    ).json()
+    # 平台 A 的条目没有被后一轮挤掉
+    assert {item["platform"] for item in detail["items"]} == {"微博-跨平台", "知乎-跨平台"}
+
+
+def test_ingest_empty_items_keeps_existing_data(client):
+    headers = _login(client, "hot-empty-batch")
+    day = "2026-02-09"
+    assert _ingest(
+        client, headers, "微博-空批", [{"title": "某条保留的热点", "rank": 1}], date=day
+    ).status_code == 200
+
+    empty = _ingest(client, headers, "微博-空批", [], date=day)
+    assert empty.status_code == 200, empty.text
+    assert empty.json()["items"] == 0
+    # 空数组只表示「这轮没有条目」，不删除已入库数据
+    assert empty.json()["clusters"] == 1
+    assert len(_clusters(client, headers, day)) == 1
+
+
+def test_source_url_is_recorded_and_updates_per_platform(client):
+    headers = _login(client, "hot-source-url")
+    day = "2026-02-03"
+
+    assert _ingest(
+        client, headers, "微博-换源", [{"title": "某市发布新的落户政策", "rank": 1}],
+        source_url="https://feed.one/weibo", date=day,
+    ).status_code == 200
+    assert _ingest(
+        client, headers, "知乎-换源", [{"title": "某市落户新政有哪些细节", "rank": 2}],
+        source_url="https://feed.one/zhihu", date=day,
+    ).status_code == 200
+
+    def source_urls():
+        mapping = {}
+        for row in _clusters(client, headers, day):
+            detail = client.get(
+                f"{PREFIX}/hot-topics/clusters/{row['id']}", headers=headers
+            ).json()
+            for item in detail["items"]:
+                mapping[item["platform"]] = item["sourceUrl"]
+        return mapping
+
+    assert source_urls() == {
+        "微博-换源": "https://feed.one/weibo",
+        "知乎-换源": "https://feed.one/zhihu",
+    }
+
+    # 同一平台换采集地址：该平台条目跟着更新，其它平台不变
+    assert _ingest(
+        client, headers, "微博-换源", [{"title": "某市发布新的落户政策", "rank": 1}],
+        source_url="https://feed.two/weibo", date=day,
+    ).status_code == 200
+    assert source_urls() == {
+        "微博-换源": "https://feed.two/weibo",
+        "知乎-换源": "https://feed.one/zhihu",
+    }
+
+
+def test_reingest_does_not_reset_manual_status(client):
+    headers = _login(client, "hot-status-keep")
+    day = "2026-02-04"
+    assert _ingest(
+        client, headers, "微博-状态", [{"title": "某品牌发布新款手机", "rank": 1}], date=day
+    ).status_code == 200
+
+    cluster_id = _clusters(client, headers, day)[0]["id"]
+    patched = client.patch(
+        f"{PREFIX}/hot-topics/clusters/{cluster_id}",
+        json={"status": "watching"},
+        headers=headers,
+    )
+    assert patched.status_code == 200
+
+    # 下一轮入库（同平台、新增一条）会重算分数，但不能把人工状态改回 new
+    assert _ingest(
+        client,
+        headers,
+        "微博-状态",
+        [{"title": "某品牌发布新款手机", "rank": 2}, {"title": "某品牌新机开箱视频流出", "rank": 3}],
+        date=day,
+    ).status_code == 200
+
+    detail = client.get(
+        f"{PREFIX}/hot-topics/clusters/{cluster_id}", headers=headers
+    ).json()
+    assert detail["status"] == "watching"
+
+
+def test_over_long_title_is_clipped_and_uid_stays_within_column(client):
+    """超长「标题」（酷安/微信热文其实是整段正文）不能把整轮入库打成 500。
+
+    线上表现：item_uid 拼了完整归一化标题 → 超过 VARCHAR(255) →
+    StringDataRightTruncation，整批 500。
+    """
+    from app.services import hot_topics
+
+    headers = _login(client, "hot-long-title")
+    day = "2026-02-06"
+    long_title = "双十一在横道店买的k100promax，大伙儿都说他家后封，" + "手机屏幕有点弯曲，" * 40
+    response = _ingest(
+        client,
+        headers,
+        "酷安-长标题",
+        [{"title": long_title, "rank": 3, "url": "https://www.coolapk.com/feed/1"}],
+        date=day,
+    )
+    assert response.status_code == 200, response.text
+
+    from app.core.db import SessionLocal
+    from app.models import HotItem
+
+    db = SessionLocal()
+    try:
+        item = db.query(HotItem).filter(HotItem.platform == "酷安-长标题").one()
+        assert len(item.item_uid) <= hot_topics.ITEM_UID_MAX_CHARS
+        assert len(item.title) <= hot_topics.TITLE_MAX_CHARS
+        assert len(item.title_norm) <= hot_topics.TITLE_MAX_CHARS
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 重算 / 列表 / 详情 / 成稿
+# ══════════════════════════════════════════════════════════════════════
+
+def test_recalculate_is_idempotent(client, monkeypatch):
+    """重算只按已入库数据算分：连跑两次，分数与簇数完全一致。"""
+    monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
+    headers = _login(client, "hot-recalc")
+    day = "2026-02-10"
+
+    assert _ingest(
+        client, headers, "微博-重算", [{"title": "某地出台新的租房补贴政策", "rank": 1}], date=day
+    ).status_code == 200
+    assert _ingest(
+        client, headers, "百度-重算", [{"title": "租房补贴新政落地首日", "rank": 2}], date=day
+    ).status_code == 200
+
+    first = client.post(f"{PREFIX}/hot-topics/recalculate", json={"date": day}, headers=headers)
+    assert first.status_code == 200, first.text
+    scores_first = {row["title"]: row["score"] for row in _clusters(client, headers, day)}
+
+    second = client.post(f"{PREFIX}/hot-topics/recalculate", json={"date": day}, headers=headers)
+    assert second.status_code == 200, second.text
+    scores_second = {row["title"]: row["score"] for row in _clusters(client, headers, day)}
 
     assert scores_first == scores_second
     assert second.json()["newClusters"] == 0
 
 
-def test_refresh_rebuilds_membership_instead_of_accumulating(client, monkeypatch):
-    """掉榜的条目必须从簇里退出。
-
-    旧实现只给本轮条目写 cluster_id，不清理上一轮：一次误合并留下的成员会永远挂在
-    那张卡片上，itemCount 和详情成员数对不上，拆簇也拆不掉。
-    """
+def test_recalculate_without_data_returns_400(client, monkeypatch):
     monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
-    _patch_collect(monkeypatch)
-    _patch_now(monkeypatch)
-    headers = _login(client, "hot-membership")
-    assert client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers).status_code == 200
-
-    rows = client.get(f"{PREFIX}/hot-topics/clusters", headers=headers).json()
-    target = next(row for row in rows if "赵丽颖" in row["title"])
-    detail = client.get(f"{PREFIX}/hot-topics/clusters/{target['id']}", headers=headers).json()
-    assert len(detail["items"]) == 3
-
-    # 第二轮只剩微博一条赵丽颖（知乎、抖音已掉榜）
-    _patch_collect(monkeypatch, [FIXTURE_ROWS[0], FIXTURE_ROWS[3]])
-    assert client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers).status_code == 200
-
-    rows = client.get(f"{PREFIX}/hot-topics/clusters", headers=headers).json()
-    target = next(row for row in rows if "赵丽颖" in row["title"])
-    detail = client.get(f"{PREFIX}/hot-topics/clusters/{target['id']}", headers=headers).json()
-    assert target["itemCount"] == 1
-    assert [item["platform"] for item in detail["items"]] == ["微博"]
+    headers = _login(client, "hot-recalc-empty")
+    response = client.post(
+        f"{PREFIX}/hot-topics/recalculate", json={"date": "1999-01-01"}, headers=headers
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "no_hot_data"
 
 
-def test_cluster_list_detail_and_filters(client, monkeypatch):
-    monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
-    _patch_collect(monkeypatch)
-    _patch_now(monkeypatch)
+def test_cluster_list_detail_and_filters(client):
     headers = _login(client, "hot-list")
-    assert client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers).status_code == 200
+    day = "2026-02-07"
+    assert _ingest(
+        client, headers, "微博-列表",
+        [{"title": "赵丽颖哄自己上班引热议", "rank": 1, "hot": 1200000},
+         {"title": "OpenAI 发布新一代推理模型，成本下降 40%", "rank": 2, "hot": 900000}],
+        date=day,
+    ).status_code == 200
+    assert _ingest(
+        client, headers, "知乎-列表",
+        [{"title": "如何看待赵丽颖说自己每天哄自己上班？", "rank": 3}],
+        date=day,
+    ).status_code == 200
+    assert _ingest(
+        client, headers, "百度-列表", [{"title": "多地官宣调整中小学上学时间", "rank": 1}], date=day
+    ).status_code == 200
 
-    rows = client.get(f"{PREFIX}/hot-topics/clusters", headers=headers).json()
-    assert rows, "刷新后应该有簇"
+    rows = _clusters(client, headers, day)
+    assert len(rows) == 3
     # 默认按分数倒序
     assert [row["score"] for row in rows] == sorted(
         [row["score"] for row in rows], reverse=True
     )
-    top = rows[0]
-    assert top["title"] == "赵丽颖哄自己上班引热议"
-    assert top["platformCount"] == 3
-    assert top["grade"] == "强烈推荐"
+    top = next(row for row in rows if "赵丽颖" in row["title"])
+    assert top["platformCount"] == 2
+    assert top["grade"] in {"强烈推荐", "可做", "备用", "不建议"}
 
     # 平台筛选（JSON 数组元素）
     only_zhihu = client.get(
-        f"{PREFIX}/hot-topics/clusters?platform=知乎", headers=headers
+        f"{PREFIX}/hot-topics/clusters?date={day}&platform=知乎-列表", headers=headers
     ).json()
     assert [row["id"] for row in only_zhihu] == [top["id"]]
 
     # 赛道筛选
     ai_rows = client.get(
-        f"{PREFIX}/hot-topics/clusters?track=AI 与科技", headers=headers
+        f"{PREFIX}/hot-topics/clusters?date={day}&track=AI 与科技", headers=headers
     ).json()
     assert any("OpenAI" in row["title"] for row in ai_rows)
 
     detail = client.get(f"{PREFIX}/hot-topics/clusters/{top['id']}", headers=headers)
     assert detail.status_code == 200
     detail_body = detail.json()
-    assert len(detail_body["items"]) == 3
+    assert len(detail_body["items"]) == 2
     assert detail_body["items"][0]["platform"]
+    assert all(item["sourceUrl"] == DEFAULT_SOURCE for item in detail_body["items"])
     # 详情里要能看到评分证据，界面才能回答「凭什么给这个分」
     assert detail_body["scoreDetail"]["track"] == "娱乐与情感"
 
@@ -270,13 +480,13 @@ def test_cluster_list_detail_and_filters(client, monkeypatch):
     assert missing.status_code == 404
 
 
-def test_status_and_draft_flow(client, monkeypatch):
-    monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
-    _patch_collect(monkeypatch)
-    _patch_now(monkeypatch)
+def test_status_and_draft_flow(client):
     headers = _login(client, "hot-draft")
-    assert client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers).status_code == 200
-    rows = client.get(f"{PREFIX}/hot-topics/clusters", headers=headers).json()
+    day = "2026-02-08"
+    assert _ingest(
+        client, headers, "微博-成稿", [{"title": "某部电影周末票房破纪录", "rank": 1}], date=day
+    ).status_code == 200
+    rows = _clusters(client, headers, day)
     cluster_id = rows[0]["id"]
 
     # 还没有成稿，不允许手工标 generated
@@ -314,233 +524,71 @@ def test_status_and_draft_flow(client, monkeypatch):
     assert detail["contentItemId"] == item["id"]
 
 
-def test_summary_and_degraded(client, monkeypatch):
-    monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
-    _patch_collect(monkeypatch)
-    _patch_now(monkeypatch)
+def test_summary_and_degraded(client):
     headers = _login(client, "hot-summary")
-    assert client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers).status_code == 200
+    day = "2026-02-05"
+    assert _ingest(
+        client, headers, "微博-概要",
+        [{"title": "某地暴雨导致地铁停运", "rank": 1, "hot": 500000},
+         {"title": "某明星官宣新片", "rank": 2}],
+        date=day,
+    ).status_code == 200
 
-    summary = client.get(f"{PREFIX}/hot-topics/summary", headers=headers).json()
-    assert summary["items"] == len(FIXTURE_ROWS)
-    assert summary["clusters"] == 6
-    assert summary["recommended"] >= 1
-    assert summary["tracks"]
+    summary = client.get(
+        f"{PREFIX}/hot-topics/summary?date={day}", headers=headers
+    ).json()
+    assert summary["items"] == 2
+    assert summary["clusters"] == 2
+    assert summary["platforms"] == {"微博-概要": 2}
 
-    degraded = client.get(f"{PREFIX}/hot-topics/degraded", headers=headers).json()
+    degraded = client.get(
+        f"{PREFIX}/hot-topics/degraded?date={day}", headers=headers
+    ).json()
     dims = {row["dim"] for row in degraded}
-    # 只采集了一轮：升降与日内新鲜度都不可算
+    # 只入库了一轮：升降与日内新鲜度都不可算
     assert {"rise", "fresh", "hot"} <= dims
+    # 采集侧的降级说明已随内置采集一起删除
+    assert "source" not in dims
 
 
-def test_over_long_title_is_clipped_and_uid_stays_within_column(client, monkeypatch):
-    """超长「标题」（酷安/微信热文其实是整段正文）不能把整轮采集打成 500。
+def test_sources_endpoint_is_gone(client):
+    headers = _login(client, "hot-no-sources")
+    response = client.get(f"{PREFIX}/hot-topics/sources", headers=headers)
+    assert response.status_code == 404
 
-    线上表现：item_uid 拼了完整归一化标题 → 超过 VARCHAR(255) →
-    StringDataRightTruncation，refresh 直接 500。
-    """
+
+def test_dashboard_exposes_hot_highlights(client):
     from app.services import hot_topics
 
-    monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
-    long_title = "双十一在横道店买的k100promax，大伙儿都说他家后封，" + "手机屏幕有点弯曲，" * 40
-    _patch_collect(monkeypatch, [
-        {"platform": "酷安", "rank": 3, "title": long_title, "url": "https://www.coolapk.com/feed/1"},
-    ])
-    _patch_now(monkeypatch)
-    headers = _login(client, "hot-long-title")
+    headers = _login(client, "hot-dashboard")
+    assert _ingest(
+        client, headers, "微博-首页", [{"title": "某地发布高温红色预警", "rank": 1}],
+        date=hot_topics.today_str(),
+    ).status_code == 200
 
-    response = client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers)
-    assert response.status_code == 200, response.text
-
-    from app.core.db import SessionLocal
-    from app.models import HotItem
-
-    db = SessionLocal()
-    try:
-        item = db.query(HotItem).filter(HotItem.platform == "酷安").one()
-        assert len(item.item_uid) <= hot_topics.ITEM_UID_MAX_CHARS
-        assert len(item.title) <= hot_topics.TITLE_MAX_CHARS
-        assert len(item.title_norm) <= hot_topics.TITLE_MAX_CHARS
-    finally:
-        db.close()
+    payload = client.get(f"{PREFIX}/dashboard", headers=headers).json()
+    highlights = payload["hotHighlights"]
+    assert highlights["topics"]
+    assert highlights["topics"][0]["title"]
+    assert "score" in highlights["topics"][0]
+    assert "grade" in highlights["topics"][0]
 
 
-def test_make_item_uid_is_stable_and_collision_free_for_long_titles():
+def test_inspiration_panel_reads_clusters(client):
+    """创作空间「灵感」面板只读已评分簇，不再回落抓外网。"""
     from app.services import hot_topics
 
-    short = hot_topics.make_item_uid("微博", "赵丽颖哄自己上班")
-    assert short == "微博\x1f赵丽颖哄自己上班"
+    headers = _login(client, "hot-inspiration")
+    title = "某地试行四天半工作制"
+    assert _ingest(
+        client, headers, "微博-灵感", [{"title": title, "rank": 1}],
+        date=hot_topics.today_str(),
+    ).status_code == 200
 
-    head = "甲" * 400
-    a = hot_topics.make_item_uid("酷安", head + "结尾一")
-    b = hot_topics.make_item_uid("酷安", head + "结尾二")
-    assert len(a) == hot_topics.ITEM_UID_MAX_CHARS
-    # 同一标题每次算出来必须一致，否则幂等失效
-    assert a == hot_topics.make_item_uid("酷安", head + "结尾一")
-    # 前缀相同、结尾不同的两条长帖必须是两个身份，不能被截断合并成一条
-    assert a != b
+    panel = client.get(f"{PREFIX}/hot-topics", headers=headers).json()
+    assert panel
+    assert all(row["source"] == "热点选题" for row in panel)
 
-
-def test_all_sources_failed_returns_502(client, monkeypatch):
-    monkeypatch.setenv("HOT_TOPICS_REFRESH_COOLDOWN", "0")
-    from app.services import hot_sources
-
-    def boom(platforms=None):
-        raise hot_sources.HotSourcesError("所有热点源都不可用：fixture")
-
-    monkeypatch.setattr(hot_sources, "collect", boom)
-    headers = _login(client, "hot-fail")
-
-    response = client.post(f"{PREFIX}/hot-topics/refresh", json={}, headers=headers)
-    assert response.status_code == 502
-    # ApiError 的 handler 直接把 detail 作为响应体，没有再包一层 "detail"
-    assert response.json()["code"] == "all_sources_failed"
-
-
-def test_sources_endpoint(client):
-    headers = _login(client, "hot-sources")
-    payload = client.get(f"{PREFIX}/hot-topics/sources", headers=headers).json()
-    assert payload["platforms"]
-    assert "微博" in payload["enabled"]
-    # 灵感雷达移植进来的四路：AIHOT 热点/日报、微信爆文池、微信文章搜索
-    names = {row["platform"] for row in payload["platforms"]}
-    assert {"AIHOT 热点与早报", "AIHOT 日报", "微信 10w+ 爆文池", "微信文章搜索"} <= names
-
-
-def test_aihot_agent_markdown_parsing():
-    from app.services.hot_sources import _rows_aihot_agent
-
-    hot = _rows_aihot_agent(
-        "AIHOT 热点与早报",
-        "第 1 名：[OpenAI 发布新模型](https://example.com/a)\n"
-        "   信源：The Verge、TechCrunch\n"
-        "   来龙去脉：https://aihot.news/story/1\n"
-        "第 2 名：[国产芯片量产](https://example.com/b)\n"
-        "   信源：IT之家\n",
-        "hot",
-    )
-    assert [row["title"] for row in hot] == ["OpenAI 发布新模型", "国产芯片量产"]
-    assert hot[0]["hot"] == 2
-    assert hot[0]["url"] == "https://example.com/a"
-
-    daily = _rows_aihot_agent(
-        "AIHOT 日报",
-        "【模型】\n1. [某模型开源](https://example.com/c) · 某博客\n   模型权重已公开。\n",
-        "daily",
-    )
-    assert daily[0]["title"] == "某模型开源"
-    assert daily[0]["rank"] == 1
-
-
-def test_wechat_10w_snapshot_parsing():
-    from app.services.hot_sources import _rows_wechat_10w
-
-    rows = _rows_wechat_10w({
-        "articles": [
-            {"title": "为什么你总是存不下钱", "userName": "某账号", "clicksCount": "10w+",
-             "oriUrl": "https://mp.weixin.qq.com/s/abc"},
-            {"title": ""},
-        ]
-    })
-    assert len(rows) == 1
-    assert rows[0]["platform"] == "微信 10w+ 爆文池"
-    assert rows[0]["title"].startswith("某账号｜")
-    assert rows[0]["hot"] == 100000
-    assert rows[0]["url"].startswith("https://mp.weixin.qq.com/")
-
-
-def test_wechat_search_html_parsing():
-    from app.services.hot_sources import _rows_wechat_search
-
-    html = (
-        '<a href="/link?url=AAA" target="_blank">为什么年轻人开始<font>反向消费</font></a>'
-        '<a href="/link?url=BBB">短</a>'
-    )
-    rows = _rows_wechat_search(html)
-    assert len(rows) == 1
-    assert rows[0]["title"] == "为什么年轻人开始反向消费"
-    assert rows[0]["url"] == "https://weixin.sogou.com/link?url=AAA"
-    assert _rows_wechat_search("<html></html>") == []
-
-
-def test_clean_url_strips_tracking_and_caps_length():
-    """今日头条热榜 Url 带 800+ 字符的 log_pb 追踪参数，曾撑爆 VARCHAR(500)。"""
-    from app.services.hot_sources import URL_MAX_LENGTH, _clean_url
-
-    tracking = "&".join(f"p{i}={'x' * 40}" for i in range(20))
-    long_url = f"https://www.toutiao.com/trending/7708571384561074203/?{tracking}"
-    assert _clean_url(long_url) == "https://www.toutiao.com/trending/7708571384561074203/"
-
-    # 去参也救不回来的，硬截到列宽以内，不能让入库炸掉
-    monster = "https://example.com/" + "A" * 600
-    assert len(_clean_url(monster)) == URL_MAX_LENGTH
-
-    # 没超限的 URL 必须原样保留——搜狗 /link?url= 的载荷就在查询串里
-    sogou = "https://weixin.sogou.com/link?url=AAA&_ast=123"
-    assert _clean_url(sogou) == sogou
-
-
-def test_uapi_hotboard_parsing():
-    from app.services.hot_sources import _rows_uapi, _uapi_hot_value
-
-    # hot_value 是自由格式字符串，要归一成 int；多指标串宁缺毋滥给 None
-    assert _uapi_hot_value("472995播放") == 472995
-    assert _uapi_hot_value("热度:549") == 549
-    assert _uapi_hot_value("1,234.5万") == 12345000
-    assert _uapi_hot_value("评论:6 点赞:17") is None
-    assert _uapi_hot_value("") is None
-
-    rows = _rows_uapi("B站", {
-        "type": "bilibili",
-        "list": [
-            {"index": 1, "title": "某视频标题", "hot_value": "472995播放",
-             "url": "https://www.bilibili.com/video/BV1"},
-            {"index": 2, "title": "", "hot_value": "1", "url": ""},
-        ],
-    })
-    assert len(rows) == 1
-    assert rows[0]["hot"] == 472995
-    assert rows[0]["url"] == "https://www.bilibili.com/video/BV1"
-
-
-def test_openrank_html_parsing():
-    from app.services.hot_sources import _rows_openrank
-
-    def item(rank, title, key, stars, forks, delta):
-        return (
-            f'<article class="ornav-repo ready" data-orank-target-url="/zh-cn/repo/{key}.html">'
-            f'<div class="ornav-rank">{rank}</div>'
-            f'<h3><a href="/zh-cn/repo/{key}.html">{title}</a></h3>'
-            '<span class="ornav-repo-stat-icon"><svg><use href="/x.svg#orank-icon-star"/>'
-            f'</svg></span><strong><bdi dir="ltr">{stars}</bdi></strong><small>Stars</small>'
-            '<span class="ornav-repo-stat-icon"><svg><use href="/x.svg#orank-icon-fork"/>'
-            f'</svg></span><strong><bdi dir="ltr">{forks}</bdi></strong><small>Forks</small>'
-            f'<strong class="up"><bdi dir="ltr">+{delta}</bdi></strong><small>7 日增长</small>'
-            "</article>"
-        )
-
-    html = item(1, "REA：逆向工程工具层", "morluto-rea", "465,369", "113,902", 16640) + item(
-        2, "某项目", "foo-bar", "1,000", "10", 50
-    )
-    rows = _rows_openrank("开源榜·每周飙升", html)
-    assert [row["title"] for row in rows] == ["REA：逆向工程工具层", "某项目"]
-    # 热度取增长数，不能错抓成 Stars/Forks（Star 总数当热度会让老仓库永远霸榜）
-    assert rows[0]["hot"] == 16640
-    assert rows[0]["url"] == "https://kaiyuanbang.cn/zh-cn/repo/morluto-rea.html"
-    assert _rows_openrank("开源榜·每周飙升", "<html></html>") == []
-
-
-def test_wechat_search_skipped_without_keyword(monkeypatch):
-    """没配关键词时跳过而不是报失败，其余源照常返回。"""
-    from app.services import hot_sources
-
-    monkeypatch.delenv("HOT_TOPICS_WECHAT_KEYWORD", raising=False)
-
-    def refuse(url, headers, retries=1):
-        raise AssertionError(f"不该请求外网：{url}")
-
-    monkeypatch.setattr(hot_sources, "_fetch_json", refuse)
-    monkeypatch.setattr(hot_sources.ssrf, "safe_request", refuse)
-    rows, notes = hot_sources.collect(["微信文章搜索"])
-    assert rows == []
-    assert any("未配置关键词" in note for note in notes)
+    status = client.get(f"{PREFIX}/hot-topics/status", headers=headers).json()
+    assert status["configured"] is True
+    assert "微博-灵感" in status["note"]

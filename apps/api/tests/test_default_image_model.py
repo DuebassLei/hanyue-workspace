@@ -72,6 +72,33 @@ def no_env_image_provider(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+def test_image_size_registration_preserves_other_options_and_validates(client):
+    from app import models
+    from app.core.db import SessionLocal
+
+    headers = _headers(client, "image-size-registration")
+    conn = _connection(client, headers, "生图尺寸")
+    model = _catalog(client, headers, conn, "image-test", ["image.generate"])
+    assert model["supportedImageSizes"] == {}
+    with SessionLocal() as db:
+        entry = db.get(models.ModelCatalogEntry, model["id"])
+        entry.options = {"supportsSeed": True}
+        db.commit()
+    endpoint = f"{PREFIX}/models/catalog/{model['id']}"
+    saved = client.patch(endpoint, json={"supportedImageSizes": {"1:1": "1024x1024"}}, headers=headers)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["supportedImageSizes"] == {"1:1": "1024x1024"}
+    with SessionLocal() as db:
+        assert db.get(models.ModelCatalogEntry, model["id"]).options["supportsSeed"] is True
+    for invalid in ({"16:9": "1536x1024"}, {"1:1": "0x0"}, {"unknown": "1024x1024"}):
+        response = client.patch(endpoint, json={"supportedImageSizes": invalid}, headers=headers)
+        assert response.status_code == 400, response.text
+    capabilities = client.get(f"{PREFIX}/studio/image-capabilities", headers=headers)
+    assert capabilities.json()["ratios"] == ["1:1"]
+    cleared = client.patch(endpoint, json={"supportedImageSizes": {}}, headers=headers)
+    assert cleared.json()["supportedImageSizes"] == {}
+
+
 def test_switch_default_image_model_takes_effect(client):
     headers = _headers(client, "img-default")
     conn_a = _connection(client, headers, "生图A")

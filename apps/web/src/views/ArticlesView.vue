@@ -2,7 +2,7 @@
 /**
  * 文章管理（我的稿件）：独立的稿件检索/管理页，编辑器逻辑仍留在 StudioView。
  *
- * - 列表走 GET /content?fields=list + api.getPage() 真 keyset 分页，取消创作空间侧栏的 200 篇硬上限。
+ * - 列表走 GET /content?fields=list + api.getPage() 真 keyset 分页，取消旧创作空间侧栏的 200 篇硬上限。
  * - 搜索/状态/平台/时间/归档/排序全部是服务端筛选，并同步到 URL query（刷新、分享、后退可复现）。
  * - 状态列复用 publish_jobs.status：按 contentItemId 联查，无 publishing.view 时置灰降级，不报错。
  */
@@ -214,8 +214,21 @@ function toggleSelect(id, checked) {
     : selected.value.filter((item) => item !== id)
 }
 
-function openRow(row) {
-  router.push({ name: 'studio', query: { id: row.id } })
+/**
+ * 「进入成稿台」：文章管理是稿件库，点开就是要接着改稿，而成稿台是按段落改的，
+ * 整篇编辑已随创作空间下线，这里统一进成稿台。
+ * 同一条稿件已经有成稿台稿时后端直接返回那一篇，不会越点越多。
+ */
+async function enterStudio(row) {
+  rowBusyId.value = row.id
+  try {
+    const paper = await api.post(`/studio/articles/from-content/${encodeURIComponent(row.id)}`)
+    await router.push({ name: 'paper', query: { id: paper.id } })
+  } catch (err) {
+    toast(`打不开成稿台：${err.message}`, 'error')
+  } finally {
+    rowBusyId.value = ''
+  }
 }
 
 async function openLayout(row) {
@@ -238,7 +251,7 @@ async function createArticle() {
   creating.value = true
   try {
     const created = await api.post('/content', { title: '未命名稿件' })
-    router.push({ name: 'studio', query: { id: created.id } })
+    router.push({ name: 'articles', query: { id: created.id } })
   } catch (err) {
     toast(err.message, 'error')
   } finally {
@@ -303,7 +316,7 @@ async function batchArchive(archived) {
     <header class="page-head">
       <div>
         <h1 class="page-title">文章管理</h1>
-        <p class="page-sub">我的稿件：服务端检索、筛选与分页，打开稿件仍回到创作空间继续编辑。</p>
+        <p class="page-sub">我的稿件：服务端检索、筛选与分页，点开直接进成稿台按段落改。</p>
       </div>
       <n-button type="primary" size="small" :loading="creating" @click="createArticle">
         + 新建稿件
@@ -420,7 +433,7 @@ async function batchArchive(archived) {
                 />
               </td>
               <td class="articles-title-cell" :title="row.title">
-                <button class="articles-open" type="button" @click="openRow(row)">
+                <button class="articles-open" type="button" @click="enterStudio(row)">
                   {{ row.title }}
                 </button>
                 <span v-if="row.archived" class="articles-archived-tag">已归档</span>
@@ -436,8 +449,8 @@ async function batchArchive(archived) {
               <td class="articles-num">{{ row.variantCount || 0 }}</td>
               <td class="articles-date">{{ dateLabel(row.updatedAt) }}</td>
               <td class="articles-actions">
-                <n-button size="tiny" quaternary :loading="rowBusyId === row.id" @click="openRow(row)">
-                  打开
+                <n-button size="tiny" quaternary :loading="rowBusyId === row.id" @click="enterStudio(row)">
+                  进入成稿台
                 </n-button>
                 <n-button
                   size="tiny"

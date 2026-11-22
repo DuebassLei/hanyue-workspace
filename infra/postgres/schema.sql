@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS hot_items (
 	title_norm VARCHAR(300) NOT NULL,
 	hot INTEGER,
 	url TEXT NOT NULL,
+	source_url TEXT NOT NULL,
 	first_seen_at VARCHAR(16) NOT NULL,
 	last_seen_at VARCHAR(16) NOT NULL,
 	first_seen_day VARCHAR(10) NOT NULL,
@@ -280,24 +281,6 @@ CREATE TABLE IF NOT EXISTS skill_registry_entries (
 	CONSTRAINT uq_skill_owner_key_plain UNIQUE (skill_key, owner_user_id)
 );
 
--- skill_writing_rules
-CREATE TABLE IF NOT EXISTS skill_writing_rules (
-	id VARCHAR(32) NOT NULL,
-	skill_key VARCHAR(120) NOT NULL,
-	owner_user_id VARCHAR(32),
-	rule_type VARCHAR(24) NOT NULL,
-	rule_key VARCHAR(64) NOT NULL,
-	payload JSON NOT NULL,
-	sort_order INTEGER DEFAULT '0' NOT NULL,
-	enabled BOOLEAN DEFAULT 'true' NOT NULL,
-	source VARCHAR(16) DEFAULT 'user' NOT NULL,
-	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
-	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
-	PRIMARY KEY (id),
-	CONSTRAINT uq_swr_rule UNIQUE (skill_key, owner_user_id, rule_type, rule_key),
-	CONSTRAINT ck_swr_type CHECK (rule_type IN ('tone','style_rule','prompt_template','theme','target_length','workflow_step','review_rule','fact_policy','image_policy','repair_policy','exemplar'))
-);
-
 -- users
 CREATE TABLE IF NOT EXISTS users (
 	id VARCHAR(32) NOT NULL,
@@ -347,6 +330,26 @@ CREATE TABLE IF NOT EXISTS ai_generations (
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	PRIMARY KEY (id),
 	FOREIGN KEY(owner_user_id) REFERENCES users (id)
+);
+
+-- author_skills
+CREATE TABLE IF NOT EXISTS author_skills (
+	id VARCHAR(32) NOT NULL,
+	owner_user_id VARCHAR(32) NOT NULL,
+	name VARCHAR(80) NOT NULL,
+	skill_type VARCHAR(16) NOT NULL,
+	description TEXT NOT NULL,
+	summary TEXT NOT NULL,
+	config JSONB NOT NULL,
+	source VARCHAR(16) NOT NULL,
+	status VARCHAR(16) NOT NULL,
+	version INTEGER NOT NULL,
+	usage_count INTEGER NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	CONSTRAINT uq_author_skills_owner_name UNIQUE (owner_user_id, name),
+	FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 -- background_jobs
@@ -565,6 +568,45 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
 	FOREIGN KEY(owner_user_id) REFERENCES users (id)
 );
 
+-- skill_distillation_jobs
+CREATE TABLE IF NOT EXISTS skill_distillation_jobs (
+	id VARCHAR(32) NOT NULL,
+	skill_entry_id VARCHAR(32) NOT NULL,
+	owner_user_id VARCHAR(32) NOT NULL,
+	distillation_type VARCHAR(32) NOT NULL,
+	tier VARCHAR(32) NOT NULL,
+	source_data JSONB NOT NULL,
+	config JSONB NOT NULL,
+	status VARCHAR(32) NOT NULL,
+	progress INTEGER NOT NULL,
+	result JSONB NOT NULL,
+	error_message TEXT,
+	duration_seconds INTEGER,
+	started_at TIMESTAMP WITH TIME ZONE,
+	completed_at TIMESTAMP WITH TIME ZONE,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(skill_entry_id) REFERENCES skill_registry_entries (id) ON DELETE CASCADE,
+	FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
+-- skill_usage_logs
+CREATE TABLE IF NOT EXISTS skill_usage_logs (
+	id VARCHAR(32) NOT NULL,
+	skill_entry_id VARCHAR(32),
+	owner_user_id VARCHAR(32) NOT NULL,
+	context JSONB NOT NULL,
+	result_summary TEXT NOT NULL,
+	rating INTEGER,
+	feedback TEXT,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(skill_entry_id) REFERENCES skill_registry_entries (id) ON DELETE SET NULL,
+	FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
 -- user_preferences
 CREATE TABLE IF NOT EXISTS user_preferences (
 	id VARCHAR(32) NOT NULL,
@@ -659,12 +701,51 @@ CREATE TABLE IF NOT EXISTS assets (
 	FOREIGN KEY(workspace_id) REFERENCES workspaces (id)
 );
 
+-- author_skill_distill_runs
+CREATE TABLE IF NOT EXISTS author_skill_distill_runs (
+	id VARCHAR(32) NOT NULL,
+	skill_id VARCHAR(32) NOT NULL,
+	owner_user_id VARCHAR(32) NOT NULL,
+	skill_type VARCHAR(16) NOT NULL,
+	status VARCHAR(16) NOT NULL,
+	progress INTEGER NOT NULL,
+	material_stats JSONB NOT NULL,
+	request JSONB NOT NULL,
+	result JSONB NOT NULL,
+	error TEXT,
+	started_at TIMESTAMP WITH TIME ZONE,
+	completed_at TIMESTAMP WITH TIME ZONE,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(skill_id) REFERENCES author_skills (id) ON DELETE CASCADE,
+	FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
+-- author_skill_revisions
+CREATE TABLE IF NOT EXISTS author_skill_revisions (
+	id VARCHAR(32) NOT NULL,
+	skill_id VARCHAR(32) NOT NULL,
+	owner_user_id VARCHAR(32) NOT NULL,
+	version INTEGER NOT NULL,
+	summary TEXT NOT NULL,
+	config JSONB NOT NULL,
+	source VARCHAR(16) NOT NULL,
+	note VARCHAR(200) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(skill_id) REFERENCES author_skills (id) ON DELETE CASCADE,
+	FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
 -- calendar_entries
 CREATE TABLE IF NOT EXISTS calendar_entries (
 	id VARCHAR(32) NOT NULL,
 	workspace_id VARCHAR(32) NOT NULL,
 	owner_user_id VARCHAR(32) NOT NULL,
 	content_item_id VARCHAR(32),
+	studio_article_id VARCHAR(32),
 	platform VARCHAR(24),
 	title VARCHAR(200) NOT NULL,
 	planned_at TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -1082,6 +1163,7 @@ CREATE TABLE IF NOT EXISTS studio_articles (
 	content_item_id VARCHAR(32),
 	topic VARCHAR(400) NOT NULL,
 	material TEXT NOT NULL,
+	writer_style VARCHAR(32) DEFAULT 'tutorial' NOT NULL,
 	front TEXT NOT NULL,
 	title VARCHAR(200) NOT NULL,
 	hook VARCHAR(8),
@@ -1239,6 +1321,21 @@ CREATE TABLE IF NOT EXISTS originality_analyses (
 	PRIMARY KEY (id),
 	FOREIGN KEY(content_version_id) REFERENCES content_versions (id),
 	FOREIGN KEY(workspace_id) REFERENCES workspaces (id)
+);
+
+-- pet_conversations
+CREATE TABLE IF NOT EXISTS pet_conversations (
+	id VARCHAR(32) NOT NULL,
+	studio_article_id VARCHAR(32) NOT NULL,
+	owner_user_id VARCHAR(32) NOT NULL,
+	messages JSONB NOT NULL,
+	active_skill_ids JSON NOT NULL,
+	last_generation JSONB NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(studio_article_id) REFERENCES studio_articles (id) ON DELETE CASCADE,
+	FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 -- storyboard_shots
@@ -1421,15 +1518,6 @@ CREATE INDEX IF NOT EXISTS ix_skill_registry_entries_owner_user_id ON skill_regi
 -- skill_registry_entries.ix_skill_registry_entries_skill_key
 CREATE INDEX IF NOT EXISTS ix_skill_registry_entries_skill_key ON skill_registry_entries (skill_key);
 
--- skill_writing_rules.ix_skill_writing_rules_owner_user_id
-CREATE INDEX IF NOT EXISTS ix_skill_writing_rules_owner_user_id ON skill_writing_rules (owner_user_id);
-
--- skill_writing_rules.ix_skill_writing_rules_skill_key
-CREATE INDEX IF NOT EXISTS ix_skill_writing_rules_skill_key ON skill_writing_rules (skill_key);
-
--- skill_writing_rules.ix_swr_lookup
-CREATE INDEX IF NOT EXISTS ix_swr_lookup ON skill_writing_rules (skill_key, owner_user_id, rule_type, sort_order);
-
 -- users.ix_users_auth_subject
 CREATE UNIQUE INDEX IF NOT EXISTS ix_users_auth_subject ON users (auth_subject);
 
@@ -1441,6 +1529,18 @@ CREATE INDEX IF NOT EXISTS ix_agent_provider_connections_owner_user_id ON agent_
 
 -- ai_generations.ix_ai_generations_owner_user_id
 CREATE INDEX IF NOT EXISTS ix_ai_generations_owner_user_id ON ai_generations (owner_user_id);
+
+-- author_skills.ix_author_skills_owner_type
+CREATE INDEX IF NOT EXISTS ix_author_skills_owner_type ON author_skills (owner_user_id, skill_type);
+
+-- author_skills.ix_author_skills_owner_user_id
+CREATE INDEX IF NOT EXISTS ix_author_skills_owner_user_id ON author_skills (owner_user_id);
+
+-- author_skills.ix_author_skills_skill_type
+CREATE INDEX IF NOT EXISTS ix_author_skills_skill_type ON author_skills (skill_type);
+
+-- author_skills.ix_author_skills_status
+CREATE INDEX IF NOT EXISTS ix_author_skills_status ON author_skills (status);
 
 -- background_jobs.ix_background_jobs_owner_user_id
 CREATE INDEX IF NOT EXISTS ix_background_jobs_owner_user_id ON background_jobs (owner_user_id);
@@ -1523,6 +1623,21 @@ CREATE INDEX IF NOT EXISTS ix_scheduled_tasks_scope ON scheduled_tasks (scope);
 -- scheduled_tasks.ix_scheduled_tasks_task_type
 CREATE INDEX IF NOT EXISTS ix_scheduled_tasks_task_type ON scheduled_tasks (task_type);
 
+-- skill_distillation_jobs.ix_skill_distillation_jobs_owner_user_id
+CREATE INDEX IF NOT EXISTS ix_skill_distillation_jobs_owner_user_id ON skill_distillation_jobs (owner_user_id);
+
+-- skill_distillation_jobs.ix_skill_distillation_jobs_skill_entry_id
+CREATE INDEX IF NOT EXISTS ix_skill_distillation_jobs_skill_entry_id ON skill_distillation_jobs (skill_entry_id);
+
+-- skill_distillation_jobs.ix_skill_distillation_jobs_status
+CREATE INDEX IF NOT EXISTS ix_skill_distillation_jobs_status ON skill_distillation_jobs (status);
+
+-- skill_usage_logs.ix_skill_usage_logs_owner_user_id
+CREATE INDEX IF NOT EXISTS ix_skill_usage_logs_owner_user_id ON skill_usage_logs (owner_user_id);
+
+-- skill_usage_logs.ix_skill_usage_logs_skill_entry_id
+CREATE INDEX IF NOT EXISTS ix_skill_usage_logs_skill_entry_id ON skill_usage_logs (skill_entry_id);
+
 -- user_preferences.ix_user_preferences_owner_user_id
 CREATE UNIQUE INDEX IF NOT EXISTS ix_user_preferences_owner_user_id ON user_preferences (owner_user_id);
 
@@ -1550,11 +1665,29 @@ CREATE INDEX IF NOT EXISTS ix_assets_owner_user_id ON assets (owner_user_id);
 -- assets.ix_assets_workspace_id
 CREATE INDEX IF NOT EXISTS ix_assets_workspace_id ON assets (workspace_id);
 
+-- author_skill_distill_runs.ix_author_skill_distill_runs_owner_user_id
+CREATE INDEX IF NOT EXISTS ix_author_skill_distill_runs_owner_user_id ON author_skill_distill_runs (owner_user_id);
+
+-- author_skill_distill_runs.ix_author_skill_distill_runs_skill_id
+CREATE INDEX IF NOT EXISTS ix_author_skill_distill_runs_skill_id ON author_skill_distill_runs (skill_id);
+
+-- author_skill_distill_runs.ix_author_skill_distill_runs_status
+CREATE INDEX IF NOT EXISTS ix_author_skill_distill_runs_status ON author_skill_distill_runs (status);
+
+-- author_skill_revisions.ix_author_skill_revisions_owner_user_id
+CREATE INDEX IF NOT EXISTS ix_author_skill_revisions_owner_user_id ON author_skill_revisions (owner_user_id);
+
+-- author_skill_revisions.ix_author_skill_revisions_skill_id
+CREATE INDEX IF NOT EXISTS ix_author_skill_revisions_skill_id ON author_skill_revisions (skill_id);
+
 -- calendar_entries.ix_calendar_entries_owner_user_id
 CREATE INDEX IF NOT EXISTS ix_calendar_entries_owner_user_id ON calendar_entries (owner_user_id);
 
 -- calendar_entries.ix_calendar_entries_planned_at
 CREATE INDEX IF NOT EXISTS ix_calendar_entries_planned_at ON calendar_entries (planned_at);
+
+-- calendar_entries.ix_calendar_entries_studio_article_id
+CREATE INDEX IF NOT EXISTS ix_calendar_entries_studio_article_id ON calendar_entries (studio_article_id);
 
 -- calendar_entries.ix_calendar_entries_workspace_id
 CREATE INDEX IF NOT EXISTS ix_calendar_entries_workspace_id ON calendar_entries (workspace_id);
@@ -1753,6 +1886,12 @@ CREATE INDEX IF NOT EXISTS ix_originality_analyses_content_version_id ON origina
 
 -- originality_analyses.ix_originality_analyses_workspace_id
 CREATE INDEX IF NOT EXISTS ix_originality_analyses_workspace_id ON originality_analyses (workspace_id);
+
+-- pet_conversations.ix_pet_conversations_owner_user_id
+CREATE INDEX IF NOT EXISTS ix_pet_conversations_owner_user_id ON pet_conversations (owner_user_id);
+
+-- pet_conversations.ix_pet_conversations_studio_article_id
+CREATE INDEX IF NOT EXISTS ix_pet_conversations_studio_article_id ON pet_conversations (studio_article_id);
 
 -- storyboard_shots.ix_storyboard_shots_deleted_at
 CREATE INDEX IF NOT EXISTS ix_storyboard_shots_deleted_at ON storyboard_shots (deleted_at);

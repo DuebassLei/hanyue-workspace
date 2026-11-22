@@ -31,7 +31,9 @@ export const studioApi = {
   undo: (id) => api.post(`${base(id)}/undo`, {}),
   revisions: (id) => api.get(`${base(id)}/revisions`),
 
-  draft: (id) => api.post(`${base(id)}/draft`, {}),
+  // style 为空用稿件当前风格；带了就是换风格重写
+  draft: (id, style) => api.post(`${base(id)}/draft`, style ? { style } : {}),
+  setWriterStyle: (id, style) => api.post(`${base(id)}/writer-style`, { style }),
   fixAll: (id) => api.post(`${base(id)}/fix-all`, {}),
   stop: (id) => api.post(`${base(id)}/job/stop`, {}),
   banner: (id, style) => api.post(`${base(id)}/banner`, { style }),

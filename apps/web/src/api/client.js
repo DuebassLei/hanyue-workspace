@@ -78,6 +78,10 @@ export const api = {
   put: (path, body) => request(path, { method: 'PUT', body: JSON.stringify(body ?? {}) }),
   del: (path) => request(path, { method: 'DELETE' }),
   upload: (path, formData) => request(path, { method: 'POST', body: formData }),
+  distillSkill: (skillId, materials, urls, personName = '') => request(
+    `/skill-center/skills/${encodeURIComponent(skillId)}/distill`,
+    { method: 'POST', body: JSON.stringify({ materials, urls, personName }) },
+  ),
 }
 
 /** 把接口相对路径拼成绝对地址（正文里的图片链接要能被外部发布端取用） */

@@ -30,14 +30,24 @@ export const studioExtraApi = {
   // ---- 正文插图 ----
   /** 针对某个段落提交插图任务；同样只入队，结果靠 sync 拉。 */
   generateInline: (id, body) => api.post(`${base(id)}/inline/generate`, body || {}),
+  /** 从素材图库挑一张图插到指定段落之后：不触发生图，图直接进正文。 */
+  pickInline: (id, assetId, blockId) => api.post(`${base(id)}/inline/pick`, { assetId, blockId }),
   /** 轮询所有 running 的插图：成功后后端会在段落之后插入 media 块，所以必须用返回的快照刷新整篇。 */
   syncInline: (id) => api.post(`${base(id)}/inline/sync`, {}),
   /** 移除一张插图：同时删掉它插入正文的那个块，避免留下空图段。 */
   removeInline: (id, diagramId) => api.del(`${base(id)}/inline/${diagramId}`),
 
+  // ---- 提示词建议 ----
+  /** 按当前稿件现拟提示词：scope=cover 出封面候选，scope=inline 出插图候选（给 blockId 就只拟那一段）。 */
+  suggestPrompts: (id, body) => api.post(`${base(id)}/media/prompt-suggestions`, body || {}),
+
   // ---- SVG 动画卡 ----
-  /** 按段落 + 卡片类型生成 SVG 卡，后端把 fence 作为新块插在该段之后。 */
-  svgCard: (id, blockId, kind) => api.post(`${base(id)}/blocks/${blockId}/svg-card`, { kind }),
+  /** 按段落 + 卡片类型生成 SVG 卡；传 blockIds（≥2 段）时合并所选段落生成一张卡，插在最后一处之后。 */
+  svgCard: (id, blockId, kind, blockIds) =>
+    api.post(`${base(id)}/blocks/${blockId}/svg-card`, {
+      kind,
+      ...(Array.isArray(blockIds) && blockIds.length > 1 ? { blockIds } : {}),
+    }),
 
   // ---- 发布与复盘 ----
   /** 发布：dryRun=true 只导出成稿件版本（存入文章管理），false 才真正入发布队列。 */

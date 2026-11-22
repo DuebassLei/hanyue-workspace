@@ -24,8 +24,7 @@ export const NAV_GROUPS = [
     label: '工作区',
     items: [
       // 工作区功能直接平铺，不再按内容类型折叠。
-      { name: 'studio', label: '创作空间', short: '创作', permission: 'studio.use' },
-      // 成稿台是「逐段改」的主入口，和创作空间同级；兜底导航漏了它，菜单接口失败时用户就找不到入口
+      // 成稿台是「逐段改」的主入口；兜底导航漏了它，菜单接口失败时用户就找不到入口
       { name: 'paper', label: '成稿台', short: '成稿', permission: 'studio.use' },
       { name: 'originality', label: '原创检测', short: '检测', permission: 'studio.use' },
       { name: 'prompts', label: '提示词库', short: '提示词', permission: 'prompts.use', aliases: ['handdraw'] },
@@ -64,7 +63,6 @@ export const NAV_GROUPS = [
     items: [
       { name: 'models', label: '模型管理', short: '模型', permission: 'models.view' },
       { name: 'logs', label: '系统日志', short: '日志', permission: 'logs.view' },
-      { name: 'writing-rules', label: '创作规则', short: '规则', permission: 'writing_rules.use' },
       { name: 'settings', label: '设置', short: '我的', permission: 'settings.view' },
     ],
   },

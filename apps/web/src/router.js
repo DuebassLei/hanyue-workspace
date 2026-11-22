@@ -10,11 +10,11 @@ import { useRbacStore } from './stores/rbac'
  */
 const routes = [
   { path: '/', name: 'overview', component: () => import('./views/OverviewView.vue'), meta: { title: '创作总览', icon: '◈', permission: 'overview.view' } },
-  { path: '/topics', redirect: { name: 'studio' } },
+  { path: '/topics', redirect: { name: 'articles' } },
   { path: '/hot-topics', name: 'hot-topics', component: () => import('./views/HotTopicsView.vue'), meta: { title: '热点选题', icon: '◉', permission: 'hot_topics.view' } },
   { path: '/schedules', name: 'schedules', component: () => import('./views/SchedulesView.vue'), meta: { title: '定时任务', icon: '⏱', permission: 'schedules.use' } },
   { path: '/calendar', name: 'calendar', component: () => import('./views/CalendarView.vue'), meta: { title: '内容日历', icon: '▦', permission: 'calendar.view' } },
-  { path: '/studio', name: 'studio', component: () => import('./views/StudioView.vue'), meta: { title: '创作空间', icon: '✎', permission: 'studio.use' } },
+  { path: '/skills', name: 'skills', component: () => import('./views/SkillCenterView.vue'), meta: { title: '技能中心', icon: '✧', permission: 'studio.use' } },
   { path: '/originality', name: 'originality', component: () => import('./views/OriginalityView.vue'), meta: { title: '原创检测', icon: '◈', permission: 'studio.use' } },
   { path: '/paper', name: 'paper', component: () => import('./views/PaperView.vue'), meta: { title: '成稿台', icon: '✍', permission: 'studio.use' } },
   { path: '/articles', name: 'articles', component: () => import('./views/ArticlesView.vue'), meta: { title: '文章管理', icon: '▤', permission: 'studio.use' } },
@@ -26,7 +26,6 @@ const routes = [
   { path: '/characters', name: 'characters', component: () => import('./views/CharactersView.vue'), meta: { title: '角色库', icon: '☻', permission: 'characters.use' } },
   { path: '/assets', name: 'assets', component: () => import('./views/AssetsView.vue'), meta: { title: '素材图库', icon: '▣', permission: 'assets.use' } },
   { path: '/prompts', name: 'prompts', component: () => import('./views/PromptsView.vue'), meta: { title: '提示词库', icon: '✧', permission: 'prompts.use' } },
-  { path: '/writing-rules', name: 'writing-rules', component: () => import('./views/WritingRulesView.vue'), meta: { title: '创作规则', icon: '≡', permission: 'writing_rules.use' } },
   { path: '/handdraw', name: 'handdraw', component: () => import('./views/HanddrawView.vue'), meta: { title: '提示词库', icon: '✧', permission: 'prompts.use' } },
   { path: '/publishing', name: 'publishing', component: () => import('./views/PublishingView.vue'), meta: { title: '发布管理', icon: '▲', permission: 'publishing.view' } },
   { path: '/wechat-layout', name: 'wechat-layout', component: () => import('./views/LayoutView.vue'), meta: { title: '微信排版', icon: '❐', permission: 'wechat_layout.use' } },

@@ -27,7 +27,7 @@
 ## 数据模型
 
 ```
-studio_articles   稿件头：选题/素材/标题/候选/摘要/横幅/质检轮次/对话/排期/归档
+studio_articles   稿件头：选题/素材/写作风格档/标题/候选/摘要/横幅/质检轮次/对话/排期/归档
 article_blocks    段落：ordinal + text + kind + check(JSON) + prev_text
 article_revisions 快照：改动前的 title/titles/blocks，撤销与版本对比都读它
 ```
@@ -48,8 +48,10 @@ article_revisions 快照：改动前的 title/titles/blocks，撤销与版本对
 | --- | --- | --- |
 | GET | `/state` | 稿件列表 + 质检凭据状态 |
 | GET/POST | `/settings` | 朱雀 Key / endpoint（只允许 https） |
-| POST | `/articles/new` | 新建：给 Markdown 就导入；只给选题素材则让模型写 |
+| POST | `/articles/new` | 新建：给 Markdown 就导入；只给选题素材则让模型写；可带 `writerStyle` |
 | GET | `/articles/{id}` | 整篇快照（含正在跑的任务） |
+| POST | `/articles/{id}/draft` | 写正文；body 可带 `{style}`，等于「换风格重写」，覆盖前自动存快照 |
+| POST | `/articles/{id}/writer-style` | 只记风格档，不动正文；下次写正文和之后的对话改稿按新档走 |
 | POST | `/articles/{id}/chat` | 对话改稿，模型只回白名单 ops |
 | POST | `/articles/{id}/titles` | 出 5 个候选标题 + 摘要 + 主推理由 |
 | POST | `/articles/{id}/title/pick` | 选定标题（记快照） |
@@ -68,6 +70,28 @@ article_revisions 快照：改动前的 title/titles/blocks，撤销与版本对
 | POST | `/articles/{id}/export` | 落成 ContentItem + ContentVersion，接文章管理与排版 |
 
 所有返回都是整篇快照，页面按快照整体替换，不做局部合并——后台任务改稿时不会拼出中间态。
+
+---
+
+## 写作风格档
+
+写正文的 system prompt 由三层拼成，各管一件事，互不覆盖：
+
+| 层 | 来源 | 管什么 |
+| --- | --- | --- |
+| 人设 | `resources/studio_skills/writer.md` | 作者是谁、价值观、口语习惯、禁用词、AI 味禁区 |
+| 风格档 | `resources/studio_skills/styles/<name>.md` | 本次的结构、篇幅、取舍（教程/方法论/测评/随笔/软文） |
+| 输出硬规则 | `studio_pipeline.DRAFT_RULES` | 只输出 Markdown、第一行标题、缺细节写占位 |
+
+风格档是**目录扫描**出来的：`GET /studio/state` 返回的 `writerStyles` 就是 `styles/*.md` 的列表，
+字段取每个文件 front matter 的 `label`（下拉显示）和 `hint`（说明）。所以加一档风格 = 新建一个 md，
+刷新页面就能选，不用改代码、不用重启、不用动数据库。
+
+- 改档位本身不动正文；点「按这个风格重写」才会整篇覆盖，覆盖前自动存快照，撤销能退回上一版。
+- 对话改稿也带风格档，否则改两轮后结构会滑回模型默认的原型。
+- 单段修复和一键处理不带风格档：那两步只做「去 AI 味」，改结构会跟质检目标打架。
+- 稿件上存的是 `writer_style`，复制稿件会沿用原档；档位文件被删时 `load_writer_style` 回落 `tutorial`，
+  不会让写正文整条断掉（接口传了不存在的档位则直接 400）。
 
 ---
 

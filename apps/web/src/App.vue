@@ -297,6 +297,9 @@ function goTarget(target) {
 }
 
 function onGlobalKey(event) {
+  // 带 Shift 的组合留给具体编辑器（成稿台用 Ctrl/Cmd+Shift+K 删段），
+  // 否则命令面板会抢走焦点，快捷键变成「打开面板」。
+  if (event.shiftKey) return
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault()
     paletteOpen.value = true

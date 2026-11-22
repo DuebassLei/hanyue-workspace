@@ -107,6 +107,25 @@
 ```
 - 校验 asset 属于当前用户，写 `cover = {status:"ready", assetId, url}`。
 
+`POST /studio/articles/{article_id}/inline/pick`
+```json
+{ "assetId": "...", "blockId": "..." }
+// 响应：完整 article；inline_diagrams 新增一项（status="ready"）
+```
+- 从素材图库挑一张图当正文插图：不触发生图，所以没有 job 可轮询，直接 `status="ready"` + assetId/url。
+- 同样在对应 block 之后插入 `kind="media"` 的块（`text` 为 `![](asset://<assetId>)`）。
+
+`POST /studio/articles/{article_id}/media/prompt-suggestions`
+```json
+{ "scope": "cover" | "inline", "blockId": "可选", "count": 3 }
+// 响应
+{ "items": [ { "prompt": "...", "note": "...", "blockId": "可选", "blockNumber": 3 } ] }
+```
+- `scope="cover"`：按稿件标题 + 内容概要出封面提示词候选。
+- `scope="inline"` 且给了 `blockId`：只针对那一段出提示词；不给则通读全文，挑出真正需要配图的段落各给一条，并按段号对齐回真实 `blockId`（越界段号直接丢弃）。
+- 建议只回前端、不落库：用户挑中后还要在面板里改，改完才随生图任务写进稿件。
+- 模型不可用时明确 502（`prompt_suggest_failed`），不回空数组当「没有建议」。
+
 `POST /studio/articles/{article_id}/inline/generate`
 ```json
 // 请求
@@ -145,6 +164,13 @@
 - 再按 `modules/publishing.py` 的入队方式创建发布任务（读它的 `POST` 路由实现，照抄参数组装，不 import 私有 helper）。
 - `dryRun=true` 只做 export，不入队，`publishJobIds=[]`。
 - 成功后写 `scheduled_for` / `publish_marked_at`。
+
+`POST /studio/articles/{article_id}/schedule`
+- 只记「计划什么时候发」，真正的发布队列仍由 publishing 模块负责。
+- 同时同步一条内容日历条目（`calendar_entries.studio_article_id = article.id`）：
+  在成稿台排的期要能在「内容日历」里看到，取消排期也要一起撤掉；
+  日历里手排的条目（没有 `studio_article_id`）不受影响。同步逻辑在
+  `apps/api/app/services/studio_calendar.py`，同一篇稿件反复改排期只维护一条条目。
 
 `GET /studio/articles/{article_id}/review`
 ```json

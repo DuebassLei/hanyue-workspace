@@ -115,12 +115,12 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
       </div>
       <n-space class="overview-actions" :size="8">
         <n-button secondary size="small" :loading="loading" @click="load">刷新数据</n-button>
-        <RouterLink v-slot="{ navigate }" custom :to="{ name: 'studio' }">
+        <RouterLink v-slot="{ navigate }" custom :to="{ name: 'articles' }">
           <n-button
             type="primary"
             size="small"
-            :disabled="Boolean(disabledReason('studio.use', '创作空间'))"
-            :title="disabledReason('studio.use', '创作空间') || ''"
+            :disabled="Boolean(disabledReason('studio.use', '文章管理'))"
+            :title="disabledReason('studio.use', '文章管理') || ''"
             @click="navigate"
           >
             ＋ 新建稿件
@@ -149,7 +149,7 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
           <span class="metric-track"><span :style="{ width: `${publishPercent}%` }" /></span>
           <span class="metric-hint">{{ publishLabel }}</span>
         </RouterLink>
-        <RouterLink class="metric metric-link" :to="{ name: 'studio' }">
+        <RouterLink class="metric metric-link" :to="{ name: 'articles' }">
           <span class="metric-label">待审核内容</span>
           <span class="metric-value">{{ data.pendingReview }}</span>
           <span class="metric-hint">发布前需要人工确认 <span class="metric-arrow">→</span></span>
@@ -276,13 +276,13 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
               <span class="eyebrow">RECENT WORK</span>
               <h2 class="card-title">最近稿件</h2>
             </div>
-            <RouterLink class="text-link" :to="{ name: 'studio' }">查看全部 <span>→</span></RouterLink>
+            <RouterLink class="text-link" :to="{ name: 'articles' }">查看全部 <span>→</span></RouterLink>
           </div>
           <div v-if="!data.recentContent.length" class="empty compact-empty">
             <span class="empty-icon">✎</span>
             <span class="empty-title">还没有草稿</span>
             <span>从一个想法开始，直接让 AI 生成初稿。</span>
-            <RouterLink v-slot="{ navigate }" custom :to="{ name: 'studio' }">
+            <RouterLink v-slot="{ navigate }" custom :to="{ name: 'articles' }">
               <n-button type="primary" size="small" @click="navigate">新建稿件</n-button>
             </RouterLink>
           </div>
@@ -291,7 +291,7 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
               v-for="item in data.recentContent"
               :key="item.id"
               class="recent-row"
-              :to="{ name: 'studio', query: { id: item.id } }"
+              :to="{ name: 'articles', query: { id: item.id } }"
             >
               <div class="recent-index">{{ String(data.recentContent.indexOf(item) + 1).padStart(2, '0') }}</div>
               <div class="list-main">

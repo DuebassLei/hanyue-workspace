@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 
 from .. import models
-from . import ai_gateway, prompt_rules, skill_registry, wechat_layout_engine, writing_rules
+from . import ai_gateway, prompt_rules, skill_registry, wechat_layout_engine
+from .skill_manifest import entry_manifest
 
 # 内置默认风格（当 skill 未提供 manifest 时的兜底）
 ARTICLE_OUTPUT_CONTRACT = (
@@ -156,7 +157,7 @@ def build_system_prompt(
     use_layout_components 是本次生成选项：None 保持原行为，False 禁用小组件，
     True 仅允许当前组件库中的组件；优先级高于 Skill 中的组件建议。
     """
-    manifest = writing_rules.effective_manifest(db, skill, owner_user_id)
+    manifest = entry_manifest(skill)
     prompt_template, tone, style_rules = _style_from_manifest(manifest, skill)
     contract = (
         prompt_rules.get_prompt_rule(db, "article.output_contract", default=ARTICLE_OUTPUT_CONTRACT)

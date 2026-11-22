@@ -6,7 +6,6 @@ import HotPlatformTabs from './HotPlatformTabs.vue'
 const props = defineProps({
   show: { type: Boolean, default: false },
   summary: { type: Object, default: () => ({}) },
-  sources: { type: Object, default: () => ({ platforms: [], enabled: [] }) },
   degraded: { type: Array, default: () => [] },
   platform: { type: String, default: '' },
   platforms: { type: Array, default: () => [] },
@@ -43,7 +42,7 @@ const funnel = computed(() => {
       key: 'generated',
       label: '已出稿',
       value: generated,
-      hint: '已经带进创作空间',
+      hint: '已创建稿件，可在文章管理查看',
       width: Math.max(18, (generated / base) * 100),
     },
   ]
@@ -59,10 +58,11 @@ const tracks = computed(() => {
   }))
 })
 
+/** 采集源不再由服务端登记：这里只回答「当天有哪些平台入库了」。 */
 const sourceNote = computed(() => {
-  const enabled = props.sources.enabled || []
-  if (!enabled.length) return '未启用任何采集源'
-  return `${enabled.length} 路采集：${enabled.join('、')}`
+  const names = Object.keys(props.summary.platforms || {})
+  if (!names.length) return '今天还没有平台入库'
+  return `${names.length} 个平台已入库：${names.join('、')}`
 })
 
 const captured = computed(() => props.summary.capturedAt || '')

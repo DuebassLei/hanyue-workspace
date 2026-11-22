@@ -7,6 +7,7 @@ SVG 卡校验失败原样透传，以及越权访问一律 404。
 import io
 import uuid
 
+import pytest
 from PIL import Image
 from sqlalchemy import select
 
@@ -52,6 +53,9 @@ def _provider(monkeypatch, available: bool) -> None:
         "status",
         lambda db, owner_user_id: {"available": available, "providers": []},
     )
+    monkeypatch.setattr(image_provider, "resolve_image_provider", lambda db, owner_user_id: (
+        {"modelCode": "test", "supportedImageSizes": {"1:1": "1024x1024"}} if available else None
+    ))
 
 
 def _fake_enqueue(monkeypatch, *, status: str = "succeeded", asset_ids: list[str] | None = None):
@@ -99,12 +103,66 @@ def _article_url(article_id: str, suffix: str) -> str:
 # ---------------- 封面 ----------------
 
 
+@pytest.mark.parametrize("ratio", ["2.35:1", "16:9", "4:3", "3:4", "9:16"])
+def test_studio_ratio_rejects_silent_size_substitution(ratio):
+    from app.core.deps import ApiError
+    from app.services import studio_media
+    from unittest.mock import patch
+
+    with patch.object(studio_media, "image_capabilities", return_value={"ratios": ["1:1"]}):
+        with pytest.raises(ApiError) as error:
+            studio_media._require_ratio(None, "user", ratio)
+    assert error.value.detail["code"] == "unsupported_aspect_ratio"
+    assert ratio in error.value.detail["message"]
+
+
+def test_studio_ratio_accepts_declared_model_sizes():
+    from app.services.image_provider import exact_image_sizes
+
+    assert exact_image_sizes({"supportedImageSizes": {"1:1": "1024x1024", "16:9": "1536x1024", "2.35:1": "2350x1000"}}) == {"1:1": "1024x1024", "2.35:1": "2350x1000"}
+    assert exact_image_sizes({}) == {}
+
+
+def test_provider_exact_ratio_sends_declared_size_and_checks_result(monkeypatch):
+    import base64
+    from app.services import image_provider
+
+    provider = {"modelCode": "test", "supportedImageSizes": {"2.35:1": "235x100"}}
+    monkeypatch.setattr(image_provider, "resolve_image_provider", lambda *args: provider)
+    sizes = []
+    buffer = io.BytesIO()
+    Image.new("RGB", (235, 100)).save(buffer, format="PNG")
+
+    class Response:
+        status_code = 200
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(buffer.getvalue()).decode()}]}
+
+    def request(_provider, **kwargs):
+        sizes.append(kwargs["size"])
+        return Response()
+
+    monkeypatch.setattr(image_provider, "_request_batch", request)
+    result = image_provider.generate_images(None, "user", prompt="封面", aspect_ratio="2.35:1", exact_aspect=True)
+    assert len(result) == 1
+    assert sizes == ["235x100"]
+    with pytest.raises(image_provider.ImageProviderUnavailable):
+        image_provider.generate_images(None, "user", prompt="封面", aspect_ratio="16:9", exact_aspect=True)
+
+
+def test_route_ratio_defaults():
+    from app.modules.studio_media import CoverGenerateIn, InlineGenerateIn
+
+    assert CoverGenerateIn().aspect_ratio == "2.35:1"
+    assert InlineGenerateIn(blockId="block").aspect_ratio == "16:9"
+
+
 def test_cover_generate_without_provider_fails_loudly(client, monkeypatch):
     headers, article, _uid = _client_with_article(client, "media-no-provider")
     _provider(monkeypatch, False)
 
     response = client.post(
-        _article_url(article["id"], "cover/generate"), json={}, headers=headers
+        _article_url(article["id"], "cover/generate"), json={"aspectRatio": "1:1"}, headers=headers
     )
     assert response.status_code == 400, response.text
     body = response.json()
@@ -124,7 +182,7 @@ def test_cover_generate_enqueues_and_marks_running(client, monkeypatch):
 
     response = client.post(
         _article_url(article["id"], "cover/generate"),
-        json={"prompt": "抽象几何封面", "aspectRatio": "4:3"},
+        json={"prompt": "抽象几何封面", "aspectRatio": "1:1"},
         headers=headers,
     )
     assert response.status_code == 200, response.text
@@ -132,7 +190,7 @@ def test_cover_generate_enqueues_and_marks_running(client, monkeypatch):
     assert cover["status"] == "running"
     assert cover["jobId"]
     assert cover["prompt"] == "抽象几何封面"
-    assert cover["aspectRatio"] == "4:3"
+    assert cover["aspectRatio"] == "1:1"
 
     assert len(calls) == 1
     payload = calls[0]["payload"]
@@ -149,13 +207,13 @@ def test_cover_generate_defaults_prompt_from_title_and_body(client, monkeypatch)
     calls = _fake_enqueue(monkeypatch)
 
     response = client.post(
-        _article_url(article["id"], "cover/generate"), json={}, headers=headers
+        _article_url(article["id"], "cover/generate"), json={"aspectRatio": "1:1"}, headers=headers
     )
     assert response.status_code == 200, response.text
     prompt = response.json()["cover"]["prompt"]
     assert "测试标题" in prompt
     assert "第一段正文" in prompt
-    assert calls[0]["payload"]["aspectRatio"] == "16:9"
+    assert calls[0]["payload"]["aspectRatio"] == "1:1"
 
 
 def test_cover_generate_enqueue_failure_is_persisted(client, monkeypatch):
@@ -170,7 +228,7 @@ def test_cover_generate_enqueue_failure_is_persisted(client, monkeypatch):
     monkeypatch.setattr(queue, "enqueue", broken_enqueue)
 
     response = client.post(
-        _article_url(article["id"], "cover/generate"), json={}, headers=headers
+        _article_url(article["id"], "cover/generate"), json={"aspectRatio": "1:1"}, headers=headers
     )
     assert response.status_code == 400, response.text
     assert response.json()["code"] == "image_enqueue_failed"
@@ -187,7 +245,7 @@ def test_cover_sync_ready_then_idempotent(client, monkeypatch):
     _fake_enqueue(monkeypatch, status="succeeded", asset_ids=[asset_id])
 
     generated = client.post(
-        _article_url(article["id"], "cover/generate"), json={}, headers=headers
+        _article_url(article["id"], "cover/generate"), json={"aspectRatio": "1:1"}, headers=headers
     )
     assert generated.json()["cover"]["status"] == "running"
 
@@ -208,7 +266,7 @@ def test_cover_sync_keeps_running_when_job_not_done(client, monkeypatch):
     _provider(monkeypatch, True)
     _fake_enqueue(monkeypatch, status="running")
 
-    client.post(_article_url(article["id"], "cover/generate"), json={}, headers=headers)
+    client.post(_article_url(article["id"], "cover/generate"), json={"aspectRatio": "1:1"}, headers=headers)
     synced = client.post(_article_url(article["id"], "cover/sync"), headers=headers)
     assert synced.status_code == 200, synced.text
     assert synced.json()["cover"]["status"] == "running"
@@ -251,7 +309,7 @@ def test_inline_sync_inserts_media_block_once(client, monkeypatch):
 
     generated = client.post(
         _article_url(article["id"], "inline/generate"),
-        json={"blockId": anchor, "prompt": "示意图"},
+        json={"blockId": anchor, "prompt": "示意图", "aspectRatio": "1:1"},
         headers=headers,
     )
     assert generated.status_code == 200, generated.text
@@ -263,7 +321,7 @@ def test_inline_sync_inserts_media_block_once(client, monkeypatch):
     assert diagram["status"] == "running"
     assert diagram["jobId"]
     assert calls[0]["payload"]["purpose"] == "studio-inline"
-    assert calls[0]["payload"]["aspectRatio"] == "4:3"
+    assert calls[0]["payload"]["aspectRatio"] == "1:1"
 
     synced = client.post(_article_url(article["id"], "inline/sync"), headers=headers)
     assert synced.status_code == 200, synced.text
@@ -292,7 +350,7 @@ def test_inline_remove_deletes_diagram_and_block(client, monkeypatch):
 
     client.post(
         _article_url(article["id"], "inline/generate"),
-        json={"blockId": original_ids[0]},
+        json={"blockId": original_ids[0], "aspectRatio": "1:1"},
         headers=headers,
     )
     body = client.post(_article_url(article["id"], "inline/sync"), headers=headers).json()
@@ -317,7 +375,7 @@ def test_inline_sync_marks_failed_job(client, monkeypatch):
 
     client.post(
         _article_url(article["id"], "inline/generate"),
-        json={"blockId": anchor},
+        json={"blockId": anchor, "aspectRatio": "1:1"},
         headers=headers,
     )
     body = client.post(_article_url(article["id"], "inline/sync"), headers=headers).json()
@@ -358,6 +416,73 @@ def test_svg_card_inserts_code_block(client, monkeypatch):
     assert inserted["text"] == fence
     assert inserted["insertedDiagramId"] is None
     assert len(body["blocks"]) == len(article["blocks"]) + 1
+
+
+def test_svg_card_merges_multiple_blocks(client, monkeypatch):
+    from app.services import wechat_svg_cards
+
+    headers, article, _uid = _client_with_article(client, "media-svg-merge")
+    fence = "```svg-bars 两处数据\n指标甲|12\n指标乙|34\n```"
+    captured = {}
+
+    async def fake_draft(db, **kwargs):
+        captured.update(kwargs)
+        return {"markdown": fence, "card": {}}
+
+    monkeypatch.setattr(wechat_svg_cards, "draft_card", fake_draft)
+    first = article["blocks"][0]["id"]
+    last = article["blocks"][2]["id"]
+
+    response = client.post(
+        _article_url(article["id"], f"blocks/{first}/svg-card"),
+        json={"kind": "svg-bars", "blockIds": [first, last]},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    # 素材是勾选段落按文档顺序合并的全文；未勾选的第二段不应出现。
+    merged = captured["text"]
+    assert "第一段" in merged and "第三段" in merged
+    assert "第二段" not in merged
+    assert "测试标题" == captured["article_title"]
+    # 卡片插在勾选段落中最后一处之后。
+    body = response.json()
+    assert len(body["blocks"]) == len(article["blocks"]) + 1
+    inserted_index = next(i for i, b in enumerate(body["blocks"]) if b["text"] == fence)
+    assert body["blocks"][inserted_index - 1]["id"] == last
+
+
+def test_svg_card_rejects_unknown_block_id(client, monkeypatch):
+    from app.services import wechat_svg_cards
+
+    headers, article, _uid = _client_with_article(client, "media-svg-missing")
+
+    async def fake_draft(db, **kwargs):
+        raise AssertionError("不应调用生成")
+
+    monkeypatch.setattr(wechat_svg_cards, "draft_card", fake_draft)
+    anchor = article["blocks"][0]["id"]
+
+    response = client.post(
+        _article_url(article["id"], f"blocks/{anchor}/svg-card"),
+        json={"kind": "svg-steps", "blockIds": [anchor, "no-such-block"]},
+        headers=headers,
+    )
+    assert response.status_code == 404, response.text
+
+
+def test_svg_card_rejects_too_many_blocks():
+    import asyncio
+
+    from app.core.deps import ApiError
+    from app.services import studio_media
+
+    data = {"blocks": [{"id": f"b{i}", "text": "内容" * 3} for i in range(11)]}
+    ids = [f"b{i}" for i in range(11)]
+    with pytest.raises(ApiError) as exc:
+        asyncio.run(
+            studio_media.draft_svg_card(None, data, user_id="u", block_ids=ids, kind="svg-steps")
+        )
+    assert exc.value.detail["code"] == "svg_card_too_many_blocks"
 
 
 def test_svg_card_validation_error_passes_through(client, monkeypatch):

@@ -1,7 +1,7 @@
 import { streamGeneration } from '../../api/client'
 
 /**
- * AI 构思：复用创作空间同一条 SSE 通道（streamGeneration → /ai/text-generations），
+ * AI 构思：复用同一条 SSE 通道（streamGeneration → /ai/text-generations），
  * 输入主题 + 风格名 + 张数，输出 [{caption, framePrompt, slotType}]。
  * 解析失败时 reject，由调用方提示用户手动填写。
  */

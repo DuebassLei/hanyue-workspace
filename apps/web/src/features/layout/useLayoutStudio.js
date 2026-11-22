@@ -88,7 +88,7 @@ export function useLayoutStudio(route, router) {
         const version = versionId.value
           ? detail.versions?.find(item => item.id === versionId.value)
           : detail.versions?.find(item => item.id === detail.item?.currentVersionId) || detail.versions?.[0]
-        if (!version) throw new Error(versionId.value ? '这篇文章中找不到指定版本，请从文章管理重新打开。' : '文章还没有可排版版本，请先在创作空间保存正文。')
+        if (!version) throw new Error(versionId.value ? '这篇文章中找不到指定版本，请从文章管理重新打开。' : '文章还没有可排版版本，请先保存正文。')
         versionId.value = version.id
         title.value = version.title || detail.item?.title || ''
         body.value = version.body || ''

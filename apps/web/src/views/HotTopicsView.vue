@@ -28,7 +28,6 @@ const { disabledReason } = usePermission()
 const clusters = ref([])
 const summary = ref({})
 const degraded = ref([])
-const sources = ref({ platforms: [], enabled: [] })
 const loading = ref(true)
 const refreshing = ref(false)
 const error = ref('')
@@ -89,14 +88,14 @@ const dateTs = computed({
   },
 })
 
-// 平台切换条：条数来自服务端 summary（当天该平台的事件数），
-// 切过去之前就知道会看到多少条，不用点进去撞空列表。
-// 顺序跟随采集源配置固定，不按条数排序——每次刷新都换位置会找不到按钮。
+// 平台切换条：只列**当天真正入库过**的平台，条数来自服务端 summary
+// （当天该平台的事件数）。切过去之前就知道会看到多少条，不用点进去撞空列表。
+// 顺序按事件数倒序，同数按名字：每次重算都换位置会找不到按钮。
 const platformTabs = computed(() => {
   const counts = summary.value.platforms || {}
-  const enabled = sources.value.enabled || []
-  const known = enabled.length ? enabled : Object.keys(counts)
-  return known.map((name) => ({ name, count: counts[name] || 0 }))
+  return Object.entries(counts)
+    .sort((a, b) => (b[1] || 0) - (a[1] || 0) || a[0].localeCompare(b[0], 'zh-Hans-CN'))
+    .map(([name, count]) => ({ name, count: count || 0 }))
 })
 
 const platformTotal = computed(() =>
@@ -169,14 +168,12 @@ async function loadClusters() {
 }
 
 async function loadMeta() {
-  const [summaryData, degradedData, sourcesData] = await Promise.all([
+  const [summaryData, degradedData] = await Promise.all([
     api.get('/hot-topics/summary'),
     api.get('/hot-topics/degraded'),
-    api.get('/hot-topics/sources'),
   ])
   summary.value = summaryData || {}
   degraded.value = degradedData || []
-  sources.value = sourcesData || { platforms: [], enabled: [] }
 }
 
 async function loadAll() {
@@ -190,17 +187,13 @@ async function loadAll() {
   }
 }
 
-async function refreshTopics() {
+/** 重算：只对已入库条目重新聚簇打分，不抓外网（采集在各平台定时任务里）。 */
+async function recalculateScores() {
   refreshing.value = true
   error.value = ''
   try {
-    const result = await api.post('/hot-topics/refresh', {})
-    toast(
-      `已刷新 ${result.day}：${result.items} 条素材 → ${result.clusters} 个事件` +
-        (result.notes && result.notes.length ? `（${result.notes.join('；')}）` : ''),
-    )
-    // 重新采集后筛选条件可能把新数据挡住，重置日期筛选
-    filters.date = ''
+    const result = await api.post('/hot-topics/recalculate', {})
+    toast(`已按已入库数据重算 ${result.day}：${result.items} 条素材 → ${result.clusters} 个事件`)
     await Promise.all([loadClusters(), loadMeta()])
   } catch (err) {
     error.value = err.message
@@ -231,19 +224,17 @@ async function writeFromCluster(cluster) {
   busyId.value = cluster.id
   error.value = ''
   try {
+    // 先建稿件，再开成稿台稿（from-content 幂等），最后带 pet=1 跳过去自动打开创作小助手。
+    // 带上 hotClusterId：后端把热点标题/赛道/平台/各平台原文写进成稿台稿的素材，
+    // 创作小助手才有东西可写。
     const item = await api.post(`/hot-topics/clusters/${cluster.id}/draft`, {})
-    toast(`已新建稿件「${item.title}」，正在跳转到创作空间`)
-    router.push({
-      name: 'studio',
-      query: { id: item.id },
-      state: {
-        hotDraft: {
-          itemId: item.id,
-          title: cluster.title,
-          track: cluster.track || '',
-          platforms: [...(cluster.platforms || [])],
-        },
-      },
+    const paper = await api.post(
+      `/studio/articles/from-content/${encodeURIComponent(item.id)}?hotClusterId=${encodeURIComponent(cluster.id)}`,
+    )
+    toast(`已新建稿件「${item.title}」，正在跳转到成稿台`)
+    await router.push({
+      name: 'paper',
+      query: { id: paper.id, pet: '1' },
     })
   } catch (err) {
     error.value = err.message
@@ -304,7 +295,7 @@ onMounted(loadAll)
           今天大家搜什么 → 我该写哪一个。分数由服务端算好，悬停分数条看证据。
         </p>
         <p class="page-sub page-sub--muted">
-          榜单由「定时任务」里的脚本按点自动采集，频率与平台在那里调；右上角按钮只补一轮。
+          数据来自「定时任务」里按平台配置的采集任务；这里不抓外网，右上角按钮只按已入库条目重算。
         </p>
       </div>
       <n-space :size="8">
@@ -312,8 +303,14 @@ onMounted(loadAll)
           今日概览
           <template v-if="filters.platform"> · {{ filters.platform }}</template>
         </n-button>
-        <n-button secondary :loading="refreshing" :disabled="loading" @click="refreshTopics">
-          刷新并评分
+        <n-button
+          secondary
+          :loading="refreshing"
+          :disabled="loading"
+          title="不抓取，只把已入库条目重新聚合并打分"
+          @click="recalculateScores"
+        >
+          重算评分
         </n-button>
       </n-space>
     </div>
@@ -330,7 +327,6 @@ onMounted(loadAll)
     <HotOverviewDialog
       :show="overviewOpen"
       :summary="summary"
-      :sources="sources"
       :degraded="degraded"
       :platform="filters.platform"
       :platforms="platformTabs"
@@ -371,9 +367,12 @@ onMounted(loadAll)
       <div v-for="i in 3" :key="i" class="skeleton" style="height: 150px" />
     </div>
 
-    <n-empty v-else-if="!summary.clusters" description="点右上角「刷新并评分」，会抓取今日头条、百度、抖音、微博、知乎与 AI 资讯，合并同一事件后打分。">
+    <n-empty
+      v-else-if="!summary.clusters"
+      description="还没有热点数据。在「定时任务」里给每个平台建一条「热点入库」任务，跑一轮后这里会出分。"
+    >
       <template #extra>
-        <n-button type="primary" size="small" :loading="refreshing" @click="refreshTopics">现在采集</n-button>
+        <n-button type="primary" size="small" @click="router.push('/schedules')">去配定时任务</n-button>
       </template>
     </n-empty>
 
@@ -384,7 +383,7 @@ onMounted(loadAll)
           <span v-if="summary.platforms?.[filters.platform]">
             这个平台今天有 {{ summary.platforms[filters.platform] }} 个事件，可能都被筛选条件挡住了。
           </span>
-          <span v-else>今天这一路没采到事件（可能采集失败），换一个平台看看。</span>
+          <span v-else>今天这个平台没有入库条目（任务没跑或还没配），换一个平台看看。</span>
         </template>
         <template v-else>没有符合条件的事件。取消「只看未出稿」，或清空筛选再试试。</template>
       </template>
@@ -410,7 +409,7 @@ onMounted(loadAll)
         @write="writeFromCluster"
         @ignore="toggleIgnore"
         @toggle="toggleDetail"
-        :write-denied="disabledReason('studio.use', '创作空间')"
+        :write-denied="disabledReason('studio.use', '文章管理')"
         :sticker-denied="disabledReason('stickers.use', '贴图创作')"
         @sticker="(c) => router.push(`/stickers?new=1&clusterId=${c.id}`)"
       />

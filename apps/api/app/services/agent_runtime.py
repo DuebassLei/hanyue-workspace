@@ -14,7 +14,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
-from . import agent_policy, ai_article, ai_gateway, article_workflow, prompt_rules, writing_rules
+from . import agent_policy, ai_article, ai_gateway, article_workflow, prompt_rules
+from .skill_manifest import entry_manifest
 from .agent_policy import ToolNotAllowed
 
 # 只读写作检查工具：都作用在稿件版本上，不调用模型
@@ -118,7 +119,7 @@ def resolve_workflow_skill(db: Session, run: models.AgentRun) -> models.SkillReg
         entry = db.get(models.SkillRegistryEntry, skill_id)
         if not entry or entry.trust_status != "trusted":
             continue
-        if _workflow_steps(entry, writing_rules.effective_manifest(db, entry, getattr(run, "owner_user_id", None))):
+        if _workflow_steps(entry, entry_manifest(entry, getattr(run, "owner_user_id", None))):
             found.append(entry)
     if len(found) > 1:
         raise WorkflowConflict([entry.skill_key for entry in found])
@@ -402,7 +403,7 @@ async def _execute_tool(db: Session, run: models.AgentRun, tool_id: str, args: d
             prompt = f"{prompt}\n\n{inject}\n{outline[:2000]}"
         skill = _resolve_run_skill(db, run)
         # 规则表为准：个人副本按类型覆盖全局（T2 换源，条目 manifest 只剩元数据兜底）
-        manifest = writing_rules.effective_manifest(db, skill, getattr(run, "owner_user_id", None))
+        manifest = entry_manifest(skill, getattr(run, "owner_user_id", None))
         target = manifest.get("targetLength")
         if not isinstance(target, int) or isinstance(target, bool) or target <= 0:
             target = 900
@@ -635,7 +636,7 @@ def _run_writing_check(db: Session, run: models.AgentRun, tool_id: str, args: di
 
     if tool_id == "review_article":
         skill = _resolve_run_skill(db, run)
-        manifest = writing_rules.effective_manifest(db, skill, getattr(run, "owner_user_id", None))
+        manifest = entry_manifest(skill, getattr(run, "owner_user_id", None))
         draft = {"title": version.title or "", "markdown": markdown, "summary": version.summary or ""}
         result = article_workflow.review_article(draft, manifest.get("reviewRules") or [])
         return {**result, "versionId": version.id}
@@ -658,7 +659,7 @@ def _run_writing_check(db: Session, run: models.AgentRun, tool_id: str, args: di
         inline_prompts = list(draft.inline_prompts)
         cover_prompt = draft.cover_prompt or None
     skill = _resolve_run_skill(db, run)
-    policy = writing_rules.effective_manifest(db, skill, getattr(run, "owner_user_id", None)).get("imagePolicy")
+    policy = entry_manifest(skill, getattr(run, "owner_user_id", None)).get("imagePolicy")
     plan = article_workflow.plan_images(markdown, inline_prompts, cover_prompt, policy)
     return {**plan, "versionId": version.id}
 
@@ -693,7 +694,7 @@ async def start_run(db: Session, run: models.AgentRun) -> None:
 
     if flow_skill is not None:
         try:
-            flow_manifest = writing_rules.effective_manifest(db, flow_skill, run.owner_user_id)
+            flow_manifest = entry_manifest(flow_skill, run.owner_user_id)
             steps = steps_from_workflow(flow_skill, run.goal, manifest=flow_manifest)
             assert_workflow_authorized(steps, allowed_tools)
         except AgentRuntimeError as exc:

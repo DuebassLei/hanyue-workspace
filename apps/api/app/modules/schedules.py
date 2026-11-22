@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, Query, Response
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from .. import models, schemas
 from ..core import pagination
@@ -351,11 +351,11 @@ def update_schedule(
 def delete_schedule(task_id: str, user: CurrentUser, db: DbSession) -> dict:
     task = _require(task_id, user, db)
     _require_editable(task, user)
-    # SQLite 默认不启用外键级联，这里显式删账本，避免留下孤儿 run
-    for run in db.scalars(
-        select(models.ScheduledTaskRun).where(models.ScheduledTaskRun.task_id == task.id)
-    ).all():
-        db.delete(run)
+    # 显式删账本，避免留下孤儿 run。ScheduledTaskRun 与 ScheduledTask 之间无 relationship，
+    # ORM 不保证先删子表；必须批量删 run 并 flush 落库后再删 task，否则 PostgreSQL 报
+    # scheduled_task_runs_task_id_fkey 外键冲突。
+    db.execute(delete(models.ScheduledTaskRun).where(models.ScheduledTaskRun.task_id == task.id))
+    db.flush()
     db.delete(task)
     db.commit()
     scheduler_module.unsync(task_id)

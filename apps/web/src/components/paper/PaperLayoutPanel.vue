@@ -9,25 +9,25 @@
  * 字段严格对齐后端 `schemas.WeChatStudioOptions`（多一个字段都会被 422 拒），
  * 当前可用字段只有：风格 / 配色 / 横幅 / 文末关注 / 作者名 / 口号 / 头像 / 标题。
  */
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { NButton, NInput, NSwitch } from 'naive-ui'
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { NButton, NInput, NModal, NSwitch } from 'naive-ui'
 import { studioExtraApi } from '../../api/studioExtra'
 import { BANNER_MODES, COLOR_PRESETS, DEFAULT_OPTIONS, STYLE_PRESETS } from '../../features/layout/studioPresets'
 
 const props = defineProps({
   article: { type: Object, default: null },
   busy: { type: String, default: '' },
+  options: { type: Object, default: null },
 })
 const emit = defineEmits(['change', 'saved', 'notify'])
 
 const local = ref({ ...DEFAULT_OPTIONS })
-const catalog = ref({ styles: [], themes: [], svgCards: [], banners: [] })
+const catalog = shallowRef({})
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
+const showBannerExamples = shallowRef(false)
 
-// 程序化赋值（载入 / 重置）期间不往外抛 change，避免父级收到一次假的用户改动
-let syncing = false
 let sequence = 0
 let disposed = false
 
@@ -40,37 +40,38 @@ const themes = computed(() => {
   // catalog.themes 每项是 {id, name, main, soft, tint}，老结构的 swatches 也兜一下
   return list.map((item) => ({ id: item.id, name: item.name, color: item.main || (item.swatches || [])[0] || 'transparent' }))
 })
-const banners = computed(() => BANNER_MODES.map((item) => ({ id: item.id, label: item.label, desc: item.desc })))
+const banners = BANNER_MODES
+const currentBanner = computed(() => banners.find((item) => item.id === local.value.openingBanner) || null)
+const bannerExamples = computed(() => (catalog.value.banners || [])
+  .filter((item) => item.previewHtml)
+  .map((item) => ({
+    ...item,
+    document: `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>html{color-scheme:light}body{margin:0;padding:10px;color:#333;background:#fff;font-family:sans-serif}body>section{margin:0!important}svg{max-width:100%;height:auto}</style></head><body>${item.previewHtml}</body></html>`,
+  })))
 const currentStyle = computed(() => styles.value.find((item) => item.id === local.value.style) || null)
 const currentTheme = computed(() => themes.value.find((item) => item.id === local.value.theme) || null)
 
 async function load() {
   const articleId = props.article?.id
-  if (!articleId) return
   const seq = ++sequence
-  loading.value = true
+  catalog.value = {}
+  showBannerExamples.value = false
+  local.value = { ...DEFAULT_OPTIONS, ...props.article?.layoutOptions, ...props.options }
+  saving.value = false
+  loading.value = Boolean(articleId)
   error.value = ''
+  if (!articleId) return
   try {
     const data = await studioExtraApi.renderOptions(articleId)
     if (seq !== sequence || disposed) return
-    syncing = true
-    // 初始值优先级：本地兜底 → 服务端默认值 → 稿件当前生效选项（接口已补默认、回填标题）
     const defaults = data?.catalog?.defaults || {}
     const current = data?.options || props.article?.layoutOptions || {}
-    local.value = { ...DEFAULT_OPTIONS, ...defaults, ...current }
-    catalog.value = {
-      styles: data?.catalog?.styles || [],
-      themes: data?.catalog?.themes || [],
-      svgCards: data?.catalog?.svgCards || [],
-      banners: data?.catalog?.banners || [],
-    }
-    await nextTick()
-    syncing = false
-    // 载入后主动同步一次，父级才知道要拿什么选项去渲染
+    // 未保存的选项由父组件保留；切回侧栏时优先恢复它们。
+    local.value = { ...DEFAULT_OPTIONS, ...defaults, ...current, ...props.options }
+    catalog.value = data?.catalog || {}
     emit('change', { ...local.value })
   } catch (err) {
     if (seq !== sequence || disposed) return
-    syncing = false
     error.value = err.message || '排版选项载入失败'
   } finally {
     if (seq === sequence && !disposed) loading.value = false
@@ -79,29 +80,28 @@ async function load() {
 
 function pick(patch) {
   local.value = { ...local.value, ...patch }
+  emit('change', { ...local.value })
 }
 
 async function saveDefault() {
   const articleId = props.article?.id
   if (!articleId || saving.value) return
+  const seq = sequence
   saving.value = true
   error.value = ''
   try {
     const snapshot = await studioExtraApi.saveLayout(articleId, { ...local.value })
+    if (seq !== sequence || disposed) return
     if (snapshot) emit('saved', snapshot)
     emit('notify', '排版已设为这篇稿件的默认样式')
   } catch (err) {
+    if (seq !== sequence || disposed) return
     error.value = err.message || '保存失败，请重试'
     emit('notify', error.value)
   } finally {
-    saving.value = false
+    if (seq === sequence && !disposed) saving.value = false
   }
 }
-
-watch(local, (value) => {
-  if (syncing) return
-  emit('change', { ...value })
-}, { deep: true })
 
 watch(() => props.article?.id, load, { immediate: true })
 
@@ -164,8 +164,8 @@ onBeforeUnmount(() => {
 
       <section class="setting">
         <div class="setting-head">
-          <h3>开篇横幅</h3>
-          <span>{{ banners.find((item) => item.id === local.banner)?.label || '无' }}</span>
+          <h3>开头横幅</h3>
+          <NButton v-if="bannerExamples.length" size="tiny" @click="showBannerExamples = true">对比样式</NButton>
         </div>
         <div class="banner-grid">
           <button
@@ -173,12 +173,13 @@ onBeforeUnmount(() => {
             :key="item.id"
             type="button"
             class="banner-chip"
-            :class="{ active: local.banner === item.id }"
+            :class="{ active: currentBanner?.id === item.id }"
+            :aria-pressed="currentBanner?.id === item.id"
             :title="item.desc"
-            @click="pick({ banner: item.id })"
+            @click="pick({ openingBanner: item.id })"
           >{{ item.label }}</button>
         </div>
-        <p class="setting-caption">横幅要用「横幅」页生成规格后才会出现在正文开头。</p>
+        <p class="setting-caption">{{ currentBanner?.desc || '沿用稿件原有的横幅设置。' }}</p>
       </section>
 
       <section class="setting">
@@ -235,6 +236,16 @@ onBeforeUnmount(() => {
         </NButton>
       </div>
     </fieldset>
+
+    <NModal v-model:show="showBannerExamples" preset="card" title="对比开头横幅" class="banner-comparison">
+      <p class="setting-caption comparison-note">固定示例 · 品牌橙</p>
+      <div class="comparison-grid">
+        <figure v-for="item in bannerExamples" :key="item.id" class="comparison-item">
+          <figcaption>{{ item.name }}</figcaption>
+          <iframe class="comparison-frame" :title="`${item.name}示例`" :srcdoc="item.document" sandbox="" />
+        </figure>
+      </div>
+    </NModal>
   </section>
 </template>
 
@@ -318,6 +329,30 @@ onBeforeUnmount(() => {
   color: var(--paper-accent);
   background: var(--paper-accent-tint);
   border-color: var(--paper-accent);
+}
+
+.banner-comparison { width: min(860px, calc(100vw - 32px)); }
+.comparison-note { margin-bottom: 12px; }
+.comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  max-height: 64vh;
+  overflow: auto;
+}
+.comparison-item { min-width: 0; margin: 0; font-size: 12px; font-weight: 600; }
+.comparison-frame {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: clamp(132px, 24vw, 176px);
+  margin-top: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: #fff;
+}
+@media (max-width: 560px) {
+  .comparison-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--color-text-tertiary); }

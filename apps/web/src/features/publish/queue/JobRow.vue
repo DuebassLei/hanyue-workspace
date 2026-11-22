@@ -18,7 +18,7 @@ defineEmits(['record', 'retry', 'cancel', 'delete', 'open'])
   <div class="list-row" tabindex="0" role="group" :aria-label="`${job.contentTitle || '发布任务'}，${job.status}`" @click="$emit('open')" @keydown.enter="$emit('open')">
     <div class="list-main">
       <div class="list-title">
-        <router-link v-if="job.contentItemId" class="job-article-link" :to="{ name: 'studio', query: { id: job.contentItemId } }" @click.stop>
+        <router-link v-if="job.contentItemId" class="job-article-link" :to="{ name: 'articles', query: { id: job.contentItemId } }" @click.stop>
           {{ job.contentTitle || '未命名稿件' }}
         </router-link>
         <span v-else>{{ job.contentTitle || '未关联稿件' }}</span>

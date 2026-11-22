@@ -72,6 +72,16 @@ def check_endpoint(value: str) -> str:
     return str(value)
 
 
+def _finite_number(value) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 async def detect(text: str, *, key: str, endpoint: str | None = None) -> dict:
     """调一次朱雀文本检测，返回总体占比、片段与 token 用量。"""
     if not key:
@@ -99,60 +109,50 @@ async def detect(text: str, *, key: str, endpoint: str | None = None) -> dict:
     except httpx.TimeoutException as exc:
         raise QualityError("朱雀接口超时，稍后再试") from exc
     except httpx.HTTPError as exc:
-        raise QualityError(f"连不上朱雀接口：{exc}") from exc
+        raise QualityError("连不上朱雀接口") from exc
 
-    raw = response.text
-    try:
-        data = response.json()
-    except ValueError:
-        data = None
-    if response.status_code >= 400:
+    if not response.is_success:
         if response.status_code in (401, 403):
             raise QualityError("朱雀 API Key 无效或没有权限，到设置里检查一下")
-        detail = ""
-        if isinstance(data, dict):
-            error = data.get("error")
-            detail = str(
-                data.get("msg")
-                or (error.get("message") if isinstance(error, dict) else error)
-                or data.get("message")
-                or ""
-            )
-        detail = detail or raw[:200]
         if response.status_code == 429:
-            raise QualityError(f"朱雀接口限流或额度用完了：{detail}" if detail else "朱雀接口限流或额度用完了")
-        raise QualityError(f"朱雀接口报错（{response.status_code}）" + (f"：{detail}" if detail else ""))
+            raise QualityError("朱雀接口限流或额度用完了")
+        raise QualityError(f"朱雀接口报错（{response.status_code}）")
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise QualityError("朱雀接口返回的不是 JSON") from exc
     if not isinstance(data, dict):
         raise QualityError("朱雀接口返回的不是 JSON")
     if data.get("status") and data.get("status") != "success":
-        raise QualityError(str(data.get("msg") or f"朱雀接口状态异常：{data.get('status')}"))
+        raise QualityError("朱雀接口状态异常")
 
     def pct(value):
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
+        number = _finite_number(value)
+        if number is None or not 0 <= number <= 1:
             return None
         return math.floor(number * 1000 + 0.5) / 10
 
     ratio = data.get("labels_ratio") if isinstance(data.get("labels_ratio"), dict) else None
     rows = data.get("segment_labels") if isinstance(data.get("segment_labels"), list) else []
-    segments = []
-    for row in sorted(rows, key=lambda item: float((item or {}).get("order") or 0))[:2000]:
-        if not isinstance(row, dict) or not isinstance(row.get("text"), str):
+    ordered = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("text"), str) or not row["text"].strip():
             continue
-        try:
-            conf = float(row.get("conf") or 0)
-        except (TypeError, ValueError):
+        label = _finite_number(row.get("label"))
+        if label not in (0, 1, 2):
+            continue
+        conf = _finite_number(row.get("conf"))
+        if conf is None:
+            if label != 0 or row.get("conf") is not None:
+                continue
             conf = 0.0
-        segments.append({
-            "text": row["text"],
-            "label": int(float(row.get("label") or 0)),
-            "conf": max(0.0, min(1.0, conf)),
-        })
+        order = _finite_number(row.get("order")) or 0.0
+        ordered.append((order, {"text": row["text"], "label": int(label), "conf": max(0.0, min(1.0, conf))}))
+    ordered.sort(key=lambda item: item[0])
     usage = data.get("makers_models_usage") or data.get("usage") or {}
     try:
         tokens = int(usage.get("total_tokens"))
-    except (TypeError, ValueError, AttributeError):
+    except (TypeError, ValueError, AttributeError, OverflowError):
         tokens = None
     return {
         "overall": (
@@ -160,7 +160,7 @@ async def detect(text: str, *, key: str, endpoint: str | None = None) -> dict:
             if ratio
             else None
         ),
-        "segments": segments,
+        "segments": [segment for _, segment in ordered[:2000]],
         "tokens": tokens,
     }
 
@@ -457,44 +457,44 @@ _PATTERNS = (
 
 
 def local_check(article: dict) -> dict:
-    """本地规则打分，产出与朱雀同构的 segments（分数 0–1）。"""
-    # 复用项目已有的规则词表（写作规则里可配），避免两套「AI 腔」标准
+    """本地规则打分，返回段落风险及文章维度分，不修改文章。"""
     from .article_workflow import check_ai_tone
 
     segments = []
-    checked_chars = 0.0
+    checked_chars = 0
     weighted = 0.0
+    tone_total = structure_total = rhythm_total = 0.0
     for index, block in enumerate(article["blocks"]):
         if not is_checkable(block["text"]):
-            block["check"] = None
             continue
         text = plain_of(block["text"])
-        score = 0.08
         hits = []
-        try:
-            tone = check_ai_tone(block["text"])
-        except Exception:  # noqa: BLE001 - 词表异常不该让整轮检测失败
-            tone = {"hits": []}
-        tone_hits = tone.get("hits") or []
+        tone_hits = check_ai_tone(block["text"])["hits"]
+        tone_penalty = min(0.36, 0.06 * len(tone_hits))
         if tone_hits:
-            score += min(0.36, 0.06 * len(tone_hits))
             hits.extend(sorted({str(hit.get("ruleId")) for hit in tone_hits})[:4])
+        structure_penalty = 0.0
         for pattern, weight, name in _PATTERNS:
             if re.search(pattern, text):
-                score += weight
+                structure_penalty += weight
                 hits.append(name)
         # 长段落里句句同构更像 AI：按句号切分后看长度方差
+        rhythm_penalty = 0.0
         sentences = [s for s in re.split(r"[。！？]", text) if len(s.strip()) >= 8]
         if len(sentences) >= 3:
             lengths = [len(s) for s in sentences]
             mean = sum(lengths) / len(lengths)
             variance = sum((n - mean) ** 2 for n in lengths) / len(lengths)
             if variance < 12:
-                score += 0.12
+                rhythm_penalty = 0.12
                 hits.append("句长一致")
-        score = min(0.99, round(score, 2))
-        checked_chars += len(text)
-        weighted += score * len(text)
+        score = min(0.99, round(0.08 + tone_penalty + structure_penalty + rhythm_penalty, 2))
+        chars = len(text)
+        checked_chars += chars
+        weighted += score * chars
+        tone_total += tone_penalty * chars
+        structure_total += structure_penalty * chars
+        rhythm_total += rhythm_penalty * chars
         if score >= 0.5:
             segments.append({
                 "block": index + 1,
@@ -503,9 +503,21 @@ def local_check(article: dict) -> dict:
                 "hits": hits,
             })
     overall_score = round(weighted / checked_chars, 3) if checked_chars else 0.0
-    article["zhuque"] = {"round": 0, "lastAt": None}
+    # 每个轴按自己的最大扣分归一化；高分表示该轴的规则命中较少。
+    axes = (
+        ("wording", "用词自然度", tone_total, 0.36),
+        ("structure", "句式灵活度", structure_total, sum(weight for _, weight, _ in _PATTERNS)),
+        ("sentence_rhythm", "句长变化", rhythm_total, 0.12),
+    )
+    dimensions = []
+    if checked_chars:
+        dimensions = [
+            {"id": axis, "label": label, "score": round(100 * (1 - min(1, penalty / (checked_chars * maximum))))}
+            for axis, label, penalty, maximum in axes
+        ]
     return {
         "segments": segments,
+        "dimensions": dimensions,
         "overall": {
             "human": round((1 - overall_score) * 100, 1),
             "suspect": round(overall_score * 100, 1),

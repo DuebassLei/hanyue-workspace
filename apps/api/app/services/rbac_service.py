@@ -73,6 +73,8 @@ MENU_SEED: tuple[MenuSeed, ...] = (
             _page("studio", "创作空间", "创作", "studio", "studio.use"),
             _page("paper", "成稿台", "成稿", "paper", "studio.use"),
             _page("prompts", "提示词库", "提示词", "prompts", "prompts.use"),
+            # 技能中心与创作入口同层：它服务的是「怎么写」，不是某一类内容
+            _page("skills", "技能中心", "技能", "skill", "studio.use"),
             _group(
                 "group-articles",
                 "文章",
@@ -131,7 +133,6 @@ MENU_SEED: tuple[MenuSeed, ...] = (
         (
             _page("models", "模型管理", "模型", "models", "models.view"),
             _page("logs", "系统日志", "日志", "logs", "logs.view"),
-            _page("writing-rules", "创作规则", "规则", "settings", "writing_rules.use"),
             _page("settings", "设置", "我的", "settings", "settings.view"),
         ),
     ),

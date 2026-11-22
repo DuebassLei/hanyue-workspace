@@ -28,6 +28,9 @@ DEFAULT_ROLE_KEY = "member"
 PERMISSION_CATALOG: tuple[tuple[str, str, str, int], ...] = (
     ("overview.view", "创作总览", "创作", 10),
     ("hot_topics.view", "热点选题", "创作", 20),
+    # 能看热点 ≠ 能往里灌数据：入库会改全局热点库，手工补数/外部对接才需要它。
+    # 定时脚本走服务层，不依赖这个权限点。
+    ("hot_topics.ingest", "热点数据入库", "创作", 25),
     ("calendar.view", "内容日历", "创作", 30),
     ("studio.use", "创作空间", "创作", 40),
     ("cards.use", "图文卡片", "创作", 50),
@@ -38,8 +41,6 @@ PERMISSION_CATALOG: tuple[tuple[str, str, str, int], ...] = (
     ("characters.use", "角色库", "创作", 110),
     ("prompts.use", "提示词库", "创作", 120),
     ("assets.use", "素材图库", "创作", 130),
-    # 看规则和改规则分开：个人副本人人可维护，全局规则是全员共用的默认值，改了影响所有人
-    ("writing_rules.use", "创作规则查看", "创作", 135),
     # 读与写分开：看「发过什么、失败了什么」是一件事，能真的推到公众号是另一件事。
     # 发布一旦发错，删不掉也撤不回，且会占用平台侧的群发额度——所以只读观察
     # （客服/内容负责人复盘）不该连带拿到推送能力。
@@ -55,7 +56,6 @@ PERMISSION_CATALOG: tuple[tuple[str, str, str, int], ...] = (
     ("logs.view", "系统日志", "系统", 310),
     ("settings.view", "设置", "系统", 320),
     ("image_styles.manage", "风格库管理", "系统", 330),
-    ("writing_rules.manage", "创作规则管理", "系统", 340),
     ("rbac.role.manage", "角色管理", "权限", 400),
     ("rbac.menu.manage", "菜单管理", "权限", 410),
     ("rbac.user.manage", "用户管理", "权限", 420),
@@ -73,7 +73,6 @@ _CREATE_BASE = (
     "assets.use",
     "prompts.use",
     "settings.view",
-    "writing_rules.use",
 )
 
 _EDITOR_EXTRA = (

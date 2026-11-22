@@ -1,6 +1,6 @@
 # 热点选题
 
-> 页面：`/hot-topics`　接口：`/api/v1/hot-topics/*`　代码：`modules/hot_topics.py`、`services/hot_topics.py`、`services/hot_sources.py`、`services/hot_ranking.py`
+> 页面：`/hot-topics`　接口：`/api/v1/hot-topics/*`　代码：`modules/hot_topics.py`、`services/hot_topics.py`、`services/hot_ranking.py`
 
 ## 1. 它解决什么
 
@@ -17,65 +17,45 @@
 ## 2. 链路
 
 ```
-22 路采集（catalog 注册 / 三类 Adapter）→ 逐条归一/去重 → 同一事件合并（聚簇）→ 100 分评分 → 列表/详情 → 一键成稿
-app.hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster   content_items
+定时任务（一个平台一条，脚本自己请求+解析）
+   → POST /hot-topics/ingest（固定格式）→ 逐条归一/去重 → 同一事件合并（聚簇）→ 100 分评分 → 列表/详情 → 一键成稿
+                                 hot_ranking.cluster_items   hot_ranking.score_cluster   content_items
 ```
 
-一次 `POST /hot-topics/refresh` 完成前三步并落库；后续读取只查库，不再访问外网。
+一次 ingest 完成写入 + 聚簇 + 评分并落库；后续读取只查库，不再访问外网。
 
-### 2.1 采集（`app/hot_sources/`）
+### 2.1 入库（`hot_topics.ingest`）
 
-**平台清单的单一真相源是 `apps/api/app/hot_sources/catalog.yaml`**，下表只是便于阅读的镜像；
-新增平台改 catalog，不改这张表、不改采集主流程。
+服务端不认识任何平台，只收一种固定格式：一个平台的一轮榜单。
 
-| 平台 | 方式（Adapter·parser） | 原始链接 |
-|---|---|---|
-| 今日头条 | JsonAdapter·direct | 有 |
-| 百度 | JsonAdapter·direct | 有 |
-| 抖音 | JsonAdapter·direct | 有 |
-| 微博 | JsonAdapter·agg（60s） | 无（留空，不用搜索页冒充） |
-| 知乎 | JsonAdapter·agg（60s） | 无 |
-| AI·热点 | JsonAdapter·aihot（多来源报道数当热度） | 有 |
-| AI·资讯 | JsonAdapter·aihot（24h 资讯流） | 有 |
-| AIHOT 热点与早报 | TextPatternAdapter·aihot_agent（编辑过的 Top 榜） | 有 |
-| AIHOT 日报 | TextPatternAdapter·aihot_agent（分类早报） | 有 |
-| 微信 10w+ 爆文池 | JsonAdapter·wechat_10w（公开快照） | 有 |
-| 微信文章搜索 | TextPatternAdapter·wechat_search（需配置关键词） | 有（搜索结果页） |
-| 开源榜·每日飙升 | TextPatternAdapter·openrank | 有 |
-| 开源榜·每周飙升 | TextPatternAdapter·openrank | 有 |
-| 开源榜·Star 总榜 | TextPatternAdapter·openrank | 有 |
-| B站 | JsonAdapter·uapi | 有 |
-| 贴吧 | JsonAdapter·uapi | 有 |
-| 36氪 | JsonAdapter·uapi | 有 |
-| 虎嗅 | JsonAdapter·uapi | 有 |
-| IT之家 | JsonAdapter·uapi | 有 |
-| 酷安 | JsonAdapter·uapi | 有 |
-| 掘金 | JsonAdapter·uapi | 有 |
-| 少数派 | JsonAdapter·uapi | 有 |
+```json
+{
+  "platform": "微博",
+  "sourceUrl": "https://60s.viki.moe/v2/weibo",
+  "capturedAt": "2026-11-22 09:05",
+  "items": [{"title": "某地宣布延长供暖期", "rank": 1, "hot": 1234567, "url": "https://example.com/a"}]
+}
+```
+
+- `platform` 必填（≤32 字），同名才是同一个平台；`sourceUrl` 必填，必须 http/https 绝对地址，记这一轮**真正请求**的地址。
+- `items[].title` 必填，空标题在批内丢弃、不让整批失败；`rank` / `hot` 可空整数；`items[].url` 是单条内容链接。
+- 非法请求（缺 platform、缺/非法 sourceUrl、items 不是数组、rank/hot 不是整数）→ 422，不入库。
+- `items` 允许空数组：表示这轮该平台没条目，不删除已入库数据。
+- 采集源地址落 `hot_items.source_url`（批次级），与单条 `url` 分开；不参与身份键、不参与评分。
+
+**怎么配一个平台**（加平台、换源、换字段名）见 `docs/hot-topics-config.md`，只在「定时脚本」里改任务，不改本模块。
 
 约束：
 
-- 所有出站请求经 `CollectContext.safe_get` → `core/ssrf.safe_request`（仅 HTTPS、端口白名单、逐跳 IP 固定校验、不手搓 client）。3xx 按失败处理，避免把重定向页当 JSON 解析成空榜单。
-- 单源失败返回 `CollectResult(ok=false, error_code=...)` 只进 `notes`，其余源照常返回；全部源都失败才抛 `all_sources_failed`（502，`retryable=true`），不返回「0 个事件」的假成功。
-- 解析到 0 行标注 `selector_may_changed`（页面结构可能改版），与「平台本来就没数据」区分；这些 notes 会进入 `GET /hot-topics/degraded`（`dim=source`）。
-- 搜索页 URL（`/s?word=`、`/search/` 等）按「拿不到原文」处理，留空。例外是「微信文章搜索」：搜狗没有原文直链，结果页链接是唯一入口，原样保留。
+- 采集发生在定时脚本里（服务端高信任代码），热点接口自身不再发外网请求，所以没有「源注册表上的 SSRF 开关」。
+- 平台清单不再登记在仓库：热点页的平台条 = 当天 `hot_items` 里出现过的 `platform`。
+- 单平台写失败由那条任务自己记账（任务运行记录里能看到错误码），不影响其它平台；服务端不伪造「0 个事件」的成功。
 
-**数据契约**：采集器只产出 `HotRawItem{platform, rank, title, hot, url, captured_at, extra}`
-与批次结果 `CollectResult{platform, ok, items, notes, error_code, fetched_at}`，
-不做去重/合并/评分/标题归一化。`ctx.safe_get` / `ctx.config` / `ctx.now()` 是它拿到的全部能力。
-三类内置模板：`JsonAdapter`（直取/聚合/AIHOT/UAPI）、`TextPatternAdapter`（Markdown/HTML 正则）、
-`ScriptAdapter`（受控进程内脚本）。新增平台 = catalog 加一行（必要时加一个脚本函数），
-主流程零改动；error_code 清单见 `HANDOFF.md`。
-
-环境变量：
+环境变量只剩一个：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HOT_TOPICS_PLATFORMS` | 空（全部） | 逗号分隔，只跑指定平台（平台名对齐 catalog 的 `name`），如 `微博,知乎` |
-| `HOT_TOPICS_TIMEOUT` | `12` | 单次请求超时（秒，最小 3）；catalog 中该源的 `timeout_seconds` 可覆盖 |
-| `HOT_TOPICS_REFRESH_COOLDOWN` | `15` | 刷新冷却（秒），0 表示关闭 |
-| `HOT_TOPICS_WECHAT_10W_URL` | 内置公开快照地址 | 微信 10w+ 爆文池的 JSON 地址，快照失效时替换 |
-| `HOT_TOPICS_WECHAT_KEYWORD` | 空（跳过该源） | 微信文章搜索的关键词；不配就不搜，不会替用户决定搜什么 |
+| `HOT_TOPICS_REFRESH_COOLDOWN` | `15` | 页面「重算评分」的冷却（秒），0 表示关闭；定时 ingest 不受它影响 |
 
 ### 2.2 合并同一事件（`hot_ranking.cluster_items`）
 
@@ -120,19 +100,20 @@ app.hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster 
 ### 2.5 幂等
 
 - 条目身份：`platform + "\x1f" + title_norm`（`item_uid` 唯一）。
-- 名次采样：`(item_id, captured_at)` 唯一，重复刷新同一时刻不会重复插入。
-- 簇：按 `fingerprint` 复用；用户设的 `ignored` / `watching` / `generated` 在刷新后保留。
-- 成员归属**每轮重建**：刷新时先清空当天条目的 `cluster_id` 再按本轮分组写回。掉榜的条目会退出事件卡，簇的成员数只反映本轮，不会跨轮累积；同一轮里一个已有簇只能被一个分组认领（避免多个分组把成员堆进同一张卡片）。
+- 名次采样：`(item_id, captured_at)` 唯一，同一轮重复入库不会重复插入。
+- 簇：按 `fingerprint` 复用；用户设的 `ignored` / `watching` / `generated` 在重算后保留。
+- **每轮用当天全部已入库条目重算**：一轮 ingest 只写本平台条目，聚簇输入却是当天全部条目（含刚写入的），所以先写平台 A、再写平台 B，A 不会从簇里掉出去，跨平台合并照样成立；同一轮里一个已有簇只能被一个分组认领。
+- 重算（`POST /hot-topics/recalculate`）不写条目、不抓数据，只按库里当天条目重算一遍；连跑两次分数一致。
 - 成稿：同一簇重复点「写这篇」返回同一篇稿件。
 
 ## 3. 接口
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| GET | `/hot-topics/sources` | 公开 | 采集源清单与启用状态 |
-| POST | `/hot-topics/refresh` | 登录 | 采集 → 聚簇 → 评分；body `{date?}`；冷却内返回 429 `too_frequent` |
+| POST | `/hot-topics/ingest` | `hot_topics.ingest` + `hot_topics.view` | 一个平台的一轮榜单入库；格式非法 422 |
+| POST | `/hot-topics/recalculate` | 登录 | 按已入库数据重算聚簇与分数，不抓取；body `{date?}`；冷却内 429 `too_frequent`，当天无数据 400 `no_hot_data` |
 | GET | `/hot-topics/clusters` | 登录 | 列表。`date` / `minScore` / `track` / `platform` / `status` / `q` / `sort=score\|time\|resonance` / `limit` |
-| GET | `/hot-topics/clusters/{id}` | 登录 | 详情：成员条目、名次采样、关联稿件标题 |
+| GET | `/hot-topics/clusters/{id}` | 登录 | 详情：成员条目（含 `sourceUrl`）、名次采样、关联稿件标题 |
 | PATCH | `/hot-topics/clusters/{id}` | 登录 | `{status}`：`new` / `watching` / `ignored`；`generated` 只能由成稿写入 |
 | POST | `/hot-topics/clusters/{id}/draft` | 登录 | 热点 → 稿件（201，返回 `ContentOut`） |
 | GET | `/hot-topics/summary` | 登录 | 概要素材数/事件数/≥70 分数量/已出稿数/赛道分布/各平台事件数 |
@@ -140,15 +121,17 @@ app.hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster 
 
 列表默认按分数降序，不按 id：热点的意义就是最值得写的在最前。`platform` 过滤在 Python 侧完成——JSON 列的 LIKE 在 SQLite/PostgreSQL 行为不一致，当天簇数量有限，多扫一遍比写方言分支便宜。
 
+旧的 `GET /hot-topics/sources` 与 `POST /hot-topics/refresh` 已删除：平台列表改读当天已入库平台（`summary.platforms`），「刷新并评分」改成「重算评分」。
+
 ### 兼容旧契约
 
-创作空间「灵感」面板仍调 `GET /api/v1/hot-topics`（`modules/ai_content.py`）。该端点现在优先读当日已评分簇（`title` 为事件标题，`hot` 为 `"82 分 · 强烈推荐"`），库中一条簇都没有时才回落到旧的单源 `HOT_TOPICS_API_URL`。旧行为未被破坏。
+创作空间「灵感」面板仍调 `GET /api/v1/hot-topics`（`modules/ai_content.py`）。该端点只读当日已评分簇（`title` 为事件标题，`hot` 为 `"82 分 · 强烈推荐"`），没有数据时返回空列表——不再回落到任何外部单源。
 
 ## 4. 数据表
 
 | 表 | 用途 | 关键约束 |
 |---|---|---|
-| `hot_items` | 各平台原始条目 | `item_uid` 唯一；`(day, platform, rank)` 索引 |
+| `hot_items` | 各平台原始条目 | `item_uid` 唯一；`(day, platform, rank)` 索引；`url` 是单条链接，`source_url` 是本轮采集地址 |
 | `hot_rank_history` | 名次采样，用于升降/新鲜度 | `(item_id, captured_at)` 唯一 |
 | `hot_clusters` | 合并后的事件与评分 | `fingerprint` 复用；`(last_seen_day, score DESC, id)` 索引 |
 
@@ -158,35 +141,38 @@ app.hot_sources.collect   hot_ranking.cluster_items   hot_ranking.score_cluster 
 
 `apps/web/src/views/HotTopicsView.vue` + `features/hot/HotClusterCard.vue` + `features/hot/HotScoreBars.vue` + `features/hot/HotPlatformTabs.vue`
 
-- 顶部概要：素材 → 事件 → 值得写 → 已出稿，赛道分布条，采集源与数据不足提示。
+- 顶部概要：素材 → 事件 → 值得写 → 已出稿，赛道分布条，当天已入库平台与数据不足提示。
 - 平台切换条：一行带条数的 chip，条数来自 `summary.platforms`（当天该平台的事件数），点一下只看该渠道，再点一下回到全部；条数为 0 的平台置灰不可点；左右方向键 / Home / End 可移动；窄屏横向滚动、触控目标 44px。选中平台写进 URL（`?platform=微博`），刷新、分享、后退都能还原。
+- 右上角「重算评分」：调用 `POST /hot-topics/recalculate`，只按已入库条目重算，不抓外网。
 - 其余筛选：日期 / 赛道 / 最低分 / 排序（价值、最新、共振）/ 只看未出稿 / 标题搜索（250ms 防抖）。筛选栏滚动时贴顶；宽屏排一行，搜索在第二行。
-- 空态区分「当天没有采集到数据」和「筛选挡光了」；选了平台时会说明该平台当天有几个事件，并给「看全部平台 / 清空筛选」两个出口。
+- 空态区分「当天还没有平台入库」「筛选挡光了」；前者给「去配定时任务」入口，后者说明该平台当天有几个事件，并给「看全部平台 / 清空筛选」两个出口。
 - 事件卡（扫读用，宽屏单卡约 70px）：左侧分数与档位，右侧两行——标题行，以及「平台 | 赛道·首见·名次·原文数 | 五维分数条 | 写这篇/忽略/展开原文」。五维分数条在卡片里是紧凑单行（`HotScoreBars variant="compact"`），悬浮看证据，完整明细仍看「展开原文」。窄屏（≤900px）隐藏次要元信息，≤560px 时分数条与操作各占一行。
-- 「展开原文」才请求详情（含各平台原始条目与链接）。
+- 「展开原文」才请求详情（含各平台原始条目、单条链接与采集源地址）；采集源地址和单条链接分两块显示。
 - 「写这篇」→ `POST .../draft` → 跳转 `/studio?id=<contentItemId>`；已出稿的卡片显示「打开已生成的稿件」。
 - 「忽略 / 恢复」写回服务端状态，刷新后保留。
 
 ## 6. 测试
 
-`apps/api/tests/test_hot_topics.py`（21 项）+ `apps/api/tests/test_hot_sources.py`（16 项）：
+`apps/api/tests/test_hot_topics.py`（23 项）：
 
-- 纯函数：标题归一、同事件合并与反义/实体否决、确定性评分（同一 `captured_at` 结果一致）、风险词逐条累计、聚簇分组。
-- 路由：重复刷新幂等、列表筛选、详情、状态流转、成稿幂等与跳转依据、概要、数据不足、全源失败 502、源清单。
-- 采集层（新增）：契约字段与 `to_row`、`safe_get` 错误映射、catalog 22 平台与 env 过滤、三类 Adapter 的解析/降级/0 行标注、编排的单源降级与全源失败、notes 进 degraded、`/dashboard.hotHighlights`。
+- 纯函数：标题归一、同事件合并与反义/实体否决、确定性评分（同一 `captured_at` 结果一致）、风险词逐条累计、聚簇分组、超长标题的身份键。
+- 入库契约：缺/非法 `sourceUrl` 与空 `platform` 一律 422；空标题只丢该条；空 `items` 不删已有数据；`sourceUrl` 落库并在换源后按平台更新；重复入库不改人工状态；超长标题不撑爆列宽。
+- 跨平台：先写平台 A 再写 B，A 的条目仍在且合成一个跨平台簇。
+- 重算：连跑两次分数与簇数一致；当天无数据返回 400 `no_hot_data`；`/hot-topics/sources` 已下线。
+- 读取与成稿：列表排序/平台与赛道筛选、详情、状态流转、成稿幂等、概要、数据不足、首页热榜、灵感面板。
 
-测试一律用 `monkeypatch` 替换采集入口（注入 `request_fn` / `collect`），**不访问外网**；`now_stamp` 固定为常量，保证评分可复现。涉及落库的用例用独立 `date` 且沿用同一 `captured_at`，避免污染其他测试对「当天采样轮数」的断言。
+测试**不访问外网**：直接打 ingest 契约。涉及落库的用例用独立 `date` 隔离数据，并固定 `captured_at`，避免互相污染。
 
 ## 7. 与参考实现（DSH 工作台）的对应
 
 | DSH | 本项目 |
 |---|---|
-| `tools/gen-materials.py` 多源采集 | `services/hot_sources.py`（改为统一走 SSRF） |
+| `tools/gen-materials.py` 多源采集 | 不在仓库：各平台定时任务自己采集，服务端只收入库 |
 | `tools/tracks.py` 赛道词表与打分 | `services/hot_ranking.py` |
 | `tools/hot-topics.py` 聚簇/评分/报告 | `services/hot_ranking.py` + `services/hot_topics.py` |
 | `lib/client.template.js` 的 `HotTopicRadar` | `HotTopicsView.vue` + `HotClusterCard.vue` + `HotScoreBars.vue` |
 
-算法（阈值、权重、否决顺序、代表标题选择）按参考实现移植，未重新发明；差异只有三处：SSRF 硬约束、落库幂等、直接成稿。
+算法（阈值、权重、否决顺序、代表标题选择）按参考实现移植，未重新发明；差异只有三处：采集与评分彻底解耦、落库幂等、直接成稿。
 
 ## 8. 首页热榜
 

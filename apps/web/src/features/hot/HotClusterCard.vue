@@ -161,6 +161,15 @@ const score = computed(() => Number(props.cluster.score) || 0)
               :title="item.title"
             >{{ item.title }}</a>
             <span v-else class="hot-item-title" :title="item.title">{{ item.title }}</span>
+            <!-- 采集源地址是批次级的：用来核对「这条从哪个榜来」，不是这条内容的链接 -->
+            <a
+              v-if="item.sourceUrl"
+              class="hot-link hot-item-source"
+              :href="item.sourceUrl"
+              target="_blank"
+              rel="noreferrer"
+              :title="`采集源：${item.sourceUrl}`"
+            >来源</a>
             <span class="hot-item-hot">{{ item.hot ? item.hot.toLocaleString('zh-CN') : '—' }}</span>
           </div>
         </div>
@@ -356,6 +365,11 @@ const score = computed(() => Number(props.cluster.score) || 0)
   flex: 0 0 auto;
   color: var(--color-text-secondary);
   font-variant-numeric: tabular-nums;
+}
+.hot-item-source {
+  flex: 0 0 auto;
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
 }
 .hot-link {
   color: var(--color-accent);

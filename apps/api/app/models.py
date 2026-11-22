@@ -211,6 +211,8 @@ class CalendarEntry(Base, TimestampMixin):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     content_item_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 成稿台排期同步过来的条目：留个反查口，日历里能跳回那篇稿件
+    studio_article_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     platform: Mapped[str | None] = mapped_column(String(24), nullable=True)
     title: Mapped[str] = mapped_column(String(200), default="")
     planned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -475,39 +477,6 @@ class SkillRegistryEntry(Base, TimestampMixin):
     risk_level: Mapped[str] = mapped_column(String(24), default="read_only")
 
 
-class SkillWritingRule(Base, TimestampMixin):
-    """Skill 的写作规则：一行一条，type+key 唯一。
-
-    owner_user_id 为空 = 全局规则（内置 / 管理员维护）；非空 = 该用户的个人副本。
-    manifest 里不再保存规则型 key，运行时由 skill_registry.compose_manifest 合成。
-    """
-
-    __tablename__ = "skill_writing_rules"
-    __table_args__ = (
-        UniqueConstraint("skill_key", "owner_user_id", "rule_type", "rule_key", name="uq_swr_rule"),
-        CheckConstraint(
-            "rule_type IN ('tone','style_rule','prompt_template','theme','target_length',"
-            "'workflow_step','review_rule','fact_policy','image_policy','repair_policy','exemplar')",
-            name="ck_swr_type",
-        ),
-        Index("ix_swr_lookup", "skill_key", "owner_user_id", "rule_type", "sort_order"),
-    )
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    # 不指向 skill_registry_entries：规则可以先于条目存在（出厂导入、个人副本），
-    # 也可能在条目被删后残留，由维护页展示「孤儿规则」，不应被外键阻断。
-    skill_key: Mapped[str] = mapped_column(String(120), index=True)
-    owner_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
-    rule_type: Mapped[str] = mapped_column(String(24))
-    rule_key: Mapped[str] = mapped_column(String(64))
-    # 单行类（tone/prompt_template/theme/target_length 与三个策略块）：存对象；列表类条目：存单条对象
-    payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    # factory = 出厂初始化导入，可被「按出厂重建」覆盖；user = 界面创建
-    source: Mapped[str] = mapped_column(String(16), default="user", server_default="user")
-
-
 class PromptRule(Base, TimestampMixin):
     """全局提示词与词表：一行一个 key，管理员维护。"""
 
@@ -573,6 +542,80 @@ class AgentRun(Base, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+# --------  宠物创作系统：Skill 蒸馏与对话 --------
+
+
+class PetConversation(Base, TimestampMixin):
+    """宠物对话会话：记录用户与 AI 宠物的对话历史。"""
+
+    __tablename__ = "pet_conversations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    studio_article_id: Mapped[str] = mapped_column(
+        ForeignKey("studio_articles.id", ondelete="CASCADE"), index=True
+    )
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # 对话历史：[{"role": "user"|"pet", "content": "...", "timestamp": "..."}]
+    messages: Mapped[list] = mapped_column(JSONBDoc, default=list)
+    # 当前激活的 Skill ID 列表（写作/人物/知识）
+    active_skill_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # 最后一次生成的结果：{result_text, metadata, action}
+    last_generation: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+
+
+class SkillDistillationJob(Base, TimestampMixin):
+    """Skill 蒸馏任务：记录蒸馏进度、结果、错误日志。"""
+
+    __tablename__ = "skill_distillation_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    skill_entry_id: Mapped[str] = mapped_column(
+        ForeignKey("skill_registry_entries.id", ondelete="CASCADE"), index=True
+    )
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # 蒸馏类型：writing / persona / knowledge
+    distillation_type: Mapped[str] = mapped_column(String(32), default="writing")
+    # 蒸馏深度（persona 用）：quick / standard / deep
+    tier: Mapped[str] = mapped_column(String(32), default="standard")
+    # 源数据：{article_urls: [...]} / {person_name: "..."} / {content_url: "..."}
+    source_data: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 蒸馏配置参数
+    config: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 蒸馏状态：pending / processing / completed / failed
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    # 蒸馏进度：0-100
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    # 蒸馏结果：与蒸馏类型相对应的完整结果
+    result: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 错误信息
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 蒸馏耗时（秒）
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 开始和完成时间
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SkillUsageLog(Base, TimestampMixin):
+    """Skill 使用日志：记录每次 Skill 被调用的上下文、评分、反馈。"""
+
+    __tablename__ = "skill_usage_logs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    skill_entry_id: Mapped[str] = mapped_column(
+        ForeignKey("skill_registry_entries.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # 使用上下文：{pet_conversation_id, studio_article_id, capability_id}
+    context: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 生成的结果摘要
+    result_summary: Mapped[str] = mapped_column(Text, default="")
+    # 用户评分：1-5，null 表示未评分
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 用户反馈
+    feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AgentEvent(Base, TimestampMixin):
@@ -789,6 +832,10 @@ class HotItem(Base, TimestampMixin):
     # 部分热榜源（头条）的 Url 带一大段跟踪参数，列宽放宽成 TEXT；
     # 采集侧仍会去参/截断到 URL_MAX_LENGTH，这里只是入库兜底不再炸。
     url: Mapped[str] = mapped_column(Text, default="")
+    # 这一批条目实际请求的采集地址（批次级），与 url（单条内容链接）分开存。
+    # 换采集源只改定时任务参数，下一轮 ingest 会把它更新成新地址；
+    # 不参与身份键、不参与评分，只用于核对「这条是从哪个榜来的」。
+    source_url: Mapped[str] = mapped_column(Text, default="")
     first_seen_at: Mapped[str] = mapped_column(String(16), default="")
     last_seen_at: Mapped[str] = mapped_column(String(16), default="")
     first_seen_day: Mapped[str] = mapped_column(String(10), default="")
@@ -1533,6 +1580,8 @@ class StudioArticle(Base, TimestampMixin):
 
     topic: Mapped[str] = mapped_column(String(400), default="")
     material: Mapped[str] = mapped_column(Text, default="")
+    # 写正文用的风格档，对应 resources/studio_skills/styles/<name>.md
+    writer_style: Mapped[str] = mapped_column(String(32), default="tutorial", server_default="tutorial")
     front: Mapped[str] = mapped_column(Text, default="")
     title: Mapped[str] = mapped_column(String(200), default="")
     # 标题钩子：A 自我打脸 / B 反转 / C 被求助 / D 技术发现 / other
@@ -1604,3 +1653,81 @@ class ArticleRevision(Base):
     # {"title": "...", "hook": "...", "titles": [...], "blocks": [{"id","text","check","prev_text"}]}
     payload: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+# ---------- 技能中心（独立技能库，与创作规则/Agent Skill 注册表无关） ----------
+class AuthorSkill(Base, TimestampMixin):
+    """用户技能卡：写作风格、人物思维、领域知识。
+
+    与 `skill_registry_entries` 刻意分开——那张表是 Agent 的工具型 Skill，
+    这里的技能只描述「怎么写、怎么想、依据什么」，由宠物和改稿工具消费。
+    """
+
+    __tablename__ = "author_skills"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "name", name="uq_author_skills_owner_name"),
+        Index("ix_author_skills_owner_type", "owner_user_id", "skill_type"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(80))
+    # writing | persona | knowledge
+    skill_type: Mapped[str] = mapped_column(String(16), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    # 一句话定位，列表卡片展示用
+    summary: Mapped[str] = mapped_column(Text, default="")
+    # 结构化技能内容；形状由 skill_type 决定，服务层负责校验
+    config: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # manual | distilled | imported
+    source: Mapped[str] = mapped_column(String(16), default="manual")
+    status: Mapped[str] = mapped_column(String(16), default="ready", index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AuthorSkillRevision(Base, TimestampMixin):
+    """技能内容快照：蒸馏/编辑/导入都留一版，便于回滚与对比。"""
+
+    __tablename__ = "author_skill_revisions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    skill_id: Mapped[str] = mapped_column(
+        ForeignKey("author_skills.id", ondelete="CASCADE"), index=True
+    )
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    config: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    # 变更来源：manual | distilled | imported | rollback
+    source: Mapped[str] = mapped_column(String(16), default="manual")
+    note: Mapped[str] = mapped_column(String(200), default="")
+
+
+class AuthorSkillDistillRun(Base, TimestampMixin):
+    """蒸馏记录：材料统计、结果与错误都留档，失败也可见。"""
+
+    __tablename__ = "author_skill_distill_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    skill_id: Mapped[str] = mapped_column(
+        ForeignKey("author_skills.id", ondelete="CASCADE"), index=True
+    )
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    skill_type: Mapped[str] = mapped_column(String(16), default="writing")
+    # pending | running | completed | failed
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    # {material_count, char_count, url_count, titles}
+    material_stats: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    request: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    result: Mapped[dict] = mapped_column(JSONBDoc, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

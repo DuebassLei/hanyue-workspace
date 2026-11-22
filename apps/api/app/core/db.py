@@ -119,6 +119,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("storyboard_projects", "deleted_at", "TIMESTAMP"),
     ("storyboard_scenes", "deleted_at", "TIMESTAMP"),
     ("storyboard_shots", "deleted_at", "TIMESTAMP"),
+    # 成稿台：写正文的风格档（styles/*.md 的文件名），老稿件统一落到实战教程
+    ("studio_articles", "writer_style", "VARCHAR(32) DEFAULT 'tutorial'"),
     # 角色库：AI 生成的候选参考图（采用前挂在角色卡上）
     ("characters", "pending_images", "JSON"),
 ]

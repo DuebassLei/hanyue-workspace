@@ -79,7 +79,7 @@ const tone = computed(() => {
 })
 
 // 没检测、没上一版、也不在改写中 —— 整条不渲染，不给稿纸留空占位
-const visible = computed(() => Boolean(busyKind.value || markText.value || hasPrev.value))
+const visible = computed(() => Boolean(busyKind.value || hasPrev.value || (markText.value && status.value !== 'pass')))
 </script>
 
 <template>
@@ -120,6 +120,9 @@ const visible = computed(() => Boolean(busyKind.value || markText.value || hasPr
   flex-wrap: wrap;
   align-items: baseline;
   gap: 4px 10px;
+  position: relative;
+  align-self: start;
+  min-width: 0;
   margin-top: 8px;
   padding: 3px 0 3px 10px;
   /* 左侧竖线就是风险等级：一眼扫过去先看到颜色，再读文字 */

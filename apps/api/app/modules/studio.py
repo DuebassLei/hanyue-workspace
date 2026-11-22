@@ -20,12 +20,20 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
+from fastapi import Query
 from sqlalchemy import select
 
 from .. import models, schemas
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.rbac import require_permission
-from ..services import article_blocks as AB, article_quality as AQ, studio_pipeline as SP, studio_repo
+from ..services import (
+    article_blocks as AB,
+    article_quality as AQ,
+    studio_calendar,
+    studio_pipeline as SP,
+    studio_repo,
+    hot_topics as hot_topics_service,
+)
 
 router = APIRouter(tags=["studio"], dependencies=[require_permission("studio.use")])
 
@@ -82,6 +90,14 @@ def _busy(article_id: str) -> None:
         raise _fail("这篇文章还有任务在跑，等它结束再试。", 409)
 
 
+def _style_or_fail(style: str | None) -> str:
+    """风格档来自 styles 目录，选了不存在的档直接报错，不静默回落。"""
+    value = str(style or "").strip() or SP.DEFAULT_WRITER_STYLE
+    if not SP.has_writer_style(value):
+        raise _fail("写作风格不存在，刷新页面后重新选择。", 400)
+    return value
+
+
 # ---------------- 质检凭据 ----------------
 
 
@@ -115,7 +131,7 @@ def state(db: DbSession, user: CurrentUser, archived: bool = False):
         banner_style = data.get("banner_style") or SP.DEFAULT_BANNER
         banner_ready = bool((data.get("banners") or {}).get(banner_style, {}).get("spec"))
         metas.append(AB.list_meta(data, banner_ready=banner_ready))
-    return {"articles": metas, "settings": _quality_public(db)}
+    return {"articles": metas, "settings": _quality_public(db), "writer_styles": SP.writer_styles()}
 
 
 @router.get("/studio/settings", response_model=dict)
@@ -154,6 +170,7 @@ def update_settings(payload: schemas.StudioSettingsIn, db: DbSession, user: Curr
 @router.post("/studio/articles/new", response_model=schemas.StudioArticleOut)
 def create_article(payload: schemas.StudioNewIn, db: DbSession, user: CurrentUser):
     workspace = default_workspace(db, user)
+    style = _style_or_fail(payload.writer_style)
     row = studio_repo.create(
         db,
         owner_user_id=user.id,
@@ -161,6 +178,7 @@ def create_article(payload: schemas.StudioNewIn, db: DbSession, user: CurrentUse
         topic=payload.topic,
         material=payload.material,
         markdown=payload.markdown,
+        writer_style=style,
     )
     db.commit()
     article_id = row.id
@@ -170,6 +188,67 @@ def create_article(payload: schemas.StudioNewIn, db: DbSession, user: CurrentUse
     elif has_body and payload.titles:
         SP.PIPELINE.titles(article_id)
     row = _article(db, user, article_id)
+    return _out(studio_repo.row_to_dict(row))
+
+
+@router.post("/studio/articles/from-content/{content_id}", response_model=schemas.StudioArticleOut)
+def article_from_content(
+    content_id: str,
+    db: DbSession,
+    user: CurrentUser,
+    hot_cluster_id: str | None = Query(default=None, alias="hotClusterId", max_length=32),
+):
+    """把文章管理里的一条稿件开成成稿台稿（幂等）。
+
+    文章管理点「进入成稿台」走这里：同一条稿件已经有成稿台稿就直接打开，
+    没有才按最新正文建一篇。不做幂等的话，每点一次就多一篇重复稿，
+    改稿的人分不清哪篇才是自己在改的那篇。
+
+    热点选题「写这篇」会带 hotClusterId：把热点的标题/赛道/平台/各平台原文整理成
+    material 写进成稿台稿，创作小助手才有素材可写。已存在的稿若素材仍为空也会补写，
+    已有素材不覆盖。
+    """
+    item = db.get(models.ContentItem, content_id)
+    if item is None or item.owner_user_id != user.id:
+        raise not_found("稿件")
+    hot_material = (
+        hot_topics_service.build_material(db, hot_cluster_id) if hot_cluster_id else ""
+    )
+    existing = db.scalars(
+        select(models.StudioArticle)
+        .where(
+            models.StudioArticle.content_item_id == content_id,
+            models.StudioArticle.owner_user_id == user.id,
+        )
+        .order_by(models.StudioArticle.updated_at.desc())
+    ).first()
+    if existing is not None:
+        if hot_material and not (existing.material or "").strip():
+            existing.material = hot_material
+            db.commit()
+            db.refresh(existing)
+        return _out(studio_repo.row_to_dict(existing))
+
+    # 正文以最新版本为准；只有自动草稿、还没存过版本时才退回 draft_body
+    body = item.draft_body or ""
+    if item.current_version_id:
+        version = db.get(models.ContentVersion, item.current_version_id)
+        if version is not None and version.body:
+            body = version.body
+    workspace = default_workspace(db, user)
+    row = studio_repo.create(
+        db,
+        owner_user_id=user.id,
+        workspace_id=workspace.id if workspace else None,
+        topic=item.title or "",
+        material=hot_material,
+        markdown=body,
+        writer_style="tutorial",
+    )
+    # 记住来源稿件：下次再点「进入成稿台」就能命中上面那条已有分支
+    row.content_item_id = content_id
+    db.commit()
+    row = _article(db, user, row.id)
     return _out(studio_repo.row_to_dict(row))
 
 
@@ -207,6 +286,8 @@ def duplicate_article(article_id: str, db: DbSession, user: CurrentUser):
         topic=data.get("topic", ""),
         material=data.get("material", ""),
         markdown=AB.to_markdown(data),
+        # 复制件沿用原稿的风格档，改稿时不会莫名其妙换风格
+        writer_style=data.get("writer_style") or SP.DEFAULT_WRITER_STYLE,
     )
     copy_row.title = data.get("title") or copy_row.title
     db.commit()
@@ -393,10 +474,29 @@ def revisions(article_id: str, db: DbSession, user: CurrentUser):
 
 
 @router.post("/studio/articles/{article_id}/draft", response_model=schemas.StudioArticleOut)
-def draft(article_id: str, db: DbSession, user: CurrentUser):
-    _row, data = _data(db, user, article_id)
+def draft(article_id: str, db: DbSession, user: CurrentUser, payload: schemas.StudioDraftIn | None = None):
+    row, data = _data(db, user, article_id)
     _busy(article_id)
+    # 带 style 就是「换风格重写」：先落风格再排队，任务读的是落库后的值
+    if payload and payload.style:
+        style = _style_or_fail(payload.style)
+        if style != data.get("writer_style"):
+            data["writer_style"] = style
+            AB.touch(data)
+            _commit_article(db, row, data)
     SP.PIPELINE.draft(article_id)
+    return _out(data)
+
+
+@router.post("/studio/articles/{article_id}/writer-style", response_model=schemas.StudioArticleOut)
+def set_writer_style(article_id: str, payload: schemas.StudioStyleIn, db: DbSession, user: CurrentUser):
+    """只记风格，不触发写作。当前有任务在跑也允许切：任务已按旧档取好 prompt。"""
+    row, data = _data(db, user, article_id)
+    style = _style_or_fail(payload.style)
+    if style != (data.get("writer_style") or ""):
+        data["writer_style"] = style
+        AB.touch(data)
+        _commit_article(db, row, data)
     return _out(data)
 
 
@@ -495,7 +595,8 @@ async def zhuque_report(article_id: str, request: Request, db: DbSession, user: 
 def set_schedule(article_id: str, payload: schemas.StudioScheduleIn, db: DbSession, user: CurrentUser):
     """只记「计划什么时候发」，真正的发布队列仍由 publishing 模块负责。
 
-    这样排期信息能跟着稿件走，又不必让成稿台重复实现发布任务的幂等与重试。
+    同时同步一条内容日历条目：在成稿台排的期要能在「内容日历」里看到，
+    取消排期也要一起撤掉，日历里手排的条目不受影响。
     """
     row, data = _data(db, user, article_id)
     if payload.at is not None:
@@ -508,7 +609,9 @@ def set_schedule(article_id: str, payload: schemas.StudioScheduleIn, db: DbSessi
     else:
         data["scheduled_for"] = None
     AB.touch(data)
-    _commit_article(db, row, data)
+    studio_repo.save(db, row, data)
+    studio_calendar.sync_schedule(db, user, row, data)
+    db.commit()
     return _out(data)
 
 

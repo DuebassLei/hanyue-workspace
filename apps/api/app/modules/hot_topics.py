@@ -1,7 +1,7 @@
 """热点选题接口。
 
-    GET    /hot-topics/sources                 采集源与启用状态
-    POST   /hot-topics/refresh                 采集 → 聚簇 → 评分
+    POST   /hot-topics/ingest                  一个平台的一轮榜单入库（固定格式）
+    POST   /hot-topics/recalculate             按已入库数据重算聚簇与分数（不抓取）
     GET    /hot-topics/clusters                事件列表（按分数排序）
     GET    /hot-topics/clusters/{id}           事件详情（成员条目 + 名次采样）
     PATCH  /hot-topics/clusters/{id}           人工状态：watching / ignored / new
@@ -9,8 +9,10 @@
     GET    /hot-topics/summary                 概要条统计
     GET    /hot-topics/degraded                哪些维度因采样不足没算
 
-创作空间的「灵感」面板仍用 `/hot-topics`（见 modules/ai_content.py），
-它优先读这里已经算好分的簇，一条都没有时才回落到单源。
+采集不在这里：每个平台一条定时任务，脚本自己请求、自己解析，然后调用 ingest。
+服务端不认识任何平台，也不会替任何人发外网请求。
+
+创作空间的「灵感」面板仍用 `/hot-topics`（见 modules/ai_content.py），读已评分簇。
 """
 
 from __future__ import annotations
@@ -26,27 +28,46 @@ from ..core.rbac import require_permission
 router = APIRouter(tags=["hot-topics"], dependencies=[require_permission("hot_topics.view")])
 
 
-@router.get("/hot-topics/sources", response_model=schemas.HotSourcesOut)
-def hot_topics_sources() -> schemas.HotSourcesOut:
-    return schemas.HotSourcesOut(**hot_topics.sources_status())
+@router.post(
+    "/hot-topics/ingest",
+    response_model=schemas.HotIngestOut,
+    # 入库会改数据，单独一个权限点：能看热点 ≠ 能往里灌数据
+    dependencies=[require_permission("hot_topics.ingest")],
+)
+def ingest_hot_items(
+    payload: schemas.HotIngestIn, user: CurrentUser, db: DbSession
+) -> schemas.HotIngestOut:
+    try:
+        result = hot_topics.ingest(
+            db,
+            platform=payload.platform,
+            source_url=payload.source_url,
+            items=[item.model_dump() for item in payload.items],
+            day=payload.date,
+            captured_at=payload.captured_at,
+        )
+    except hot_topics.HotTopicsError as exc:
+        # sourceUrl / platform 的服务层校验与 schema 校验同口径，都是 422
+        status_code = 422 if exc.code.startswith("invalid_") else 400
+        raise ApiError(exc.code, exc.message, status_code=status_code) from exc
+    return schemas.HotIngestOut(**result)
 
 
-@router.post("/hot-topics/refresh", response_model=schemas.HotRefreshOut)
-def refresh_hot_topics(
+@router.post("/hot-topics/recalculate", response_model=schemas.HotRefreshOut)
+def recalculate_hot_topics(
     user: CurrentUser,
     db: DbSession,
     payload: schemas.HotRefreshIn | None = None,
 ) -> schemas.HotRefreshOut:
-    day = (payload.date if payload else None) or hot_topics.today_str()
+    day = (payload.date if payload else None) or None
     try:
-        # 冷却在服务层（services/hot_topics.reserve_refresh）：定时任务与手动刷新
-        # 面对同一份限速状态，路由层不再自己维护一份进程内计数。
-        hot_topics.reserve_refresh()
-        result = hot_topics.refresh(db, day=day)
+        # 冷却在服务层：页面连点会被挡；定时 ingest 不走这里
+        hot_topics.reserve_recalc()
+        result = hot_topics.recalculate(db, day=day)
     except hot_topics.HotTopicsError as exc:
         if exc.code == "too_frequent":
             raise ApiError(exc.code, exc.message, status_code=429) from exc
-        raise ApiError(exc.code, exc.message, status_code=502, retryable=True) from exc
+        raise ApiError(exc.code, exc.message, status_code=400) from exc
     return schemas.HotRefreshOut(**result)
 
 

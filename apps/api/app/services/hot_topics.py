@@ -1,21 +1,24 @@
-"""热点选题：采集 → 聚簇 → 评分 → 出稿。
+"""热点选题：入库 → 聚簇 → 评分 → 出稿。
 
-参考 DSH 工作台的 `tools/hot-topics.py`，但数据不再走文件快照，而是直接落库：
+采集**不在**这个模块里。每个平台怎么抓、怎么解析，由「定时任务」里的脚本自己负责，
+服务端只收一种固定格式：
 
-    hot_sources.collect()   多路公开榜单（今日头条/百度/抖音/微博/知乎/AIHOT）
+    POST /hot-topics/ingest 或 hot_topics.ingest()
       → hot_items           每条标题一个身份（platform + 归一化标题）
       → hot_ranking         同事件合并 + 100 分制评分
       → hot_clusters        事件卡片（分数、档位、证据都在这里）
       → content_items       点「写这篇」直接建稿件（选题库不再作为独立产品）
 
-三条必须守住的约定：
+四条必须守住的约定：
 
-1. **可复现**：评分的时间基准是本次采集时间 `captured_at`，不是 `now()`。
+1. **可复现**：评分的时间基准是本轮 `captured_at`，不是 `now()`。
    同一天同一轮重跑，分数完全一致。
 2. **幂等**：条目身份是 `platform + title_norm`（名次变化不算新条目），
    名次采样有 `(item_id, captured_at)` 唯一约束，簇按 `fingerprint` 复用。
-3. **不伪造**：某个源抓不到就如实记进 notes，少一个平台不是「没有热点」；
-   所有源都失败时抛错，不返回空列表冒充成功。
+3. **不丢数据**：一轮 ingest 只写本平台条目，但聚簇和评分要读**当天全部**已入库
+   条目重算。否则微博跑完一次就把知乎刚写进来的条目挤出了簇。
+4. **不覆盖人工状态**：`status`（watching / ignored / generated）由人决定，
+   重算只更新分数与成员，不改状态。
 
 热点是公开数据，不按 owner 隔离；`status` / `content_item_id` 也是全局的。
 单人部署下这是最省事的口径，多租户场景再拆表。
@@ -30,14 +33,11 @@ import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
-import httpx
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from .. import models
-from ..core import ssrf
 from . import hot_ranking as ranking
-from . import hot_sources
 
 # 历史簇回看窗口：几天内还活跃的簇可以继续吸收新条目。
 # 3 天是经验值——热榜事件生命周期通常 1~3 天，再长就该算「新事件」了。
@@ -53,35 +53,15 @@ class HotTopicsError(RuntimeError):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 刷新冷却
+# 重算冷却
 # ══════════════════════════════════════════════════════════════════════
 #
-# 采集一次要打 7 个外部接口。连点会让上游以为我们在刷接口，也让用户以为
-# 「点了没反应」。这段状态原本写在路由层（modules/hot_topics.py 的模块级 dict），
-# 定时任务走 job_runner 会绕过它——同一个动作两条路径，限速却只管一条。
-# 现在下沉到服务层：谁调 refresh 都面对同一份状态。
-#
-# 注意：定时路径**不**调用 reserve_refresh。理由见 job_runner._handle_hot_topics：
-# cron 频率 + 触发互斥已经把并发限住了，若因为「15 秒冷却」被判失败，
-# 任务会连续失败三次后自己暂停，这比限速本身更糟。
+# 重算要把当天全部条目重新聚簇评分，连点会白烧 CPU，也让用户以为「点了没反应」。
+# 冷却只挡页面上的「重算」按钮；定时 ingest 不走它——脚本按 cron 频率跑，
+# 若因为「15 秒冷却」被判失败，任务会连续失败三次后自己暂停，比限速本身更糟。
 
 _COOLDOWN_LOCK = threading.Lock()
-_last_refresh: dict[str, float] = {}
-
-# 最近一轮采集的降级说明（单源失败 / selector_may_changed / 源未配置关键词）。
-# 不落库（models 不在本 Agent 范围），只作为「最近一次」的进程内视图，
-# 供 /hot-topics/degraded 与排障读取；服务重启后自然清空。
-_last_source_notes: list[str] = []
-
-
-def _remember_source_notes(notes: list[str]) -> None:
-    global _last_source_notes
-    _last_source_notes = list(notes or [])
-
-
-def source_notes() -> list[str]:
-    """最近一轮采集的 notes 副本（供测试/排障，不改内部状态）。"""
-    return list(_last_source_notes)
+_last_recalc: dict[str, float] = {}
 
 
 def cooldown_seconds() -> float:
@@ -91,130 +71,76 @@ def cooldown_seconds() -> float:
         return 15.0
 
 
-def reserve_refresh(key: str = "all") -> None:
-    """占用一次刷新额度；冷却中抛 too_frequent，由调用方翻成 429。"""
+def reserve_recalc(key: str = "all") -> None:
+    """占用一次重算额度；冷却中抛 too_frequent，由调用方翻成 429。"""
     wait = cooldown_seconds()
     with _COOLDOWN_LOCK:
-        if wait and time.monotonic() - _last_refresh.get(key, 0.0) < wait:
-            raise HotTopicsError("too_frequent", f"刷新太频繁，请 {int(wait)} 秒后再试")
-        _last_refresh[key] = time.monotonic()
+        if wait and time.monotonic() - _last_recalc.get(key, 0.0) < wait:
+            raise HotTopicsError("too_frequent", f"重算太频繁，请 {int(wait)} 秒后再试")
+        _last_recalc[key] = time.monotonic()
 
 
 def reset_cooldown() -> None:
-    """测试与排障用：清空冷却状态与缓存的采集 notes。"""
+    """测试与排障用：清空冷却状态。"""
     with _COOLDOWN_LOCK:
-        _last_refresh.clear()
-    _remember_source_notes([])
+        _last_recalc.clear()
 
 
 # ══════════════════════════════════════════════════════════════════════
 # 兼容层：创作空间「灵感」面板
 # ══════════════════════════════════════════════════════════════════════
 
-def _configured_source() -> str | None:
-    url = os.getenv("HOT_TOPICS_API_URL", "").strip()
-    if not url:
-        return None
-    try:
-        ssrf.validate_base_url(url)
-    except ssrf.UnsafeUrl:
-        return None
-    return url
-
-
 def fetch_hot_topics(db: Session | None = None, limit: int = 20) -> list[dict]:
-    """创作空间「灵感」面板的数据源。
+    """创作空间「灵感」面板的数据源：只读已评分的热点簇。
 
-    优先用本地已评分的热点簇（比原始榜单更值得看）；一条都没有时才回落到
-    环境变量配置的单源，保持老部署可用。
+    不再有「库里没数据就去抓一个外部接口」的回落——采集已经下放到平台任务，
+    这个面板不该替任何人发外网请求。没有数据就返回空列表。
 
     返回格式：[{"title": str, "hot": str, "url": str|None, "source": str}]
     """
-    if db is not None:
-        day = latest_day(db)
-        if day:
-            clusters = list_clusters(db, day=day, limit=limit)
-            if clusters:
-                return [
-                    {
-                        "title": cluster["title"],
-                        "hot": f"{cluster['score']} 分 · {cluster['grade']}",
-                        "url": None,
-                        "source": "热点选题",
-                    }
-                    for cluster in clusters
-                ]
-
-    source = _configured_source()
-    if not source:
+    if db is None:
         return []
-
-    try:
-        response = ssrf.safe_request(
-            "GET", source, headers={"Accept": "application/json"}, timeout=15.0
-        )
-    except (ssrf.UnsafeUrl, httpx.HTTPError) as exc:
-        raise HotTopicsError("fetch_failed", f"热点源请求失败：{type(exc).__name__}") from exc
-
-    if response.status_code >= 400:
-        raise HotTopicsError("fetch_failed", f"热点源返回 HTTP {response.status_code}")
-    try:
-        payload = response.json()
-    except ValueError:
-        raise HotTopicsError("invalid_response", "热点源未返回 JSON") from None
-
-    return _normalize(payload, limit)
+    day = latest_day(db)
+    if not day:
+        return []
+    return [
+        {
+            "title": cluster["title"],
+            "hot": f"{cluster['score']} 分 · {cluster['grade']}",
+            "url": None,
+            "source": "热点选题",
+        }
+        for cluster in list_clusters(db, day=day, limit=limit)
+    ]
 
 
-def _normalize(payload, limit: int) -> list[dict]:
-    """把不同热搜源的返回格式统一成内部结构。
+def source_status(db: Session | None = None) -> dict:
+    """热点数据现状（不是「配了哪些源」）。
 
-    支持两种常见格式：
-    1. {"data": [{"title":..., "hot":..., "url":...}]}
-    2. [{"word":..., "hot":..., "url":...}]  (微博热搜风格)
+    采集源由定时任务各自维护，服务端只知道「当天有哪些平台入库过」。
     """
-    raw_list: list = []
-    if isinstance(payload, dict):
-        for key in ("data", "items", "list", "result"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                raw_list = value
-                break
-    elif isinstance(payload, list):
-        raw_list = payload
-
-    source = _configured_source()
-    host = urlparse(source).netloc if source else "hot-topics"
-    result: list[dict] = []
-    for item in raw_list[:limit]:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or item.get("word") or item.get("name") or "").strip()
-        if not title:
-            continue
-        hot = str(item.get("hot") or item.get("hot_value") or item.get("num") or "")
-        url = item.get("url") or item.get("link")
-        result.append({
-            "title": title,
-            "hot": hot,
-            "url": url if isinstance(url, str) else None,
-            "source": host,
-        })
-    return result
-
-
-def source_status() -> dict:
-    """热点源配置状态。多路采集默认启用，单源只是回落。"""
-    source = _configured_source()
-    platforms = hot_sources.enabled_platforms()
-    configured = bool(platforms) or bool(source)
-    if platforms:
-        note = f"已启用 {len(platforms)} 路采集：" + "、".join(platforms)
-    elif source:
-        note = "多路采集未启用，使用 HOT_TOPICS_API_URL 单源"
-    else:
-        note = "未配置热点源，当前仅支持手动输入热点关键词"
-    return {"configured": configured, "source": source or "", "note": note}
+    if db is None:
+        return {"configured": False, "source": "", "note": "未查询热点数据"}
+    day = latest_day(db)
+    if not day:
+        return {
+            "configured": False,
+            "source": "",
+            "note": "库里还没有热点数据：在「定时任务」里按平台建采集任务，跑一轮后这里出分",
+        }
+    platforms = db.scalars(
+        select(models.HotItem.platform).where(models.HotItem.day == day).distinct()
+    ).all()
+    names = sorted({name for name in platforms if name})
+    return {
+        "configured": bool(names),
+        "source": "",
+        "note": (
+            f"{day} 已入库 {len(names)} 个平台：" + "、".join(names)
+            if names
+            else f"{day} 没有条目入库"
+        ),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -235,6 +161,40 @@ def source_status() -> dict:
 TITLE_MAX_CHARS = 300
 ITEM_UID_MAX_CHARS = 255
 _UID_HASH_CHARS = 20
+MAX_PLATFORM_CHARS = 32
+MAX_SOURCE_URL_CHARS = 2000
+
+
+def normalize_platform(raw: str | None) -> str:
+    """平台展示名：必填、最长 32 字（与 `hot_items.platform` 列宽一致）。
+
+    同名才是同一个平台。改名等于换一个平台，历史条目不会跟着走。
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise HotTopicsError("invalid_platform", "缺少 platform：这一批是哪个平台的榜单？")
+    if len(text) > MAX_PLATFORM_CHARS:
+        raise HotTopicsError("invalid_platform", f"platform 最长 {MAX_PLATFORM_CHARS} 字")
+    return text
+
+
+def normalize_source_url(raw: str | None) -> str:
+    """采集源地址：必须是 http/https 绝对地址。
+
+    存的是「这一轮脚本真正请求的地址」，不是任务参数里打算用、但没请求到的地址。
+    相对路径或没有 host 的串一律拒绝——否则事后核对「这条从哪个榜来」时无从追。
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise HotTopicsError("invalid_source_url", "缺少 sourceUrl：这一轮是从哪个地址采的？")
+    if len(text) > MAX_SOURCE_URL_CHARS:
+        raise HotTopicsError(
+            "invalid_source_url", f"sourceUrl 最长 {MAX_SOURCE_URL_CHARS} 字"
+        )
+    parsed = urlparse(text)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HotTopicsError("invalid_source_url", "sourceUrl 必须是 http/https 绝对地址")
+    return text
 
 
 def _clip(text: str, limit: int) -> str:
@@ -277,6 +237,7 @@ def _member_of(item: models.HotItem) -> dict:
         "rank": item.rank,
         "hot": item.hot,
         "url": item.url,
+        "source_url": item.source_url or "",
         "first_seen_at": item.first_seen_at,
         "prev_rank": item.prev_rank,
         "best_rank": item.best_rank,
@@ -293,11 +254,13 @@ def latest_day(db: Session) -> str:
 # 写入：灌条目 + 聚簇 + 评分
 # ══════════════════════════════════════════════════════════════════════
 
-def _ingest(db: Session, day: str, rows: list[dict], captured_at: str) -> list[dict]:
+def _ingest(
+    db: Session, day: str, rows: list[dict], captured_at: str, *, source_url: str = ""
+) -> list[dict]:
     """把采集行写成 hot_items，并返回内存里的成员视图。
 
     身份键是 `platform + title_norm`，**不是名次**：同一条新闻一天内从 #3 掉到 #7，
-    事件没变，不能算成两条。
+    事件没变，不能算成两条。`source_url` 是批次级的采集地址，只写本批条目。
     """
     members: list[dict] = []
     for row in rows:
@@ -322,7 +285,7 @@ def _ingest(db: Session, day: str, rows: list[dict], captured_at: str) -> list[d
         if item is None:
             item = models.HotItem(
                 item_uid=uid, day=day, platform=platform, rank=rank,
-                title=title, title_norm=norm, hot=hot, url=url,
+                title=title, title_norm=norm, hot=hot, url=url, source_url=source_url,
                 first_seen_at=captured_at, last_seen_at=captured_at,
                 first_seen_day=day, days_json=[day], seen_count=1,
                 prev_rank=None, best_rank=rank if rank is not None else 999,
@@ -342,6 +305,9 @@ def _ingest(db: Session, day: str, rows: list[dict], captured_at: str) -> list[d
             item.rank = rank
             item.hot = hot if hot is not None else item.hot
             item.url = url or item.url
+            # 同一平台换采集地址后，新一轮把源地址改成新地址；其它平台不受影响
+            if source_url:
+                item.source_url = source_url
             item.last_seen_at = captured_at
             item.seen_count = (item.seen_count or 0) + 1
             item.prev_rank = prev_rank
@@ -478,42 +444,104 @@ def _upsert_clusters(
     return created, matched
 
 
-def refresh(
-    db: Session,
-    day: str | None = None,
-    captured_at: str | None = None,
-    platforms: list[str] | None = None,
-) -> dict:
-    """采集 → 灌库 → 聚簇 → 评分。返回本轮统计。
+def _day_members(db: Session, day: str, extra: list[dict] | None = None) -> list[dict]:
+    """当天全部已入库条目 + 本批刚写入的成员。
 
-    任何单源失败都只记 notes；所有源都失败时由 `hot_sources.collect` 抛错，
-    这里原样转成 HotTopicsError，不返回「0 个事件」的假成功。
+    只读 `HotItem.day == day` 会漏掉「昨天首见、今天仍在榜」的条目：它们的 day
+    停在首见那天，但今天确实又被打分了一次。本批成员显式带进来，聚簇结果才与
+    真实榜单一致，也不会因为另一个平台先入库而把它们挤出簇。
     """
-    day = day or today_str()
-    captured_at = captured_at or now_stamp()
-    try:
-        rows, notes = hot_sources.collect(platforms)
-    except hot_sources.HotSourcesError as exc:
-        _remember_source_notes(exc.notes or [exc.message])
-        raise HotTopicsError("all_sources_failed", exc.message) from exc
-    _remember_source_notes(notes)
+    rows = db.scalars(select(models.HotItem).where(models.HotItem.day == day)).all()
+    members = [_member_of(item) for item in rows]
+    seen = {member["id"] for member in members}
+    for member in extra or []:
+        if member["id"] not in seen:
+            members.append(member)
+    return members
 
-    items = _ingest(db, day, rows, captured_at)
-    db.flush()
-    created, matched = _upsert_clusters(db, day, items, captured_at)
-    db.commit()
 
+def _result(
+    db: Session, day: str, captured_at: str, item_count: int, created: int, matched: int
+) -> dict:
+    """入库 / 重算共用的返回结构：统计口径只在这里算一次。"""
     clusters = list_clusters(db, day=day, limit=500)
     return {
         "day": day,
         "capturedAt": captured_at,
-        "items": len(items),
+        "items": item_count,
         "clusters": len(clusters),
         "newClusters": created,
         "matchedClusters": matched,
         "recommended": sum(1 for c in clusters if c["score"] >= 70),
-        "notes": notes,
+        "notes": [],
     }
+
+
+def ingest(
+    db: Session,
+    *,
+    platform: str,
+    source_url: str,
+    items: list[dict] | None = None,
+    day: str | None = None,
+    captured_at: str | None = None,
+) -> dict:
+    """一个平台的一轮榜单 → 写 hot_items → 用当天全部条目重算聚簇与分数。
+
+    `items` 每条形如 `{"title", "rank", "hot", "url"}`。上游字段名怎么映射由定时
+    任务自己决定，服务端只认这四个键，不认识任何平台。
+
+    关键：写完本批之后，聚簇输入是**当天全部**已入库条目，不是只有这一批。
+    各平台任务因此互不调用，跨平台合并仍然成立。
+    """
+    platform = normalize_platform(platform)
+    source_url = normalize_source_url(source_url)
+    # day / captured_at 分别对应 VARCHAR(10) / VARCHAR(16)：脚本传长一点不该整批 500。
+    # 用前 10/16 个字符而不是报错，和本模块其它列宽守卫同一口径。
+    day = (day or today_str())[:10]
+    captured_at = (captured_at or now_stamp())[:16]
+
+    rows = [
+        {
+            "platform": platform,
+            "title": row.get("title") or "",
+            "rank": row.get("rank"),
+            "hot": row.get("hot"),
+            "url": row.get("url") or "",
+        }
+        for row in (items or [])
+        if isinstance(row, dict)
+    ]
+
+    fresh = _ingest(db, day, rows, captured_at, source_url=source_url)
+    db.flush()
+    # 空数组是合法输入：表示这一轮该平台没有条目，不删除已入库数据
+    created, matched = _upsert_clusters(db, day, _day_members(db, day, fresh), captured_at)
+    db.commit()
+
+    result = _result(db, day, captured_at, len(fresh), created, matched)
+    result.update({"platform": platform, "sourceUrl": source_url})
+    return result
+
+
+def recalculate(
+    db: Session, day: str | None = None, captured_at: str | None = None
+) -> dict:
+    """只重算、不抓取：把当天已入库的条目重新聚簇评分。
+
+    页面上的「重算评分」走这里。定时 ingest 已经会重算，不需要再点一次。
+    """
+    day = day or latest_day(db)
+    if not day:
+        raise HotTopicsError("no_hot_data", "库里还没有热点条目：先让一个平台的采集任务跑一轮")
+    captured_at = captured_at or now_stamp()
+
+    members = _day_members(db, day)
+    if not members:
+        raise HotTopicsError("no_hot_data", f"{day} 没有已入库条目，没有可重算的数据")
+    created, matched = _upsert_clusters(db, day, members, captured_at)
+    db.commit()
+    return _result(db, day, captured_at, len(members), created, matched)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -574,11 +602,6 @@ def degraded_reasons(db: Session, day: str | None = None) -> list[dict]:
     elif rounds < 3:
         out.append({"dim": "fresh", "reason": labels["fresh"] + f"，当前 {rounds} 轮"})
     out.append({"dim": "hot", "reason": labels["hot"]})
-
-    # 采集侧的降级说明也进同一接口：单源失败、解析 0 行（selector_may_changed）、
-    # 源未配置关键词都要让前端看到，不能「悄悄少一个平台」。
-    for note in _last_source_notes:
-        out.append({"dim": "source", "reason": note})
     return out
 
 
@@ -644,6 +667,7 @@ def get_cluster(db: Session, cluster_id: str) -> dict | None:
             "title": item.title,
             "hot": item.hot,
             "url": item.url,
+            "sourceUrl": item.source_url or "",
             "firstSeenAt": item.first_seen_at,
             "lastSeenAt": item.last_seen_at,
             "history": [
@@ -754,6 +778,38 @@ def set_status(db: Session, cluster_id: str, status: str) -> dict | None:
     cluster.status = status
     db.commit()
     return _cluster_out(cluster)
+
+
+def build_material(db: Session, cluster_id: str) -> str:
+    """把热点事件整理成「写稿素材」文本，供成稿台 topic/material 使用。
+
+    只拼库里已有的事实（标题、赛道、平台、热度、各平台原文条目），不编造内容；
+    事件不存在时返回空串，由调用方决定是否忽略。
+    """
+    detail = get_cluster(db, cluster_id)
+    if detail is None:
+        return ""
+    lines: list[str] = [f"【热点选题】{detail.get('title', '')}"]
+    if detail.get("track"):
+        lines.append(f"赛道：{detail['track']}")
+    platforms = detail.get("platforms") or []
+    if platforms:
+        lines.append(f"出现平台：{'、'.join(str(p) for p in platforms)}")
+    if detail.get("score") is not None:
+        grade = f"（{detail['grade']}）" if detail.get("grade") else ""
+        lines.append(f"热度评分：{detail['score']}{grade}")
+    items = detail.get("items") or []
+    if items:
+        lines.append("")
+        lines.append("各平台相关条目：")
+        for index, item in enumerate(items[:20], start=1):
+            hot = f" 热度 {item['hot']}" if item.get("hot") else ""
+            link = item.get("sourceUrl") or item.get("url") or ""
+            tail = f"（{link}）" if link else ""
+            lines.append(
+                f"{index}. [{item.get('platform', '')}] 第 {item.get('rank', '-')} 名{hot}：{item.get('title', '')}{tail}"
+            )
+    return "\n".join(lines)
 
 
 def _new_draft(
@@ -879,12 +935,4 @@ def build_digest(
             }
             for row in picks
         ],
-    }
-
-
-def sources_status() -> dict:
-    return {
-        "platforms": hot_sources.source_catalog(),
-        "enabled": hot_sources.enabled_platforms(),
-        "fallbackConfigured": bool(_configured_source()),
     }

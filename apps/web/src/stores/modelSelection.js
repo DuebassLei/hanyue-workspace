@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { api } from '../api/client'
 
 /**
- * 模型选择是**会话级**状态：创作空间 / 小说 / 分镜三页共用，
+ * 模型选择是**会话级**状态：小说 / 分镜等页共用，
  * 刷新页面回到「自动」。跨设备持久化的「默认模型」存在服务端 /preferences。
  */
 export const useModelSelectionStore = defineStore('modelSelection', {

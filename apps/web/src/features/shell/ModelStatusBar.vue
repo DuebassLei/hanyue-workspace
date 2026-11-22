@@ -130,11 +130,12 @@ onBeforeUnmount(() => {
           <strong>{{ row.kindLabel }}模型</strong>
           <span class="model-status-state" :class="`is-${row.state}`">{{ row.hint }}</span>
         </div>
-        <p class="model-status-line">{{ row.name }}</p>
-        <p v-if="row.modelCode && row.modelCode !== row.name" class="model-status-meta">
-          代号 {{ row.modelCode }}
+        <!-- 只显示生效模型的名字。代号 / 连接是排查用的底层标识，
+             和显示名不一致时并列摆出来（改名后显示 glm-5.3-flash、下面还挂着 gpt-6-luna）
+             会让人以为改名没生效，所以收进悬停提示里。 -->
+        <p class="model-status-line" :title="row.modelCode ? `底层：${row.modelCode}${row.connectionName ? ` · 连接 ${row.connectionName}` : ''}` : undefined">
+          {{ row.name }}
         </p>
-        <p v-if="row.connectionName" class="model-status-meta">连接 {{ row.connectionName }}</p>
         <p class="model-status-msg">{{ row.message }}</p>
       </div>
       <p v-if="error" class="model-status-msg is-blocked">状态读取失败：{{ error }}</p>
@@ -252,12 +253,6 @@ onBeforeUnmount(() => {
 .model-status-line {
   margin: 0;
   font-size: 13px;
-}
-
-.model-status-meta {
-  margin: 0;
-  font-size: 12px;
-  color: var(--color-text-muted);
 }
 
 .model-status-msg {

@@ -20,7 +20,9 @@ import re
 from pydantic import ValidationError
 
 from .. import schemas
+from ..core.config import get_settings
 from ..core.deps import ApiError
+from ..core.security import sign_asset_url
 from . import article_blocks
 from . import wechat_layout_engine as engine
 from .wechat_layout_engine import (
@@ -31,6 +33,7 @@ from .wechat_layout_engine import (
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _SPACE_RE = re.compile(r"\s")
+_OPENING_BANNERS = {"none": "无横幅", "poster": "大字海报", "neo": "潮酷横幅", "card": "标题卡"}
 
 
 def _warning(field: str, message: str, level: str = "warning") -> dict:
@@ -65,6 +68,15 @@ def effective_options(data: dict, incoming: dict | None = None) -> dict:
     stored = data.get("layout_options")
     merged = {**(stored if isinstance(stored, dict) else {}),
               **((incoming or {}) if isinstance(incoming, dict) else {})}
+    opening_banner = None
+    if "openingBanner" in merged:
+        opening_banner = merged.pop("openingBanner")
+        if not isinstance(opening_banner, str) or opening_banner not in _OPENING_BANNERS:
+            raise ApiError(
+                "invalid_layout_options",
+                "排版选项不合法：openingBanner 必须是 none、poster、neo 或 card",
+                status_code=422,
+            )
     try:
         options = schemas.WeChatStudioOptions.model_validate(merged).model_dump(by_alias=True)
     except ValidationError as exc:
@@ -77,6 +89,8 @@ def effective_options(data: dict, incoming: dict | None = None) -> dict:
         ) from exc
     if not options.get("title"):
         options["title"] = str(data.get("title") or "")
+    if opening_banner is not None:
+        options["openingBanner"] = opening_banner
     return options
 
 
@@ -101,9 +115,33 @@ def collect_images(data: dict) -> list[str]:
     return urls
 
 
-def banner_spec(data: dict) -> dict | None:
-    """稿件当前横幅风格对应的规格；none / 缺失 / 空规格都返回 None。"""
-    style = data.get("banner_style")
+_ASSET_REF_RE = re.compile(r"asset://([A-Za-z0-9_-]+)")
+
+
+def resolve_asset_refs(text: str, base_url: str | None) -> str:
+    """把正文里的 `asset://<id>` 换成素材直链。
+
+    `asset://` 只是后端内部的图片记号，排版引擎只认 http/https 的真实地址，
+    不换的话正文里的插图会变成「图片地址无效」。
+    直链带签名（`<img>` 带不了 Authorization 头），匿名可取。
+    """
+    if not text or "asset://" not in text:
+        return text
+
+    def replace(match: re.Match) -> str:
+        asset_id = match.group(1)
+        url = f"{get_settings().api_prefix}/assets/{asset_id}/raw?{sign_asset_url(asset_id)}"
+        if base_url:
+            url = f"{base_url.rstrip('/')}{url}"
+        return url
+
+    return _ASSET_REF_RE.sub(replace, text)
+
+
+def banner_spec(data: dict, style: str | None = None) -> dict | None:
+    """取指定风格的规格；未指定时沿用稿件的旧横幅风格。"""
+    if style is None:
+        style = data.get("banner_style")
     if not isinstance(style, str) or not style or style == "none":
         return None
     banners = data.get("banners")
@@ -123,15 +161,22 @@ def render_spec_banner(spec: dict, theme: str) -> tuple[str, list[dict]]:
     return str(rendered.get("html") or ""), normalize_warnings(rendered.get("warnings"), "banner")
 
 
-def render_article(data: dict, incoming: dict | None = None) -> dict:
-    """渲染一篇稿件，返回 `{html, warnings, stats, options}`。"""
-    options = effective_options(data, incoming)
-    body = article_blocks.to_markdown(data)
-    urls = collect_images(data)
+def render_article(data: dict, incoming: dict | None = None, base_url: str | None = None) -> dict:
+    """渲染一篇稿件，返回 `{html, warnings, stats, options}`。
 
-    spec = banner_spec(data)
+    `base_url` 是这次请求的站点根（如 `http://127.0.0.1:8000/`）：
+    正文里的 `asset://<id>` 要换成能直接打开的绝对直链，浏览器才认。
+    """
+    options = effective_options(data, incoming)
+    body = resolve_asset_refs(article_blocks.to_markdown(data), base_url)
+    urls = [resolve_asset_refs(url, base_url) for url in collect_images(data)]
+
+    opening_banner = options.get("openingBanner")
+    spec = banner_spec(data, opening_banner)
+    if opening_banner is not None and spec is not None and spec.get("style") != opening_banner:
+        spec = None
     banner_html, banner_warnings = ("", [])
-    render_options = options
+    render_options = options if opening_banner is None else {**options, "banner": opening_banner}
     if spec is not None:
         banner_html, banner_warnings = render_spec_banner(spec, options.get("theme") or "orange")
         if banner_html:
@@ -161,6 +206,41 @@ def default_options() -> dict:
     return schemas.WeChatStudioOptions().model_dump(by_alias=True)
 
 
+# 固定样例由同一渲染引擎输出；仅用于选择卡型，不代表文章生成结果。
+_SVG_SAMPLES = {
+    "svg-table": ["项目|说明", "准备|收集素材", "发布|检查内容"],
+    "svg-bars": ["项目 A|30", "项目 B|60"],
+    "svg-steps": ["准备|收集素材", "完成|检查内容"],
+    "svg-timeline": ["第一天|准备素材", "第二天|完成发布"],
+    "svg-breakdown": ["目标|明确方向", "行动|逐步推进"],
+    "svg-compare": ["之前|现在", "手动整理|集中整理", "逐项检查|统一检查"],
+    "svg-concept": ["从准备到完成", "以前|收集|整理", "现在|协作|完成"],
+    "svg-phone": ["一次简单对话", "提问|我|下一步做什么？", "回答|助手|先整理素材。"],
+}
+
+
+def _opening_banner_sample(mode: str) -> str:
+    if mode == "none":
+        return engine.render_studio_document(
+            "## 周末阅读计划\n\n留出一段安静的时间，从喜欢的一页读起。",
+            {"title": "周末阅读计划", "outro": False},
+        )["html"]
+    common = {"eyebrow": "周末计划", "title1": "慢下来", "title2": "读点好书", "avatar": False}
+    spec = {"style": mode}
+    if mode == "card":
+        spec["card"] = {
+            **common, "right": "steps", "sub": "给自己一点阅读时间",
+            "steps": [{"label": "挑一本书", "icon": "doc"}, {"label": "读几页", "icon": "spark"}],
+            "result": "周末阅读",
+        }
+    else:
+        spec["poster"] = {
+            **common, "right": "flow", "big": "读", "ask": "挑一本书",
+            "result": "读几页", "result_sub": "周末阅读",
+        }
+    return render_spec_banner(spec, "orange")[0]
+
+
 def catalog() -> dict:
     """风格 / 配色 / SVG 卡 / 横幅目录，字段与 `wechat_mp.layout_studio_catalog` 对齐。"""
     return {
@@ -179,14 +259,15 @@ def catalog() -> dict:
             for key, value in STUDIO_THEMES.items()
         ],
         "svgCards": [
-            {"id": key, "name": value["name"], "lead": value["lead"]}
+            {
+                "id": key, "name": value["name"], "lead": value["lead"],
+                "previewHtml": engine.render_svg_card(key, value["lead"], _SVG_SAMPLES[key])["html"],
+            }
             for key, value in STUDIO_SVG_CARD_INFO.items()
         ],
         "banners": [
-            {"id": "none", "name": "无横幅"},
-            {"id": "poster", "name": "海报横幅"},
-            {"id": "neo", "name": "质感横幅"},
-            {"id": "card", "name": "卡片横幅"},
+            {"id": mode, "name": name, "previewHtml": _opening_banner_sample(mode)}
+            for mode, name in _OPENING_BANNERS.items()
         ],
         "defaults": default_options(),
     }

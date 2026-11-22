@@ -259,10 +259,9 @@ onBeforeUnmount(() => {
         <p v-if="platformFallback" class="hint">平台能力接口不可用，暂按微信公众号处理。</p>
 
         <div class="row actions">
-          <NButton size="small" :disabled="busyAction" :loading="isAction('store')" @click="publish(true)">先存入文章管理</NButton>
           <NButton size="small" type="primary" :disabled="busyAction" :loading="isAction('publish')" @click="publish(false)">立即发布</NButton>
         </div>
-        <p class="hint">「存入文章管理」只生成稿件版本，不会调用平台接口。</p>
+        <p class="hint">存档请用顶部「文章存档」。这里只负责排期和发布。</p>
       </section>
 
       <section class="block-section">

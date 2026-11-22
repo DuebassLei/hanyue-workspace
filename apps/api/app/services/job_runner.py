@@ -556,6 +556,7 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             negative_prompt=negative_prompt,
             seed=seed,
             merge_meta=merge_meta,
+            **({"exact_aspect": True} if payload.get("exactAspect") is True else {}),
         )
     except image_provider.ImageProviderUnavailable as exc:
         # 供应商不支持 /images/edits（典型表现 404）时降级为纯文生图重试，
@@ -589,6 +590,7 @@ def _handle_ai_image(db, job: models.BackgroundJob) -> dict:
             negative_prompt=negative_prompt,
             seed=seed,
             merge_meta=merge_meta,
+            **({"exact_aspect": True} if payload.get("exactAspect") is True else {}),
         )
     asset_ids: list[str] = []
     for index, (raw, mime) in enumerate(images, start=1):

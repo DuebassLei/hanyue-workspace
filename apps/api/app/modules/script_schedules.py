@@ -6,7 +6,7 @@ import hashlib
 import time
 
 from fastapi import APIRouter
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from .. import models, schemas
 from ..core.config import get_settings
@@ -170,11 +170,17 @@ def delete_script(script_id: str, user: CurrentUser, db: DbSession) -> dict:
             models.ScheduledTask.owner_user_id == script.owner_user_id,
         )
     ).all()
+    task_ids = [task.id for task in tasks]
+    if task_ids:
+        # ScheduledTaskRun 与 ScheduledTask 之间没有 relationship，ORM 不保证先删子表。
+        # 必须先批量删除 run 并 flush 落库，再删 task，否则触发 scheduled_task_runs_task_id_fkey。
+        db.execute(
+            delete(models.ScheduledTaskRun).where(
+                models.ScheduledTaskRun.task_id.in_(task_ids)
+            )
+        )
+        db.flush()
     for task in tasks:
-        for run in db.scalars(
-            select(models.ScheduledTaskRun).where(models.ScheduledTaskRun.task_id == task.id)
-        ).all():
-            db.delete(run)
         db.delete(task)
     db.delete(script)
     db.commit()

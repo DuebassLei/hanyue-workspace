@@ -101,6 +101,21 @@ def test_sticker_endpoint_open_to_hot_topic_users(client):
     assert res.status_code == 200, res.text
 
 
+def test_hot_ingest_is_not_implied_by_viewing_hot_topics(client):
+    """能看热点 ≠ 能往热点库灌数据：ingest 单独一个权限点，默认只给超管。"""
+    member = _member(client)
+    body = {
+        "platform": "越权测试",
+        "sourceUrl": "https://example.com/hot",
+        "items": [{"title": "不该被普通用户写进来的标题"}],
+    }
+    denied = client.post(f"{PREFIX}/hot-topics/ingest", json=body, headers=member)
+    assert denied.status_code == 403, denied.text
+
+    # 同一个账号看列表是允许的，挡的是写
+    assert client.get(f"{PREFIX}/hot-topics/clusters", headers=member).status_code == 200
+
+
 def test_member_sees_only_permitted_menus(client):
     """菜单是权限的投影：没权限的分组连壳都不出现。"""
     headers = _member(client)

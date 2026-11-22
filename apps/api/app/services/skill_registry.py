@@ -1,10 +1,8 @@
 """Skill 注册表：内置定义的加载、种子同步、自定义 Skill 生命周期与授权。
 
 单一入口原则：
-- 内置 Skill 只来自 app/resources/skills/builtin_skills.json——它是出厂数据
-  app/resources/writing_rules_factory.json 的派生文件（规则行合成回 manifest 的形态），
-  由 scripts/export_factory_to_builtin.py 生成、--check 校验，手改不生效；
-  规则的权威源是 skill_writing_rules 表（owner 为空的全局行）；
+- 内置 Skill 只来自 app/resources/skills/builtin_skills.json（manifest 含全部规则型
+  key，运行时直接读条目 manifest，创作规则模块已下线）；
 - 所有写入路径（种子、创建、定制、编辑）共用同一个 checksum 算法；
 - 风险等级由声明工具推断，不由调用方硬编码；
 - “启用”只表示允许 Agent 自动调用，写作风格的手动选用由 resolve_visible 控制可见性。
@@ -25,7 +23,7 @@ from .. import models, schemas
 from ..core import pagination
 from ..core.config import BASE_DIR
 from ..core.deps import ApiError, default_workspace, not_found
-from . import agent_policy, writing_rules
+from . import agent_policy
 from .skill_manifest import ManifestInvalid, validate_manifest
 
 BUILTIN_RESOURCE = BASE_DIR / "app" / "resources" / "skills" / "builtin_skills.json"
@@ -44,6 +42,7 @@ DEFAULT_ARTICLE_PROMPT = (
     "封面图提示词用英文，描述画面主体、风格、色调。"
     "插图提示词数量与正文中 {{imageN}} 标记数量一致。"
 )
+# 代码兜底常量（R5）：条目 manifest 缺 tone/styleRules 时回退用
 DEFAULT_TONE = "语气平实有深度，结构清晰，善用小标题和引用"
 DEFAULT_STYLE_RULES = [
     "不用 emoji",
@@ -539,31 +538,6 @@ def fork_builtin(db, user, skill_id: str, payload: schemas.SkillUpdateIn) -> sch
         ),
     )
     db.add(fork)
-    # 个人副本带上全局规则行（source=user）：规则表是规则型 key 的权威源，
-    # fork 只复制条目 manifest 的话，T2 之后个人副本会读不到规则。
-    # 用户可能先在「创作规则」页直接维护过个人副本行（不 fork 也能写），
-    # 这里按 (rule_type, rule_key) 去重：已存在的个人行是用户自己改过的，不能被全局值覆盖。
-    existing_pairs = {
-        (row.rule_type, row.rule_key)
-        for row in writing_rules.list_rule_rows(
-            db, skill_key=entry.skill_key, owner_user_id=user.id
-        )
-    }
-    for row in writing_rules.list_rule_rows(db, skill_key=entry.skill_key, owner_user_id=None):
-        if (row.rule_type, row.rule_key) in existing_pairs:
-            continue
-        db.add(
-            models.SkillWritingRule(
-                skill_key=entry.skill_key,
-                owner_user_id=user.id,
-                rule_type=row.rule_type,
-                rule_key=row.rule_key,
-                payload=dict(row.payload or {}),
-                sort_order=row.sort_order or 0,
-                enabled=bool(row.enabled),
-                source="user",
-            )
-        )
     db.commit()
     db.refresh(fork)
     return build_skill_out(fork, None, customized=True)
@@ -572,138 +546,6 @@ def fork_builtin(db, user, skill_id: str, payload: schemas.SkillUpdateIn) -> sch
 def delete_skill(db, user, skill_id: str) -> None:
     entry = _owned_custom_skill(db, user, skill_id)
     _delete_grants(db, entry.id)
-    db.delete(entry)
-    db.commit()
-
-
-# ---------------------------------------------------------------- 全局自定义 Skill
-#
-# 「创作规则」页左侧列表的维护能力：管理员可以新增全局 Skill（source=custom、
-# owner=NULL）、改名、删除。与内置条目的关系：
-# - key 与内置冲突一律拒绝——sync_builtin_skills 会把撞内置 key 的非内置行当
-#   影子数据清掉，允许写入等于埋一条重启即消失的数据；
-# - 启动同步只 upsert source=builtin 的行，全局自定义行不会被冲掉。
-
-
-def _validate_global_skill_key(db, skill_key: str) -> str:
-    key = (skill_key or "").strip()
-    if len(key) < 3 or any(ch.isspace() for ch in key):
-        raise ApiError("invalid_rule", "标识需为 3 字符以上、不含空白", status_code=422)
-    if key in _builtin_keys():
-        raise ApiError(
-            "skill_key_exists", f"「{key}」是内置 Skill 的标识，不能重复使用", status_code=409
-        )
-    existing = db.scalar(
-        select(models.SkillRegistryEntry.id).where(
-            models.SkillRegistryEntry.skill_key == key,
-            models.SkillRegistryEntry.owner_user_id.is_(None),
-        )
-    )
-    if existing:
-        raise ApiError("skill_key_exists", f"标识「{key}」已存在", status_code=409)
-    return key
-
-
-def build_custom_manifest(category: str, tone: str | None = None) -> dict:
-    """按分组合成新全局 Skill 的最小可用 manifest。
-
-    风格型共用公众号输出契约（与内置资源、ai_article 同源），保证生成侧不漂移；
-    流程型只带输入输出形状，工具后续由设置页授权。
-    """
-    manifest: dict = {"category": "flow" if category == "flow" else "style"}
-    if category != "flow":
-        manifest["promptTemplate"] = DEFAULT_ARTICLE_PROMPT
-        manifest["tone"] = (tone or "").strip() or DEFAULT_TONE
-        manifest["styleRules"] = list(DEFAULT_STYLE_RULES)
-    manifest.setdefault("input", {"goal": "string"})
-    manifest.setdefault("output", {"draft": "object"})
-    manifest.setdefault("riskLevel", max_tool_risk([]))
-    try:
-        return validate_manifest(manifest)
-    except ManifestInvalid as exc:
-        raise ApiError("invalid_manifest", str(exc), status_code=422) from exc
-
-
-def create_global_skill(db, payload) -> models.SkillRegistryEntry:
-    """管理员新增全局自定义 Skill；全员可见，规则行在「创作规则」页维护。"""
-    if payload.category not in ("flow", "style"):
-        raise ApiError("invalid_rule", "category 只能是 flow 或 style", status_code=422)
-    key = _validate_global_skill_key(db, payload.skill_key)
-    manifest = build_custom_manifest(payload.category, payload.tone)
-    tools: list[str] = []
-    entry = models.SkillRegistryEntry(
-        source="custom",
-        owner_user_id=None,
-        skill_key=key,
-        category=payload.category,
-        version="1.0.0",
-        display_name=payload.display_name.strip(),
-        description=payload.description or "",
-        risk_level=max_tool_risk(tools),
-        allowed_tool_ids=tools,
-        trust_status="trusted",
-        manifest=manifest,
-        checksum=compute_checksum(
-            skill_key=key, version="1.0.0", manifest=manifest, allowed_tool_ids=tools
-        ),
-    )
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
-    return entry
-
-
-def _global_custom_entry(db, skill_key: str) -> models.SkillRegistryEntry:
-    entry = db.scalar(
-        select(models.SkillRegistryEntry).where(
-            models.SkillRegistryEntry.skill_key == skill_key,
-            models.SkillRegistryEntry.owner_user_id.is_(None),
-        )
-    )
-    if entry is None:
-        raise not_found("Skill")
-    if entry.source != "custom":
-        raise ApiError(
-            "skill_not_editable",
-            "内置 Skill 不可改名或删除；如需调整请维护它的规则行",
-            status_code=403,
-        )
-    return entry
-
-
-def update_global_skill(db, skill_key: str, payload) -> models.SkillRegistryEntry:
-    """改全局自定义 Skill 的显示名/描述/语气；内置条目直接 403。"""
-    entry = _global_custom_entry(db, skill_key)
-    if payload.display_name is not None:
-        entry.display_name = payload.display_name.strip() or entry.display_name
-    if payload.description is not None:
-        entry.description = payload.description
-    if payload.tone is not None and entry.category != "flow":
-        entry.manifest = dict(entry.manifest or {})
-        entry.manifest["tone"] = payload.tone.strip() or DEFAULT_TONE
-        entry.manifest = validate_manifest(entry.manifest)
-        entry.checksum = compute_checksum(
-            skill_key=entry.skill_key,
-            version=entry.version,
-            manifest=entry.manifest or {},
-            allowed_tool_ids=entry.allowed_tool_ids or [],
-        )
-    db.commit()
-    db.refresh(entry)
-    return entry
-
-
-def delete_global_skill(db, skill_key: str) -> None:
-    """删除全局自定义 Skill：条目、工作区授权与全部规则行（含个人副本行）一起删。
-
-    没有全局条目后个人副本行也无法解析（_require_entry 会 404），留着的只会是脏数据。
-    """
-    entry = _global_custom_entry(db, skill_key)
-    _delete_grants(db, entry.id)
-    for row in db.scalars(
-        select(models.SkillWritingRule).where(models.SkillWritingRule.skill_key == skill_key)
-    ).all():
-        db.delete(row)
     db.delete(entry)
     db.commit()
 

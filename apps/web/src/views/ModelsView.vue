@@ -9,8 +9,9 @@
  * 文本模型和生图模型是两条互不相干的链路（成文 / 出图），列表按类型分组，
  * 新增也走两个独立入口，弹窗里同时只出现一种类型的字段与提示，不把两种配置摆一起让人挑。
  *
- * 顶部「全局默认模型」决定不指定模型时的首选（/preferences 按用户存服务端）：
- * 文本默认排候选链首位仍可降级，生图默认优先于 IMAGE_PROVIDER_* 环境变量，
+ * 顶部「模型」区块一条链路一行：左边是当前生效的模型，右边就地选默认
+ * （/preferences 按用户存服务端）。文本默认排候选链首位仍可降级，
+ * 生图默认优先于 IMAGE_PROVIDER_* 环境变量，
  * 两条偏好各存一份，切换后顶栏与各创作页的下拉立即跟着变。
  */
 import { computed, h, nextTick, onMounted, reactive, ref, watch } from 'vue'
@@ -79,6 +80,7 @@ const connForm = reactive({
   modelCode: '',
   modelType: 'text',
   capabilities: 'text.generate,text.stream',
+  imageSizes: '',
 })
 
 // 类型决定能力登记：文本模型用于 AI 成文，生图模型用于素材页 AI 生图
@@ -154,7 +156,11 @@ function modelChoices(kind) {
           ? (model.capabilities || []).includes('image.generate')
           : model.isTextModel === true
       if (!capable) continue
-      rows.push({ value: model.id, label: `${conn.displayName} · ${model.modelCode}` })
+      // 名字优先用显示名：改了显示名之后下拉还挂着底层代号，看着像没改成功
+      rows.push({
+        value: model.id,
+        label: `${conn.displayName} · ${model.displayName || model.modelCode}`,
+      })
     }
   }
   return rows
@@ -176,6 +182,39 @@ const imageDefaultOptions = computed(() => [
   ...withCurrentDefault(modelChoices('image'), defaults.imageId, defaults.imageLabel),
 ])
 
+/**
+ * 「现在用的是哪个」和「不指定时先用哪个」本来拆成两块，同一批模型名、同一套状态
+ * 各说了一遍，还容易对不上（默认那块写 A、生效那块写 B）。
+ * 合成一块：一条模型链路一行，左边答「现在生效」，右边直接选「默认」。
+ */
+const mergedModelRows = computed(() =>
+  ['text', 'image'].map((kind) => {
+    const card = statusCards.value.find((row) => row.kind === kind)
+    const ignored = kind === 'text' ? defaults.textIgnored : defaults.imageIgnored
+    const label = kind === 'text' ? defaults.textLabel : defaults.imageLabel
+    return {
+      kind,
+      kindLabel: KIND_LABEL[kind],
+      state: card?.state || 'none',
+      hint: card?.hint || STATE_HINT.none,
+      name: card?.name || '未配置',
+      modelCode: card?.modelCode || '',
+      connectionName: card?.connectionName || '',
+      message: card?.message || '还没接入这类模型，先在下面添加连接并测试。',
+      pickValue: (kind === 'text' ? defaults.textId : defaults.imageId) || '',
+      pickOptions: kind === 'text' ? textDefaultOptions.value : imageDefaultOptions.value,
+      pickLabel: `默认${KIND_LABEL[kind]}`,
+      pickHint: ignored
+        ? `当前默认已失效（${ignored.message}），会按自动顺序降级；修好连接后自动恢复。`
+        : label
+          ? (kind === 'text' ? '失败仍会按候选链自动降级。' : '显式选择优先于环境变量供应商。')
+          : (kind === 'text'
+            ? '未设置：按连接顺序取第一个可用文本模型。'
+            : '未设置：环境变量供应商优先。'),
+    }
+  }),
+)
+
 function applyDefaults(pref) {
   defaults.textId = pref.defaultTextModelId || null
   defaults.textLabel = pref.defaultTextModelLabel || null
@@ -194,7 +233,7 @@ async function loadDefaults() {
 }
 
 /**
- * 切换全局默认模型（kind: text | image），保存后立即重算顶栏与「当前生效」。
+ * 切换默认模型（kind: text | image），保存后立即重算顶栏与本页左侧的生效信息。
  * 失败时把下拉退回原值——不能让界面显示成「已切换」而服务端其实没存上。
  */
 async function setDefault(kind, value) {
@@ -582,7 +621,7 @@ async function loadStatus() {
   }
 }
 
-/** 连接 / 模型一改，顶栏状态条与本页「当前生效」都立刻重算，不用等轮询。 */
+/** 连接 / 模型一改，顶栏状态条与本页的生效信息都立刻重算，不用等轮询。 */
 function notifyModelStatus() {
   window.dispatchEvent(new Event('hanyue:model-status-changed'))
   loadStatus()
@@ -606,6 +645,7 @@ function resetForm(type = 'text') {
   connForm.baseUrl = ''
   connForm.apiKey = ''
   connForm.modelCode = ''
+  connForm.imageSizes = ''
   resetProbe()
   selectModelType(type)
 }
@@ -623,6 +663,8 @@ function openEdit(conn) {
   connForm.providerType = conn.providerType
   connForm.baseUrl = conn.baseUrl || ''
   connForm.modelCode = conn.models?.[0]?.modelCode || ''
+  const sizes = conn.models?.[0]?.supportedImageSizes || {}
+  connForm.imageSizes = Object.keys(sizes).length ? JSON.stringify(sizes, null, 2) : ''
   const caps = conn.models?.[0]?.capabilities || ['text.generate', 'text.stream']
   connForm.capabilities = caps.join(',')
   connForm.modelType = caps.includes('image.generate') ? 'image' : 'text'
@@ -643,6 +685,30 @@ async function saveConnection() {
     error.value = 'Base URL 必须使用 HTTPS（仅本机地址允许 HTTP）'
     return
   }
+  let imageSizes = {}
+  if (connForm.modelType === 'image' && connForm.imageSizes.trim()) {
+    try {
+      imageSizes = JSON.parse(connForm.imageSizes)
+      if (!imageSizes || Array.isArray(imageSizes) || typeof imageSizes !== 'object') throw new Error()
+    } catch {
+      error.value = '精确尺寸必须是 JSON 对象，例如 {"1:1":"1024x1024"}'
+      return
+    }
+    const allowed = new Set(['2.35:1', '16:9', '4:3', '1:1', '3:4', '9:16'])
+    for (const [ratio, size] of Object.entries(imageSizes)) {
+      const match = typeof size === 'string' && /^([1-9][0-9]{0,3})x([1-9][0-9]{0,3})$/.exec(size)
+      if (!allowed.has(ratio) || !match) {
+        error.value = `图片比例或尺寸格式不合法：${ratio}=${size}`
+        return
+      }
+      const [rw, rh] = ratio.split(':').map(Number)
+      const width = Number(match[1]), height = Number(match[2])
+      if (width * height > 16000000 || Math.abs(width / height - rw / rh) >= 0.001) {
+        error.value = `尺寸 ${size} 与比例 ${ratio} 不符或超过像素限制`
+        return
+      }
+    }
+  }
   try {
     if (editingId.value) {
       const payload = {
@@ -656,7 +722,7 @@ async function saveConnection() {
       const updated = await api.patch(`/models/connections/${editingId.value}`, payload)
       const idx = connections.value.findIndex((c) => c.id === updated.id)
       if (idx >= 0) connections.value[idx] = updated
-      await syncModelCode(updated, connForm.modelCode, false, connForm.capabilities)
+      await syncModelCode(updated, connForm.modelCode, false, connForm.capabilities, imageSizes)
       showConnection.value = false
       notifyModelStatus()
       // 后台补一次真实探测，状态从 untested 变成结论；不阻塞保存
@@ -670,7 +736,7 @@ async function saveConnection() {
       baseUrl: connForm.baseUrl,
       apiKey: connForm.apiKey,
     })
-    await syncModelCode(conn, connForm.modelCode, true, connForm.capabilities)
+    await syncModelCode(conn, connForm.modelCode, true, connForm.capabilities, imageSizes)
     connections.value.push(conn)
     showConnection.value = false
     notifyModelStatus()
@@ -682,7 +748,7 @@ async function saveConnection() {
 }
 
 /** 新增或修改该连接下的第一个模型代号，保持与「模型代号」输入一致 */
-async function syncModelCode(conn, code, isNew = false, capabilities = '') {
+async function syncModelCode(conn, code, isNew = false, capabilities = '', imageSizes = {}) {
   const trimmed = (code || '').trim()
   const caps = capabilities
     .split(',')
@@ -702,10 +768,12 @@ async function syncModelCode(conn, code, isNew = false, capabilities = '') {
   // 展示名没人手工维护过（等于旧代号）时跟着代号走，否则改完代号两处名字对不上
   const nameStale =
     existing && existing.modelCode !== trimmed && existing.displayName === existing.modelCode
-  if (existing && (existing.modelCode !== trimmed || capsChanged)) {
+  const sizesChanged = capList.includes('image.generate') && JSON.stringify(existing?.supportedImageSizes || {}) !== JSON.stringify(imageSizes)
+  if (existing && (existing.modelCode !== trimmed || capsChanged || sizesChanged)) {
     const model = await api.patch(`/models/catalog/${existing.id}`, {
       modelCode: trimmed,
       capabilities: capList,
+      ...(capList.includes('image.generate') ? { supportedImageSizes: imageSizes } : {}),
       ...(nameStale ? { displayName: trimmed } : {}),
     })
     conn.models = [model]
@@ -714,6 +782,7 @@ async function syncModelCode(conn, code, isNew = false, capabilities = '') {
       connectionId: conn.id,
       modelCode: trimmed,
       capabilities: capList,
+      ...(capList.includes('image.generate') ? { supportedImageSizes: imageSizes } : {}),
     })
     conn.models = [model]
   }
@@ -771,99 +840,57 @@ onMounted(() => {
       新增连接、修改密钥、删除连接需要「模型管理」权限，请联系超级管理员。
     </n-alert>
 
+    <!-- 一块管两件事：左边是「现在实际会用哪个」，右边是「不指定时先用哪个」。
+         原先拆成「全局默认模型」「当前生效」两块，同一批模型名各说一遍，容易看着对不上。 -->
     <section class="card">
       <div class="row">
-        <h2 class="card-title" style="margin: 0">全局默认模型</h2>
+        <h2 class="card-title" style="margin: 0">模型</h2>
         <div class="spacer" />
         <span class="field-hint" style="margin: 0">保存即生效 · 跨设备同步</span>
-      </div>
-      <p class="page-sub">
-        这里决定「不指定模型时先用哪个」。创作页、小说、分镜、生图页的模型下拉都是会话级临时选择，
-        刷新后回到这里的默认值；文本与生图各存一份，互不覆盖。
-      </p>
-      <div class="default-grid">
-        <div class="default-item">
-          <div class="default-head">
-            <span class="model-dot is-ok" aria-hidden="true" style="color: var(--color-accent)" />
-            <span class="default-label">默认文本模型</span>
-          </div>
-          <n-select
-            :value="defaults.textId || ''"
-            :options="textDefaultOptions"
-            :disabled="savingKind === 'text'"
-            :loading="savingKind === 'text'"
-            size="small"
-            @update:value="(value) => setDefault('text', value)"
-          />
-          <p class="field-hint default-hint">
-            <template v-if="defaults.textIgnored">
-              当前默认已失效（{{ defaults.textIgnored.message }}），生成时会自动降级；修复连接后自动恢复。
-            </template>
-            <template v-else-if="defaults.textLabel">
-              当前默认：{{ defaults.textLabel }}；失败仍会按候选链自动降级。
-            </template>
-            <template v-else>未设置默认：按连接顺序取第一个可用文本模型，失败自动降级。</template>
-          </p>
-        </div>
-        <div class="default-item">
-          <div class="default-head">
-            <span class="model-dot is-ok" aria-hidden="true" style="color: var(--color-accent)" />
-            <span class="default-label">默认生图模型</span>
-          </div>
-          <n-select
-            :value="defaults.imageId || ''"
-            :options="imageDefaultOptions"
-            :disabled="savingKind === 'image'"
-            :loading="savingKind === 'image'"
-            size="small"
-            @update:value="(value) => setDefault('image', value)"
-          />
-          <p class="field-hint default-hint">
-            <template v-if="defaults.imageIgnored">
-              当前默认已失效（{{ defaults.imageIgnored.message }}），出图会按环境变量或第一个可用连接降级。
-            </template>
-            <template v-else-if="defaults.imageLabel">
-              当前默认：{{ defaults.imageLabel }}；显式选择优先于环境变量供应商 IMAGE_PROVIDER_*。
-            </template>
-            <template v-else>未设置默认：环境变量供应商优先，其次按连接顺序取第一个可用生图模型。</template>
-          </p>
-        </div>
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="row">
-        <h2 class="card-title" style="margin: 0">当前生效</h2>
-        <div class="spacer" />
-        <span v-if="statusLoading" class="field-hint" style="margin: 0">读取中…</span>
         <n-button quaternary size="small" :loading="statusLoading" @click="loadStatus">刷新</n-button>
       </div>
       <p class="page-sub">
-        「可用」只代表连接已配置且测过连通性，不代表正在付费额度内；未测过显示「待确认」，不冒充可用。
+        每类一行：左边是现在生效的模型，「可用」只代表连接已配置且测过连通性，不代表在付费额度内；
+        右边选「不指定模型时先用哪个」——创作页、小说、分镜、生图里的模型下拉都是会话级临时选择，
+        刷新后回到这里的默认值，文本与生图各存一份互不覆盖。
       </p>
-      <div v-if="statusCards.length" class="model-current-grid">
-        <div v-for="row in statusCards" :key="row.kind" class="model-current-card">
-          <div class="model-current-head">
-            <span class="model-dot" :class="`is-${row.state}`" aria-hidden="true" />
-            <span class="model-current-kind">{{ row.kindLabel }}</span>
-            <n-tag
-              size="small"
-              round
-              :type="row.state === 'ok' ? 'success' : row.state === 'blocked' ? 'error' : 'default'"
+      <div class="model-merge">
+        <div v-for="row in mergedModelRows" :key="row.kind" class="model-merge-row">
+          <div class="model-merge-now">
+            <div class="model-merge-head">
+              <span class="model-dot" :class="`is-${row.state}`" aria-hidden="true" />
+              <span class="model-merge-kind">{{ row.kindLabel }}</span>
+              <n-tag
+                size="small"
+                round
+                :type="row.state === 'ok' ? 'success' : row.state === 'blocked' ? 'error' : 'default'"
+              >
+                {{ row.hint }}
+              </n-tag>
+            </div>
+            <div
+              class="model-merge-name"
+              :title="row.modelCode
+                ? `底层 ${row.modelCode}${row.connectionName ? ` · 连接 ${row.connectionName}` : ''}`
+                : undefined"
             >
-              {{ row.hint }}
-            </n-tag>
+              {{ row.name }}
+            </div>
+            <p class="field-hint model-merge-note">{{ row.message }}</p>
           </div>
-          <div class="model-current-name">{{ row.name }}</div>
-          <div class="field-hint" style="margin: 0">
-            <template v-if="row.connectionName">连接 {{ row.connectionName }}<br /></template>
-            <template v-if="row.modelCode && row.modelCode !== row.name">代号 {{ row.modelCode }}<br /></template>
-            {{ row.message }}
+          <div class="model-merge-pick">
+            <span class="model-merge-pick-label">{{ row.pickLabel }}</span>
+            <n-select
+              :value="row.pickValue"
+              :options="row.pickOptions"
+              :disabled="savingKind === row.kind"
+              :loading="savingKind === row.kind"
+              size="small"
+              @update:value="(value) => setDefault(row.kind, value)"
+            />
+            <p class="field-hint model-merge-note">{{ row.pickHint }}</p>
           </div>
         </div>
-      </div>
-      <div v-else-if="!statusLoading" class="empty" style="padding: var(--space-4)">
-        <n-empty description="还没有生效的模型：先在下面添加并测试一个连接。" size="small" />
       </div>
     </section>
 
@@ -1055,6 +1082,10 @@ onMounted(() => {
             <template v-if="editingId">留空将删除该连接下已登记的模型。</template>
           </template>
         </n-form-item>
+        <n-form-item v-if="connForm.modelType === 'image'" label="成稿台精确尺寸（可选）">
+          <n-input v-model:value="connForm.imageSizes" type="textarea" :rows="3" placeholder='例如 {"1:1":"1024x1024"}' />
+          <template #feedback>请仅按供应商文档填写确认支持的比例与像素尺寸，JSON 格式，例如 {"1:1":"1024x1024"}；留空表示未确认。保存不代表已验证供应商能力。环境变量供应商不能在此配置，请选择已登记的默认生图模型。</template>
+        </n-form-item>
       </n-form>
 
       <div v-if="probe.state !== 'idle'" ref="probeAlertRef" class="probe-alert">
@@ -1082,18 +1113,19 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* 全局默认：两条链路各一格，窄屏自动竖排，不把两个下拉挤成半截 */
-.default-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+/* 每类模型一行：左边答「现在用哪个」，右边答「不指定时先用哪个」，窄屏竖排 */
+.model-merge {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-3);
   margin-top: var(--space-3);
 }
 
-.default-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.model-merge-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
+  gap: var(--space-4);
+  align-items: start;
   padding: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -1101,50 +1133,50 @@ onMounted(() => {
   min-width: 0;
 }
 
-.default-head {
+.model-merge-now,
+.model-merge-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.model-merge-head {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.default-label {
+.model-merge-kind {
+  font-size: var(--font-sm);
+  color: var(--color-text-secondary);
+}
+
+.model-merge-name {
+  font-size: var(--font-body);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 标签和说明都靠左对齐，避免和下拉框的说明挤成两行高低不齐 */
+.model-merge-pick-label {
   font-size: var(--font-sm);
   font-weight: 600;
   color: var(--color-text-primary);
 }
 
-.default-hint {
+.model-merge-note {
   margin: 0;
   line-height: 1.5;
 }
 
-.model-current-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: var(--space-3);
-  margin-top: var(--space-3);
-}
-
-.model-current-card {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-raised);
-  min-width: 0;
-}
-
-.model-current-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.model-current-kind {
-  font-size: var(--font-sm);
-  color: var(--color-text-secondary);
+@media (max-width: 780px) {
+  .model-merge-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .model-dot {
@@ -1152,15 +1184,6 @@ onMounted(() => {
   height: 7px;
   border-radius: 50%;
   background: currentColor;
-}
-
-.model-current-name {
-  font-size: var(--font-body);
-  font-weight: 600;
-  color: var(--color-text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* 绿（可用）/ 红（断链）/ 灰（未验证、未配置），浮层与卡片都带文字状态，不只靠颜色 */

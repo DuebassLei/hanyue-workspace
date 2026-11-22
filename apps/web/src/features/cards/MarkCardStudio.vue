@@ -390,7 +390,7 @@ onBeforeUnmount(() => {
     <!-- 从文章台跳转而来时显示返回提示 -->
     <div v-if="fromStudio" class="studio-from-banner">
       <span>已将文章正文导入卡片台</span>
-      <button class="link-btn" @click="$router.push({ name: 'studio' })">← 返回创作台</button>
+      <button class="link-btn" @click="$router.push({ name: 'articles' })">← 返回创作台</button>
     </div>
 
     <main class="studio-grid">

@@ -165,6 +165,13 @@ function togglePreview() {
 }
 
 // ---- 保存 / 删除 / 取消 ----
+// 删除是显式动作（按钮或快捷键），不会因为清空正文就顺手删掉；
+// 后端删除前会存快照，误删可以在页头「撤销一步」捡回来。
+async function removeBlock() {
+  if (!canRemove.value) return
+  await save({ remove: true })
+}
+
 async function save({ remove = false, advance = false } = {}) {
   // busy 时直接发请求只会拿到 409，白白让用户以为撞了冲突
   if (saving.value || props.busy) return
@@ -182,6 +189,8 @@ async function save({ remove = false, advance = false } = {}) {
       expectedText: draft.value.original,
     })
     setDraft(props.articleId, props.block.id, null)
+    // 删除是唯一会「消失」的保存结果，明确告诉用户还能撤销，避免误删后不敢继续改
+    if (remove) toast(`第 ${props.number} 段已删除，可用顶部「撤销一步」恢复`, 'success')
     emit('saved', snapshot)
     emit('done', { advance: Boolean(advance) })
   } catch (err) {
@@ -312,6 +321,15 @@ function onKeydown(event) {
     cancel()
     return
   }
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'k') {
+    // ⌘/Ctrl + Shift + K 删除整段。不用 Backspace：它在输入框里本身就是删字，
+    // 一不小心就把整段送走，和「删一个字」的手感差太远。
+    event.preventDefault()
+    // 全局 ⌘/Ctrl+K 会打开命令面板；这里截住，别删完段还弹个面板抢焦点
+    event.stopPropagation()
+    removeBlock()
+    return
+  }
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
     event.preventDefault()
     // 先判 shift：Ctrl+Shift+Enter 是「保存并改下一段」，不能退化成普通保存
@@ -413,6 +431,14 @@ onBeforeUnmount(() => {
         <button type="button" class="tool" :aria-pressed="preview" :disabled="saving" @click="togglePreview">
           {{ preview ? '继续编辑' : '预览' }}
         </button>
+        <!-- 删除放工具条而不是页脚：段一长，页脚就被推到屏幕外，删一段要先滚到底 -->
+        <button
+          type="button"
+          class="tool danger-text delete-tool"
+          title="删除本段（⌘ / Ctrl + Shift + K），可用顶部「撤销一步」恢复"
+          :disabled="!canRemove"
+          @click="removeBlock"
+        >删除本段</button>
       </div>
     </div>
 
@@ -436,14 +462,6 @@ onBeforeUnmount(() => {
       </span>
       <div class="editor-actions">
         <button v-if="conflict" type="button" class="tool" @click="copyModification">复制修改</button>
-        <button
-          v-if="!empty"
-          type="button"
-          class="tool danger-text"
-          title="删除当前段落，可通过顶部「撤销一步」恢复"
-          :disabled="!canRemove"
-          @click="save({ remove: true })"
-        >删除</button>
         <button type="button" class="tool" :disabled="saving" @click="cancel">取消</button>
         <button
           v-if="!preview && nextBlock && !empty"
@@ -517,6 +535,13 @@ onBeforeUnmount(() => {
   color: var(--paper-ink-muted, #827a71);
 }
 .danger-text { color: var(--paper-danger, #9b3e37); }
+/* 删除和「预览」之间拉一道细线，两者挨着放容易点错 */
+.delete-tool {
+  margin-left: 2px;
+  padding-left: 9px;
+  border-left: 1px solid var(--paper-line, #e1ddd6);
+  border-radius: 0 6px 6px 0;
+}
 
 .format-group {
   display: flex;

@@ -26,7 +26,11 @@ from ..core.db import SessionLocal
 from . import ai_gateway, article_blocks as AB, article_quality as AQ, studio_repo, wechat_layout_engine
 
 SKILL_DIR = Path(__file__).resolve().parent.parent / "resources" / "studio_skills"
+STYLE_DIR = SKILL_DIR / "styles"
 BATCH_CONCURRENCY = 3
+DEFAULT_WRITER_STYLE = "tutorial"
+# 风格档的展示顺序。新加的风格文件没登记也会出现在列表里，排在已登记的后面。
+STYLE_ORDER = ("tutorial", "method", "review", "opinion", "sponsor")
 
 DRAFT_RULES = """# 本次输出要求
 - 只输出文章本身的 Markdown，不要任何解释、前言或结语说明。
@@ -102,6 +106,50 @@ def load_skill(name: str) -> str:
     raw = path.read_text(encoding="utf-8")
     # 去掉 front matter，只把正文喂给模型
     return re.sub(r"\A---\n[\s\S]*?\n---\n", "", raw).strip()
+
+
+def _front_matter(raw: str) -> dict:
+    """只解析风格档用到的单行 `key: value`，不为了几个字段引 yaml。"""
+    match = re.match(r"\A---\n([\s\S]*?)\n---\n", raw)
+    if not match:
+        return {}
+    meta = {}
+    for line in match.group(1).splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip():
+            meta[key.strip()] = value.strip().strip("\"'")
+    return meta
+
+
+def writer_styles() -> list[dict]:
+    """扫描风格目录：加一个 md 就多一个可选风格，不用改代码、不用重启。"""
+    if not STYLE_DIR.is_dir():
+        return []
+    found = {}
+    for path in STYLE_DIR.glob("*.md"):
+        raw = path.read_text(encoding="utf-8")
+        meta = _front_matter(raw)
+        slug = meta.get("name") or path.stem
+        found[slug] = {
+            "value": slug,
+            "label": meta.get("label") or path.stem,
+            "hint": meta.get("hint") or "",
+        }
+    rank = {slug: index for index, slug in enumerate(STYLE_ORDER)}
+    return sorted(found.values(), key=lambda item: (rank.get(item["value"], len(rank)), item["value"]))
+
+
+def has_writer_style(name: str) -> bool:
+    return bool(name) and (STYLE_DIR / f"{name}.md").is_file()
+
+
+def load_writer_style(name: str | None) -> str:
+    """取风格档正文。档位缺失或文件被删时回落默认档，不让写正文整条断掉。"""
+    slug = name if has_writer_style(str(name or "")) else DEFAULT_WRITER_STYLE
+    path = STYLE_DIR / f"{slug}.md"
+    if not path.is_file():
+        return ""
+    return re.sub(r"\A---\n[\s\S]*?\n---\n", "", path.read_text(encoding="utf-8")).strip()
 
 
 def clean_markdown(text: str) -> str:
@@ -278,12 +326,17 @@ class StudioPipeline:
             row = _session_article(db, article_id)
             data = studio_repo.row_to_dict(row)
             owner = row.owner_user_id
-        system = f"{load_skill('writer')}\n\n{DRAFT_RULES}"
+            style = data.get("writer_style") or DEFAULT_WRITER_STYLE
+            # 人设（writer）+ 本次风格档 + 输出硬规则，三层各管一件事
+            system = f"{load_skill('writer')}\n\n{load_writer_style(style)}\n\n{DRAFT_RULES}"
         user = f"选题：{data.get('topic') or '（作者没有写选题，请从素材里提炼）'}\n\n素材：\n{data.get('material') or '（没有额外素材）'}"
         text = await _model(owner, system, user, "studio_draft")
         with SessionLocal() as db:
             row = _session_article(db, article_id)
             data = studio_repo.row_to_dict(row)
+            # 模型成功后才留快照：失败的话不留空记录；快照取的是覆盖前的最新一版
+            if data["blocks"]:
+                studio_repo.snapshot(db, row, data, "重写正文")
             AB.set_body(data, clean_markdown(text))
             data["notice"] = None
             studio_repo.save(db, row, data)
@@ -345,13 +398,18 @@ class StudioPipeline:
             row = _session_article(db, article_id)
             data = studio_repo.row_to_dict(row)
             owner = row.owner_user_id
+            style = data.get("writer_style") or DEFAULT_WRITER_STYLE
         history = "\n".join(
             f"{'作者' if turn.get('role') == 'user' else '你'}：{turn.get('text', '')}"
             for turn in (data.get("chat") or [])[-6:]
         )
-        system = f"{load_skill('writer')}\n\n{CHAT_RULES}"
+        # 改稿也要带风格档：不带的话模型只按人设改，改两轮结构就跑回默认原型
+        system = f"{load_skill('writer')}\n\n{load_writer_style(style)}\n\n{CHAT_RULES}"
         user = (
             f"# 当前标题\n{data.get('title') or '（还没有）'}\n\n"
+            # 选题与素材：热点「写这篇」带过来的热点信息在这里；没有就明确写空，别让模型瞎编
+            f"# 选题\n{data.get('topic') or '（没有写选题）'}\n\n"
+            f"# 素材\n{data.get('material') or '（没有额外素材）'}\n\n"
             f"# 标题候选\n" + ("\n".join(f"- {t['text']}" for t in data.get("titles") or []) or "（还没有）") + "\n\n"
             f"# 正文\n{AB.numbered(data['blocks'])}\n\n"
             f"# 之前的对话\n{history or '（无）'}\n\n"
@@ -651,40 +709,34 @@ class StudioPipeline:
             row = _session_article(db, article_id)
             data = studio_repo.row_to_dict(row)
 
-        if not key:
-            # 没有密钥：走本地启发式，标记来源，不冒充朱雀结论
-            result = AQ.local_check(data)
-            with SessionLocal() as db:
-                row = _session_article(db, article_id)
-                latest = studio_repo.row_to_dict(row)
-                summary = AQ.mark_blocks(
-                    latest,
-                    {"segments": result["segments"], "overall": result["overall"]},
-                    AQ.LOCAL_SOURCE,
-                )
-                latest["zhuque"]["note"] = "未配置朱雀 API Key，本次为本地规则打分，不能与朱雀结论直接比较"
-                latest["notice"] = {
-                    "text": _round_notice(summary, latest["zhuque"].get("round", 0), "（本地规则，未调用朱雀）"),
-                    "at": AB.now_iso(),
-                }
-                studio_repo.save(db, row, latest)
-                db.commit()
-            return
+        found = None
+        reason = "未配置朱雀 API Key"
+        if key:
+            text = _detection_text(AB.to_markdown(data), fixed_lines)
+            try:
+                found = await AQ.detect(text, key=key, endpoint=endpoint)
+            except AQ.QualityError as exc:
+                if exc.status != 502:
+                    raise
+                reason = "朱雀接口暂不可用"
 
-        text = _detection_text(AB.to_markdown(data), fixed_lines)
-        found = await AQ.detect(text, key=key, endpoint=endpoint)
-        segments, covered = AQ.map_segments(data["blocks"], found["segments"])
-        if not covered:
-            raise PipelineError("朱雀返回的片段和文章段落一段都没对上，这次结果没有采用", 502)
         with SessionLocal() as db:
             row = _session_article(db, article_id)
             latest = studio_repo.row_to_dict(row)
-            summary = AQ.mark_blocks(
-                latest,
-                {"segments": segments, "covered": covered, "overall": found.get("overall")},
-                "api",
-            )
-            extra = f"本次用了 {found['tokens']} token。" if found.get("tokens") is not None else ""
+            covered = set()
+            if found is not None:
+                segments, covered = AQ.map_segments(latest["blocks"], found["segments"])
+                reason = "朱雀未返回可对齐的检测结果"
+            if covered:
+                parsed = {"segments": segments, "covered": covered, "overall": found.get("overall")}
+                summary = AQ.mark_blocks(latest, parsed, "api")
+                extra = f"本次用了 {found['tokens']} token。" if found.get("tokens") is not None else ""
+            else:
+                result = AQ.local_check(latest)
+                summary = AQ.mark_blocks(latest, result, AQ.LOCAL_SOURCE)
+                latest["zhuque"]["dimensions"] = result["dimensions"]
+                latest["zhuque"]["note"] = f"{reason}，本次为本地规则打分，不能与朱雀结论直接比较"
+                extra = f"（{reason}，使用本地规则）"
             latest["notice"] = {
                 "text": _round_notice(summary, latest["zhuque"]["round"], extra),
                 "at": latest["zhuque"]["lastAt"],

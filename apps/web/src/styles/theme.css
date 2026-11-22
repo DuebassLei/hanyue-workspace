@@ -57,6 +57,7 @@
   --paper-on-scrim: #fff;
   --paper-on-danger: #fff;
   --paper-success: #39715e;
+  --paper-success-soft: #eef6ef;
   --paper-danger: #9b3e37;
   --paper-danger-soft: #faf3f2;
   --paper-danger-line: #e5c4c1;
@@ -155,6 +156,7 @@ html[data-theme='dark'] {
   --paper-on-scrim: #fff;
   --paper-on-danger: #fff;
   --paper-success: #7fd6b4;
+  --paper-success-soft: rgba(127, 214, 180, 0.12);
   --paper-danger: #e88080;
   --paper-danger-soft: rgba(232, 128, 128, 0.1);
   --paper-danger-line: rgba(232, 128, 128, 0.32);

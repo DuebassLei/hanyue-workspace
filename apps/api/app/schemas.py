@@ -200,14 +200,6 @@ class DraftPatch(CamelModel):
     body: str | None = None
 
 
-class WritingFlowCheckIn(CamelModel):
-    """流程面板实时检查：携带编辑器当前内容（可含未保存草稿）。
-    body 缺省 = 回退到最新版本，与 GET writing-flow 同口径。"""
-    skill_key: str | None = None
-    title: str | None = None
-    body: str | None = None
-    summary: str | None = None
-
 
 class ContentDetail(CamelModel):
     item: ContentOut
@@ -248,6 +240,8 @@ class CalendarOut(CamelModel):
     platform: str | None
     status: str
     content_item_id: str | None
+    # 成稿台排期同步过来的条目带这个 id：前端据此显示来源并跳回成稿台
+    studio_article_id: str | None = None
 
 
 # ---------- review ----------
@@ -303,6 +297,7 @@ class ModelProbeIn(CamelModel):
 
 
 class CatalogIn(CamelModel):
+    supported_image_sizes: dict[str, str] = Field(default_factory=dict)
     connection_id: str
     model_code: str
     display_name: str = ""
@@ -311,6 +306,7 @@ class CatalogIn(CamelModel):
 
 
 class CatalogPatch(CamelModel):
+    supported_image_sizes: dict[str, str] | None = None
     model_code: str | None = None
     display_name: str | None = None
     capabilities: list[str] | None = None
@@ -329,6 +325,7 @@ class ConnectionOut(CamelModel):
 
 
 class CatalogOut(CamelModel):
+    supported_image_sizes: dict[str, str] = Field(default_factory=dict)
     id: str
     model_code: str
     display_name: str
@@ -740,21 +737,6 @@ class SkillUpdateIn(CamelModel):
     manifest: dict[str, Any] | None = None
 
 
-class GlobalSkillCreateIn(CamelModel):
-    """管理员新增全局 Skill（「创作规则」页左侧列表）；全员可见。"""
-    skill_key: str = Field(min_length=3, max_length=120)
-    display_name: str = Field(min_length=1, max_length=160)
-    description: str = ""
-    category: str = "style"
-    tone: str = ""
-
-
-class GlobalSkillUpdateIn(CamelModel):
-    """改全局自定义 Skill 的显示信息；内置条目不可改。"""
-    display_name: str | None = Field(default=None, min_length=1, max_length=160)
-    description: str | None = None
-    tone: str | None = None
-
 
 # ---------- dashboard ----------
 class DashboardOut(CamelModel):
@@ -927,6 +909,8 @@ class HotClusterItemOut(CamelModel):
     title: str
     hot: int | None = None
     url: str = ""
+    # 这一条是哪一轮从哪个榜单地址采到的；与 url（单条内容链接）分开
+    source_url: str = ""
     first_seen_at: str = ""
     last_seen_at: str = ""
     history: list[dict[str, Any]] = []
@@ -938,7 +922,64 @@ class HotClusterDetailOut(HotClusterOut):
 
 
 class HotRefreshIn(CamelModel):
+    """页面「重算评分」入参：只按已入库数据重算，不抓外网。"""
+
     date: str | None = None
+
+
+class HotIngestItemIn(CamelModel):
+    """一条热点。上游字段名由调用方的定时脚本负责映射，这里只认这四个键。
+
+    `title` 空串是合法的：空标题在这一批里丢弃，不让整批 422。
+    """
+
+    title: str = Field(default="", max_length=2000)
+    rank: int | None = None
+    hot: int | None = None
+    url: str = Field(default="", max_length=2000)
+
+
+class HotIngestIn(CamelModel):
+    """一个平台的一轮榜单。
+
+    `source_url` 必填：记的是这一轮脚本真正请求的地址，不是任务参数里打算用的。
+    缺省或不是 http/https 绝对地址时整批拒绝（422），不入库。
+    """
+
+    platform: str = Field(min_length=1, max_length=32)
+    source_url: str = Field(min_length=1, max_length=2000)
+    captured_at: str | None = Field(default=None, max_length=16)
+    date: str | None = Field(default=None, max_length=10)
+    items: list[HotIngestItemIn] = Field(default_factory=list)
+
+    @field_validator("platform")
+    @classmethod
+    def _clean_platform(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("platform 不能为空")
+        return text
+
+    @field_validator("source_url")
+    @classmethod
+    def _check_source_url(cls, value: str) -> str:
+        text = value.strip()
+        parts = urlsplit(text)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("sourceUrl 必须是 http/https 绝对地址")
+        return text
+
+
+class HotIngestOut(CamelModel):
+    day: str
+    captured_at: str
+    platform: str
+    source_url: str
+    items: int
+    clusters: int
+    new_clusters: int
+    matched_clusters: int
+    recommended: int = 0
 
 
 class HotRefreshOut(CamelModel):
@@ -972,12 +1013,6 @@ class HotDegradedOut(CamelModel):
 
 class HotStatusIn(CamelModel):
     status: str
-
-
-class HotSourcesOut(CamelModel):
-    platforms: list[dict[str, str]] = []
-    enabled: list[str] = []
-    fallback_configured: bool = False
 
 
 # ---------- stickers（贴图创作） ----------
@@ -1823,107 +1858,6 @@ class AnalysisHistoryItemOut(CamelModel):
 
 
 
-# ---------------------------------------------------------------- 创作规则（T4）
-
-
-class WritingRuleIn(CamelModel):
-    """规则行写入：ruleType/ruleKey/payload 由 services.writing_rules.validate_rule 校验。"""
-
-    rule_type: str
-    rule_key: str = "default"
-    payload: dict = Field(default_factory=dict)
-    sort_order: int = 0
-    enabled: bool = True
-
-
-class WritingRulesReplaceIn(CamelModel):
-    """整组替换（表单保存）；全局空数组按 R4 落「全部禁用」而不是删行。"""
-
-    rules: list[WritingRuleIn] = Field(default_factory=list)
-
-
-class WritingRulePatchIn(CamelModel):
-    """单条修改：只更新显式传入的字段。"""
-
-    payload: dict | None = None
-    enabled: bool | None = None
-    sort_order: int | None = None
-
-
-class WritingRuleOut(CamelModel):
-    id: str
-    skill_key: str
-    owner_user_id: str | None = None
-    rule_type: str
-    rule_key: str
-    payload: dict = Field(default_factory=dict)
-    sort_order: int = 0
-    enabled: bool = True
-    source: str = "user"
-
-
-class SkillRulesOut(CamelModel):
-    skill_key: str
-    scope: str
-    rules: list[WritingRuleOut] = Field(default_factory=list)
-    counts: dict = Field(default_factory=dict)
-    effective_manifest: dict = Field(default_factory=dict)
-
-
-class WritingSkillSummaryOut(CamelModel):
-    skill_key: str
-    name: str = ""
-    description: str = ""
-    category: str = ""
-    global_count: int = 0
-    personal_count: int = 0
-    has_personal_copy: bool = False
-    # builtin=出厂条目（不可改名/删除）；custom=管理员新建的全局 Skill（可维护）
-    source: str = "builtin"
-
-
-class PromptRuleOut(CamelModel):
-    key: str
-    category: str = ""
-    title: str = ""
-    description: str = ""
-    content: str = ""
-    payload: dict = Field(default_factory=dict)
-    enabled: bool = True
-    source: str = "factory"
-    version: int = 1
-
-
-class PromptRuleUpsertIn(CamelModel):
-    """提示词规则修改：只更新显式传入的字段。"""
-
-    content: str | None = None
-    payload: dict | None = None
-    enabled: bool | None = None
-    title: str | None = None
-    description: str | None = None
-
-
-class PromptRuleCreateIn(CamelModel):
-    """新增自定义提示词/词表规则（source=user，可删除）。"""
-
-    key: str
-    category: str
-    title: str = ""
-    description: str = ""
-    content: str = ""
-    payload: dict = Field(default_factory=dict)
-    enabled: bool = True
-
-
-class RulesPreviewOut(CamelModel):
-    skill_key: str
-    scope: str
-    kind: str
-    text: str = ""
-    rule_sources: list = Field(default_factory=list)
-
-
 # ---------- 成稿台：段落级编辑编排 ----------
 #
 # 结构与 dsh-wechat-studio 的 article/block 契约保持一致（前端照搬时可少改），
@@ -1956,6 +1890,7 @@ class StudioArticleOut(CamelModel):
     id: str
     topic: str = ""
     material: str = ""
+    writer_style: str = "tutorial"
     front: str = ""
     title: str = ""
     hook: str | None = None
@@ -2003,15 +1938,29 @@ class StudioMetaOut(CamelModel):
 class StudioStateOut(CamelModel):
     articles: list[StudioMetaOut] = Field(default_factory=list)
     settings: dict = Field(default_factory=dict)
+    # 可选写作风格档：[{value, label, hint}]，由后端的 styles 目录扫描得出
+    writer_styles: list = Field(default_factory=list)
 
 
 class StudioNewIn(CamelModel):
     topic: str = ""
     material: str = ""
     markdown: str = ""
+    # 写正文用的风格档；不传按实战教程
+    writer_style: str = "tutorial"
     # 建好就写正文；给了 markdown 时按导入处理，不再让模型写
     draft: bool = False
     titles: bool = True
+
+
+class StudioStyleIn(CamelModel):
+    style: str = Field(min_length=1, max_length=32)
+
+
+class StudioDraftIn(CamelModel):
+    """写正文。带上 style 就是「按这个风格重写一遍」，不带就用稿件当前风格。"""
+
+    style: str | None = None
 
 
 class StudioChatIn(CamelModel):
@@ -2056,3 +2005,158 @@ class StudioRevisionsOut(CamelModel):
 
 class StudioMarkdownOut(CamelModel):
     markdown: str
+
+
+# ---------- 宠物创作系统：Skill 蒸馏与对话 ----------
+
+
+class SkillDistillationStartIn(CamelModel):
+    """开始 Skill 蒸馏"""
+
+    skill_entry_id: str
+    distillation_type: Literal["writing", "persona", "knowledge"]
+    tier: Literal["quick", "standard", "deep"] = "standard"
+    # 源数据
+    source_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillDistillationOut(CamelModel):
+    """蒸馏任务状态"""
+
+    model_config = {"populate_by_name": True, "alias_generator": camel, "from_attributes": True}
+
+    id: str
+    skill_entry_id: str
+    distillation_type: str
+    status: str  # pending | processing | completed | failed
+    progress: int  # 0-100
+    error_message: str | None = None
+    result: dict[str, Any] = Field(default_factory=dict)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class PetMessage(CamelModel):
+    """宠物对话中的一条消息"""
+
+    role: Literal["user", "pet", "assistant"]
+    content: str
+    timestamp: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PetMessageIn(CamelModel):
+    message: str = Field(min_length=1, max_length=12000)
+    active_skill_ids: list[str] | None = Field(default=None, max_length=5)
+
+
+class QuickRefineIn(CamelModel):
+    paragraph: str = Field(min_length=1, max_length=20000)
+    refine_type: Literal["polish", "rewrite", "remove_ai_taste"] = "polish"
+    skill_id: str | None = None
+
+
+class QuickCardIn(CamelModel):
+    text: str = Field(min_length=1, max_length=12000)
+    title: str | None = Field(default=None, max_length=40)
+    theme: Literal["blue", "purple", "green", "orange", "red"] = "blue"
+
+
+class PetConversationIn(CamelModel):
+    """发起对话"""
+
+    studio_article_id: str
+    message: str = Field(min_length=1, max_length=12000)
+    active_skill_ids: list[str] = Field(default_factory=list, max_length=5)
+
+
+class PetConversationOut(CamelModel):
+    """对话会话状态"""
+
+    model_config = {"populate_by_name": True, "alias_generator": camel, "from_attributes": True}
+
+    id: str
+    studio_article_id: str
+    messages: list[PetMessage] = Field(default_factory=list)
+    active_skill_ids: list[str] = Field(default_factory=list)
+    last_generation: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class SkillExecutionIn(CamelModel):
+    """执行 Skill"""
+
+    skill_id: str
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillExecutionOut(CamelModel):
+    """Skill 执行结果"""
+
+    result: str
+    metadata: dict[str, Any] = Field(
+        default_factory=dict
+    )  # {skill_id, skill_type, execution_time_ms}
+
+
+# ---------- 技能中心（独立技能库） ----------
+class AuthorSkillIn(CamelModel):
+    name: str = Field(min_length=1, max_length=80)
+    skill_type: Literal["writing", "persona", "knowledge"]
+    description: str = Field(default="", max_length=4000)
+    summary: str = Field(default="", max_length=400)
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuthorSkillUpdateIn(CamelModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=4000)
+    summary: str | None = Field(default=None, max_length=400)
+    config: dict[str, Any] | None = None
+    note: str = Field(default="", max_length=200)
+
+
+class AuthorSkillOut(CamelModel):
+    model_config = {"populate_by_name": True, "alias_generator": camel, "from_attributes": True}
+
+    id: str
+    name: str
+    skill_type: str
+    description: str
+    summary: str
+    config: dict[str, Any]
+    source: str
+    status: str
+    version: int
+    usage_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuthorSkillDistillIn(CamelModel):
+    materials: list[Any] = Field(default_factory=list, max_length=50)
+    urls: list[str] = Field(default_factory=list, max_length=20)
+    person_name: str = Field(default="", max_length=80)
+    tier: Literal["quick", "standard", "deep"] = "standard"
+
+
+class AuthorSkillDistillOut(CamelModel):
+    model_config = {"populate_by_name": True, "alias_generator": camel, "from_attributes": True}
+
+    id: str
+    skill_id: str
+    skill_type: str
+    status: str
+    progress: int
+    material_stats: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class AuthorSkillImportIn(CamelModel):
+    """导入单个技能或整包；结构由服务层统一校验。"""
+
+    payload: dict[str, Any]

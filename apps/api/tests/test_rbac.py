@@ -723,6 +723,7 @@ def test_workspace_menu_split_into_three_groups(client):
         "studio",
         "paper",
         "prompts",
+        "skills",
         "group-articles",
         "group-images",
         "group-novels",

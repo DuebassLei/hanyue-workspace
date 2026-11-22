@@ -10,7 +10,6 @@ from .. import models, schemas
 from ..core import pagination
 from ..models import utcnow
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
-from ..services import article_workflow, writing_rules
 
 router = APIRouter(tags=["content"])
 
@@ -345,151 +344,11 @@ def get_content(content_id: str, user: CurrentUser, db: DbSession) -> schemas.Co
     )
 
 
-_FLOW_STEP_LABELS = {
-    "create_outline": "列大纲",
-    "generate_article": "生成文章",
-    "review_article": "审稿",
-    "check_ai_tone": "检查 AI 味",
-    "extract_facts": "抽取事实",
-    "plan_images": "规划配图",
-    "retrieve_content": "检索稿件",
-}
-
-
 def _owned_item(content_id: str, user, db: DbSession) -> models.ContentItem:
     item = db.get(models.ContentItem, content_id)
     if not item or item.owner_user_id != user.id:
         raise not_found("稿件")
     return item
-
-
-def _latest_version(item: models.ContentItem, db: DbSession) -> models.ContentVersion | None:
-    return db.scalar(
-        select(models.ContentVersion)
-        .where(models.ContentVersion.content_item_id == item.id)
-        .order_by(models.ContentVersion.version_no.desc())
-        .limit(1)
-    )
-
-
-def _resolve_flow_skill(user, db: DbSession, skill_key: str | None):
-    key = (skill_key or "article-drafting").strip() or "article-drafting"
-    entry = db.scalar(
-        select(models.SkillRegistryEntry).where(
-            models.SkillRegistryEntry.owner_user_id == user.id,
-            models.SkillRegistryEntry.source == "custom",
-            models.SkillRegistryEntry.skill_key == key,
-        )
-    )
-    if entry is None:
-        entry = db.scalar(
-            select(models.SkillRegistryEntry).where(
-                models.SkillRegistryEntry.owner_user_id.is_(None),
-                models.SkillRegistryEntry.source == "builtin",
-                models.SkillRegistryEntry.skill_key == key,
-            )
-        )
-    if entry is None or not (entry.manifest or {}).get("workflow"):
-        raise not_found("写作流程")
-    return entry
-
-
-def _flow_report(
-    entry, user, db: DbSession, markdown: str, title: str, summary: str, source: str, version_id
-) -> dict:
-    """合成流程面板数据：生成类步骤只列定义，检查类步骤按生效规则实时跑本地检查。
-
-    source="draft" 表示检查的是请求携带的编辑器内容（可含未保存草稿），
-    "saved" 表示最新版本；rules/lexicon/policy 字段把「依据哪条配置」透出给前端。
-    """
-    # 生效 manifest：规则表合成（个人副本覆盖全局），条目 manifest 只剩元数据兜底
-    manifest = writing_rules.effective_manifest(db, entry, user.id)
-    draft = {"title": title or "", "markdown": markdown or "", "summary": summary or ""}
-    rules = manifest.get("reviewRules") or []
-    review = article_workflow.review_article(draft, rules)
-    review["rules"] = article_workflow.review_rule_reports(draft, rules)
-    lexicon = article_workflow.load_lexicon(db)
-    tone = article_workflow.check_ai_tone(markdown or "", lexicon)
-    tone["lexicon"] = article_workflow.lexicon_overview(lexicon)
-    images = article_workflow.plan_images(markdown or "", [], None, manifest.get("imagePolicy"))
-    images["policy"] = manifest.get("imagePolicy") or {}
-    checks = {
-        "review_article": review,
-        "check_ai_tone": tone,
-        "extract_facts": article_workflow.extract_facts(markdown or ""),
-        "plan_images": images,
-    }
-    steps = []
-    for index, step in enumerate(manifest.get("workflow") or [], start=1):
-        tool = step.get("tool") if isinstance(step, dict) else None
-        if not isinstance(tool, str):
-            continue
-        steps.append(
-            {
-                "index": index,
-                "tool": tool,
-                "label": _FLOW_STEP_LABELS.get(tool, tool),
-                "kind": "check" if tool in checks else "generate",
-                "result": checks.get(tool),
-            }
-        )
-    return {
-        "skillKey": entry.skill_key,
-        "skillName": entry.display_name,
-        "description": entry.description or "",
-        "versionId": version_id,
-        "source": source,
-        "hasBody": bool((markdown or "").strip()),
-        "steps": steps,
-    }
-
-
-def _flow_from_latest(item: models.ContentItem, entry, user, db: DbSession) -> dict:
-    version = _latest_version(item, db)
-    return _flow_report(
-        entry,
-        user,
-        db,
-        version.body if version else "",
-        version.title if version else item.title,
-        version.summary if version else "",
-        "saved",
-        version.id if version else None,
-    )
-
-
-@router.get("/content/{content_id}/writing-flow")
-def get_writing_flow(
-    content_id: str, user: CurrentUser, db: DbSession, skillKey: str | None = None
-) -> dict:
-    """当前稿件对应的写作流程步骤，以及基于最新已保存正文的检查结果。
-
-    不调用模型、不改正文。编辑器实时内容请走 POST 同名接口。
-    """
-    item = _owned_item(content_id, user, db)
-    entry = _resolve_flow_skill(user, db, skillKey)
-    return _flow_from_latest(item, entry, user, db)
-
-
-@router.post("/content/{content_id}/writing-flow")
-def check_writing_flow(
-    content_id: str, payload: schemas.WritingFlowCheckIn, user: CurrentUser, db: DbSession
-) -> dict:
-    """按请求携带的编辑器内容跑同一套检查（含未保存草稿），供流程面板实时跟随。"""
-    item = _owned_item(content_id, user, db)
-    entry = _resolve_flow_skill(user, db, payload.skill_key)
-    if payload.body is None:
-        return _flow_from_latest(item, entry, user, db)
-    return _flow_report(
-        entry,
-        user,
-        db,
-        payload.body,
-        payload.title if payload.title is not None else item.title,
-        payload.summary or "",
-        "draft",
-        None,
-    )
 
 
 @router.patch("/content/{content_id}/draft", response_model=schemas.ContentOut)
@@ -673,6 +532,7 @@ def list_calendar(user: CurrentUser, db: DbSession) -> list[schemas.CalendarOut]
             platform=row.platform,
             status=row.status,
             content_item_id=row.content_item_id,
+            studio_article_id=row.studio_article_id,
         )
         for row in rows
     ]

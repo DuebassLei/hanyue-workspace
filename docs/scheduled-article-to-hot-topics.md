@@ -1,5 +1,11 @@
 # 定时任务采集文章接入热点采集 · 接口文档示例
 
+> **已过期（2026-11-22）**：热点采集已改为「一个平台一条任务 + 固定格式入库」，
+> `POST /hot-topics/refresh`、`app/hot_sources/`（catalog / contracts / adapters）均已删除。
+> 现在把文章接进热点只要调一次 `POST /api/v1/hot-topics/ingest`
+> （`platform` / `sourceUrl` / `items`），步骤见 `docs/hot-topics-config.md`。
+> 本文保留为历史设计记录，其中的接口与文件路径不再可直接照做。
+
 > 口径（2026-11 起）：**所有定时任务都是通用定时任务**，即用户脚本 `user-script.{scriptId}`；
 > 内置任务类型（含旧的 `hot_topics.refresh`）已从代码移除，库里的历史行仅作兼容展示，不要照它接。
 > 本文给出「用通用定时任务采集文章并接入热点采集」的接口契约与可运行示例。

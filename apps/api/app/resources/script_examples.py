@@ -111,67 +111,111 @@ def run(params, ctx):
     }
 '''
 
-# 官方脚本（不是玩具示例）：热点选题页的数据就靠它定时刷新。
-# 采集口径的唯一真相是 app/hot_sources/catalog.yaml，链路真相是 services.hot_topics.refresh；
-# 脚本本身只做「参数拆包 + 调用」，所以加平台、改评分都不用动它。
-HOT_BOARD_REFRESH = '''"""热点榜单采集（官方脚本）：抓一轮默认数据源，写入/更新热点库。
+# 热点选题的采集**不在**仓库里：一个平台一条任务，脚本自己请求、自己解析，
+# 然后把结果映射成固定格式调 hot_topics.ingest。换源、换字段名只改任务参数。
+HOT_INGEST = '''"""热点入库（示例）：GET 一个榜单接口，按参数映射字段，写入热点库并出分。
 
-链路：catalog.yaml 里启用的源 → 采集 → hot_items(新增/更新) → 聚簇 → 评分。
-具体逻辑全在 app.services.hot_topics.refresh，这里只负责参数与摘要。
+只做三件事：请求 → 映射 → 调用 hot_topics.ingest。平台差异全在任务参数里：
 
-参数（都可省略）：
-    platforms  平台名数组，如 ["微博", "知乎", "酷安"]；留空 = catalog 里全部启用源
+    {
+      "platform": "微博",                      // 必填，展示名；同名才是同一个平台
+      "sourceUrl": "https://example.com/weibo", // 必填，这一轮真正请求的地址
+      "titleKey": "word",                      // 必填，标题字段名
+      "itemsPath": "data.list",                // 可空，榜单数组在响应里的位置；空=响应本身
+      "rankKey": "rank",                       // 可空，名次字段名
+      "hotKey": "hot_value",                   // 可空，热度字段名
+      "urlKey": "url",                         // 可空，单条链接字段名
+      "timeout": 15                            // 可空，请求超时（秒）
+    }
 
-想加/减平台、调采集细节：改 app/hot_sources/catalog.yaml 或 hot_topics 服务，
-不用改这个脚本；只想临时少跑几个平台，就在任务参数里写 platforms。
+sourceUrl 会被记在条目上，用于核对「这条从哪个榜来」：填真正请求到的地址，
+不要填任务里打算用但没请求成功的地址。换平台就复制一条任务改参数，不用改代码。
 """
-from app.hot_sources import load_catalog
+import requests
+
 from app.services import hot_topics
 
 
+def _dig(payload, path):
+    """按 "a.b.0.c" 取值；取不到返回 None，不抛异常。"""
+    if not path:
+        return payload
+    node = payload
+    for part in str(path).split("."):
+        if not part:
+            continue
+        if isinstance(node, dict):
+            node = node.get(part)
+        elif isinstance(node, list) and part.isdigit():
+            index = int(part)
+            node = node[index] if 0 <= index < len(node) else None
+        else:
+            return None
+    return node
+
+
+def _to_int(value):
+    """热度常见 "1,234.5万"、"472995播放" 这类写法：取不到整数就留空，不编 0。"""
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(str(value).replace(",", "")))
+    except (TypeError, ValueError):
+        return None
+
+
 def run(params, ctx):
-    raw = params.get("platforms")
-    if raw in (None, "", []):
-        platforms = None  # None = catalog 里全部启用源
-    elif isinstance(raw, list):
-        platforms = [str(name).strip() for name in raw if str(name).strip()]
-    else:
-        raise ValueError('platforms 必须是平台名数组，例如 ["微博", "知乎"]')
+    platform = str(params.get("platform") or "").strip()
+    source_url = str(params.get("sourceUrl") or "").strip()
+    title_key = str(params.get("titleKey") or "").strip()
+    if not platform or not source_url or not title_key:
+        raise ValueError("任务参数必须包含 platform、sourceUrl、titleKey")
 
-    if platforms:
-        known = {source["name"] for source in load_catalog()["sources"]}
-        unknown = [name for name in platforms if name not in known]
-        if unknown:
-            raise ValueError(
-                "平台名不在 catalog 里：" + "、".join(unknown)
-                + "；可选：" + "、".join(sorted(known))
-            )
-
-    result = hot_topics.refresh(ctx.db, platforms=platforms)
-    notes = result.get("notes") or []
-    # notes 每个源都会有一条（「微博：50 条」是成功计数），摘要里只挑真降级的那些，
-    # 否则界面上会写「22 条降级」，把正常采集说成故障。
-    degraded = [
-        note for note in notes
-        if any(mark in note for mark in ("失败", "selector_may_changed", "已跳过", "未知采集类型"))
-    ]
-    summary = (
-        f"{result['day']} {result['capturedAt']} 采集 {result['items']} 条 · "
-        f"归并 {result['clusters']} 个事件"
-        f"（新 {result['newClusters']} / 并入 {result['matchedClusters']}）"
+    timeout = max(1, min(int(params.get("timeout") or 15), 60))
+    response = requests.get(
+        source_url, timeout=timeout, headers={"User-Agent": "hanyue-hot-collector"}
     )
-    if degraded:
-        summary += f" · {len(degraded)} 个源降级：" + "；".join(degraded[:3])
+    response.raise_for_status()
+
+    rows = _dig(response.json(), params.get("itemsPath"))
+    if rows is None:
+        rows = []
+    if not isinstance(rows, list):
+        raise ValueError("itemsPath 指向的不是数组，检查参数或上游返回结构")
+
+    rank_key = params.get("rankKey") or "rank"
+    hot_key = params.get("hotKey") or "hot"
+    url_key = params.get("urlKey") or "url"
+    items = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get(title_key) or "").strip()
+        if not title:
+            continue
+        items.append(
+            {
+                "title": title,
+                "rank": _to_int(row.get(rank_key)),
+                "hot": _to_int(row.get(hot_key)),
+                "url": str(row.get(url_key) or ""),
+            }
+        )
+
+    result = hot_topics.ingest(
+        ctx.db, platform=platform, source_url=source_url, items=items
+    )
     return {
-        "summary": summary,
+        "summary": (
+            f"{platform}：本轮 {len(items)} 条，当天 {result['day']} 共 "
+            f"{result['items']} 条入库 · {result['clusters']} 个事件"
+            f"（新 {result['newClusters']} / 并入 {result['matchedClusters']}）"
+        ),
+        "platform": platform,
+        "sourceUrl": source_url,
         "day": result["day"],
-        "capturedAt": result["capturedAt"],
-        "items": result["items"],
+        "ingested": len(items),
         "clusters": result["clusters"],
-        "newClusters": result["newClusters"],
-        "matchedClusters": result["matchedClusters"],
-        "degraded": degraded,
-        "notes": notes,
     }
 '''
 
@@ -258,11 +302,11 @@ EXAMPLES: list[dict] = [
         "code": HTTP_FETCH,
     },
     {
-        "key": "hot_board_refresh",
-        "title": "热点榜单采集（官方）",
-        "description": "抓一轮默认数据源写入热点库（新增/更新条目 → 聚簇 → 评分）。"
-        "可配 platforms 只跑部分平台，留空跑 catalog.yaml 全部启用源。",
-        "code": HOT_BOARD_REFRESH,
+        "key": "hot_ingest",
+        "title": "热点入库（按平台配一条）",
+        "description": "GET 一个榜单接口，按参数映射标题/名次/热度后写入热点库并出分。"
+        "一个平台一条任务，换源或换字段名只改参数。",
+        "code": HOT_INGEST,
     },
     {
         "key": "batch_drafts",

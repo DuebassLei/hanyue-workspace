@@ -50,7 +50,7 @@ const groups = computed(() => {
   <div class="job-groups">
     <section v-for="group in groups" :key="group.key" class="job-group">
       <button v-if="group.type === 'group'" class="job-group-head" type="button" :aria-expanded="!collapsed[group.contentId]" @click="collapsed[group.contentId] = !collapsed[group.contentId]">
-        <router-link :to="{ name: 'studio', query: { id: group.contentId } }" @click.stop>{{ group.title }}</router-link>
+        <router-link :to="{ name: 'articles', query: { id: group.contentId } }" @click.stop>{{ group.title }}</router-link>
         <span>{{ group.jobs.length }} 个任务 · {{ group.jobs.filter((job) => ['failed', 'needs_attention'].includes(job.status)).length }} 需处理</span>
       </button>
       <div v-if="group.type === 'single' || !collapsed[group.contentId]" class="job-group-rows">

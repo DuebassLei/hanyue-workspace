@@ -610,7 +610,7 @@ async function bindWechat() {
           <div v-for="job in filteredJobs" :key="job.id" class="list-row job-row">
             <div class="list-main">
               <div class="list-title">
-                <router-link v-if="job.contentItemId" class="job-article-link" :to="{ name: 'studio', query: { id: job.contentItemId } }">
+                <router-link v-if="job.contentItemId" class="job-article-link" :to="{ name: 'articles', query: { id: job.contentItemId } }">
                   {{ job.contentTitle || '未命名稿件' }}
                 </router-link>
                 <span v-else>{{ job.contentTitle || '未关联稿件' }}</span>
@@ -840,7 +840,7 @@ async function bindWechat() {
           />
         </n-form-item>
         <p v-if="!accountOptions.length" class="field-hint">还没有已连接账号，请先在列表中绑定并标记已连接。</p>
-        <n-form-item v-if="!manualEntry" label="选择创作空间稿件">
+        <n-form-item v-if="!manualEntry" label="选择稿件">
           <n-select
             v-model:value="publishForm.contentId"
             :options="contentSelectOptions"
@@ -852,7 +852,7 @@ async function bindWechat() {
           />
         </n-form-item>
         <p v-if="!manualEntry && !contents.length" class="field-hint">
-          创作空间还没有稿件，请先去创作空间写一篇，或切换为手动填写。
+          还没有稿件，请先在文章管理新建一篇，或切换为手动填写。
         </p>
         <p v-else-if="!manualEntry" class="field-hint">标题与正文会自动取自稿件的最新内容，无需重复输入。</p>
 
@@ -862,8 +862,8 @@ async function bindWechat() {
             <n-tag size="small" round>{{ selectedArticle.status === 'published' ? '已发布' : '草稿' }}</n-tag>
           </div>
           <p class="article-excerpt">{{ (selectedArticle.draftBody ?? publishForm.body ?? '').slice(0, 160) || '稿件暂无正文' }}</p>
-          <router-link class="article-link" :to="{ name: 'studio', query: { id: selectedArticle.id } }">
-            在创作空间打开
+          <router-link class="article-link" :to="{ name: 'articles', query: { id: selectedArticle.id } }">
+            在文章管理打开
           </router-link>
         </div>
 
@@ -887,13 +887,13 @@ async function bindWechat() {
           没有对应稿件，改用手动填写
         </n-button>
         <n-button v-else text type="primary" size="small" @click="manualEntry = false">
-          返回从创作空间选择稿件
+          返回从列表选择稿件
         </n-button>
         <n-form-item label="计划时间（可选）">
           <n-date-picker v-model:value="scheduledAtTs" type="datetime" clearable style="width: 100%" />
         </n-form-item>
         <p class="field-hint">
-          本页只做「排期 + 手动发布」与结果回填。需要直接推送公众号草稿箱，请到创作空间右侧「发布」面板操作。
+          本页只做「排期 + 手动发布」与结果回填。
         </p>
 
         <n-button secondary size="small" @click="doPreview">校验并预览</n-button>

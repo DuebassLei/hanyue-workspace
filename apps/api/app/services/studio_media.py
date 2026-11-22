@@ -25,7 +25,7 @@ PROVIDER_MISSING_MESSAGE = (
     "接入支持 image.generate 能力的模型，或改用「选择已有素材」。"
 )
 
-RATIOS = ("16:9", "4:3", "3:4", "1:1", "9:16")
+RATIOS = ("2.35:1", "16:9", "4:3", "3:4", "1:1", "9:16")
 
 
 def now_iso() -> str:
@@ -63,11 +63,26 @@ def _provider_available(db, user_id: str) -> bool:
 
 def _ratio(value: str | None, fallback: str) -> str:
     ratio = (value or "").strip()
-    if not ratio:
-        return fallback
+    ratio = ratio or fallback
     if ratio not in RATIOS:
         raise ApiError("invalid_aspect_ratio", f"不支持的图片比例：{ratio}", status_code=400)
     return ratio
+
+
+def image_capabilities(db, user_id: str) -> dict:
+    provider = image_provider.resolve_image_provider(db, user_id)
+    sizes = image_provider.exact_image_sizes(provider)
+    return {
+        "available": bool(provider),
+        "modelCode": provider.get("modelCode") if provider else None,
+        "ratios": [ratio for ratio in RATIOS if ratio in sizes],
+    }
+
+
+def _require_ratio(db, user_id: str, ratio: str) -> None:
+    capabilities = image_capabilities(db, user_id)
+    if ratio not in capabilities["ratios"]:
+        raise ApiError("unsupported_aspect_ratio", f"当前模型未确认支持 {ratio} 比例；请选择已确认支持的比例，或在模型配置中登记精确尺寸。", status_code=400)
 
 
 def _asset_of(db, user_id: str, asset_id: str) -> models.Asset:
@@ -117,6 +132,7 @@ def _enqueue_image(
             "prompt": prompt,
             "purpose": purpose,
             "aspectRatio": aspect_ratio,
+            "exactAspect": True,
             "count": 1,
         },
     )
@@ -150,7 +166,7 @@ def _insert_after(data: dict, anchor_id: str, block: dict) -> bool:
 
 
 def generate_cover(db, row, data: dict, *, user_id: str, prompt: str | None, aspect_ratio: str | None) -> None:
-    ratio = _ratio(aspect_ratio, "16:9")
+    ratio = _ratio(aspect_ratio, "2.35:1")
     text = (prompt or "").strip() or _default_cover_prompt(data)
     base = {
         "jobId": None,
@@ -164,6 +180,7 @@ def generate_cover(db, row, data: dict, *, user_id: str, prompt: str | None, asp
         data["cover"] = {**base, "status": "failed", "error": PROVIDER_MISSING_MESSAGE}
         commit(db, row, data)
         raise ApiError("image_provider_unavailable", PROVIDER_MISSING_MESSAGE, status_code=400)
+    _require_ratio(db, user_id, ratio)
     try:
         job_id = _enqueue_image(
             db, user_id=user_id, prompt=text, purpose="studio-cover", aspect_ratio=ratio
@@ -262,10 +279,11 @@ def generate_inline(
         raise not_found("段落")
     if (position or "after") != "after":
         raise ApiError("invalid_position", "目前只支持把插图插在段落之后", status_code=400)
-    ratio = _ratio(aspect_ratio, "4:3")
+    ratio = _ratio(aspect_ratio, "16:9")
     text = (prompt or "").strip() or _default_inline_prompt(data, block)
     if not _provider_available(db, user_id):
         raise ApiError("image_provider_unavailable", PROVIDER_MISSING_MESSAGE, status_code=400)
+    _require_ratio(db, user_id, ratio)
     try:
         job_id = _enqueue_image(
             db, user_id=user_id, prompt=text, purpose="studio-inline", aspect_ratio=ratio
@@ -340,7 +358,43 @@ def remove_inline(data: dict, *, diagram_id: str) -> None:
     ]
 
 
+def pick_inline(
+    db, row, data: dict, *, user_id: str, asset_id: str, block_id: str
+) -> dict:
+    """从素材图库选一张图当正文插图：不走生图，直接落成已就绪的插图并插进正文。
+
+    与 generate_inline 的区别只是「图从哪来」：这里是用户已经有的素材，
+    所以没有任务可轮询，直接 ready。
+    """
+    block = next((item for item in data.get("blocks") or [] if item["id"] == block_id), None)
+    if not block:
+        raise not_found("段落")
+    asset = _asset_of(db, user_id, asset_id)
+    diagram = {
+        "id": f"d_{uuid.uuid4().hex[:12]}",
+        "blockId": block_id,
+        "position": "after",
+        "jobId": None,
+        "status": "ready",
+        "prompt": asset.prompt or "",
+        "aspectRatio": None,
+        "assetId": asset.id,
+        "url": asset_url(asset.id),
+        "requestedAt": now_iso(),
+        "error": None,
+        # 记一下这张图是挑来的还是生成的：素材图没有比例信息，排版时按原图走
+        "source": "asset",
+    }
+    data.setdefault("inline_diagrams", []).append(diagram)
+    _insert_diagram_block(data, diagram)
+    return diagram
+
+
 # ---------------- SVG 动画卡 ----------------
+
+
+# 多段合并生成一张卡时的段数上限：再多提示词会太长，生成质量也难保证。
+MAX_SVG_CARD_BLOCKS = 10
 
 
 async def draft_svg_card(
@@ -348,29 +402,50 @@ async def draft_svg_card(
     data: dict,
     *,
     user_id: str,
-    block_id: str,
+    block_ids: list[str],
     kind: str,
 ) -> None:
     blocks = data.get("blocks") or []
-    index = next((i for i, item in enumerate(blocks) if item["id"] == block_id), -1)
-    if index == -1:
+    # 去重并保持用户选择顺序；所有 id 都必须存在于当前稿件。
+    ids = list(dict.fromkeys(str(b) for b in (block_ids or []) if b))
+    if not ids:
         raise not_found("段落")
-    block = blocks[index]
+    if len(ids) > MAX_SVG_CARD_BLOCKS:
+        raise ApiError(
+            "svg_card_too_many_blocks",
+            f"一次最多选择 {MAX_SVG_CARD_BLOCKS} 个段落",
+            status_code=422,
+        )
+    indexes = []
+    for block_id in ids:
+        index = next((i for i, item in enumerate(blocks) if item["id"] == block_id), -1)
+        if index == -1:
+            raise not_found("段落")
+        indexes.append(index)
+    indexes.sort()
+    first, last = indexes[0], indexes[-1]
+    # 合并所选段落文字作为同一份素材源：柱状图数值防幻觉校验也基于合并后的全文。
+    merged = "\n\n".join(
+        text.strip()
+        for text in (blocks[i].get("text") or "" for i in indexes)
+        if text.strip()
+    )
     result = await wechat_svg_cards.draft_card(
         db,
         owner_user_id=user_id,
         kind=kind,
-        text=block.get("text") or "",
+        text=merged,
         article_title=(data.get("title") or data.get("topic") or ""),
-        context_before=blocks[index - 1].get("text", "") if index > 0 else "",
-        context_after=blocks[index + 1].get("text", "") if index + 1 < len(blocks) else "",
+        context_before=blocks[first - 1].get("text", "") if first > 0 else "",
+        context_after=blocks[last + 1].get("text", "") if last + 1 < len(blocks) else "",
     )
     fence = result.get("markdown") or ""
     if not fence:
         raise ApiError("svg_card_empty", "卡片内容为空，请重试", status_code=502, retryable=True)
+    # 卡片插在所选段落中最后一处之后。
     _insert_after(
         data,
-        block_id,
+        blocks[last]["id"],
         {
             "id": AB.new_block_id(),
             "text": fence,

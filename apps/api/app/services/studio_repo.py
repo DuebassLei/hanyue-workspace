@@ -20,6 +20,7 @@ HISTORY_MAX = 20
 SCALARS = (
     "topic",
     "material",
+    "writer_style",
     "front",
     "title",
     "hook",
@@ -121,6 +122,7 @@ def create(
     topic: str = "",
     material: str = "",
     markdown: str = "",
+    writer_style: str = "tutorial",
 ) -> models.StudioArticle:
     data = article_blocks.build_article(topic=topic, material=material, markdown=markdown)
     row = models.StudioArticle(
@@ -128,6 +130,7 @@ def create(
         workspace_id=workspace_id,
         topic=data["topic"],
         material=data["material"],
+        writer_style=writer_style or "tutorial",
         front=data["front"],
         title=data["title"],
         titles=[],

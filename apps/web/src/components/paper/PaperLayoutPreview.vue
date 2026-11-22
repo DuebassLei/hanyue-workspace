@@ -65,6 +65,8 @@ function reset() {
 function schedule(delay) {
   clearTimer()
   if (!props.active || !props.article?.id) return
+  // 选项刚变化就废弃旧请求，避免防抖期间把上一个横幅当成当前结果。
+  sequence += 1
   timer = setTimeout(fetchRender, delay)
 }
 
@@ -100,7 +102,7 @@ async function fetchRender() {
 }
 
 async function copyHtml() {
-  if (!html.value) return
+  if (!html.value || rendering.value) return
   try {
     await navigator.clipboard.writeText(html.value)
     copied.value = true
@@ -115,7 +117,7 @@ async function copyHtml() {
 }
 
 function openWindow() {
-  if (!html.value) return
+  if (!html.value || rendering.value) return
   // 不立即 revoke：新标签页可能还在加载，卸载时统一回收
   const url = URL.createObjectURL(new Blob([documentHtml.value], { type: 'text/html' }))
   popupUrls.push(url)
@@ -163,29 +165,32 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="layout-preview" :aria-busy="rendering">
-    <header class="preview-bar">
-      <div class="bar-metrics">
-        <span v-if="rendering" class="bar-loading" role="status">渲染中…</span>
-        <span v-else-if="html" class="bar-ready">已同步</span>
-        <span v-if="stats">{{ sourceChars }} 字 · 约 {{ readingMinutes }} 分钟</span>
-        <span v-if="imageCount">· {{ imageCount }} 图</span>
-        <button
-          v-if="warningCount"
-          class="warn-toggle"
-          type="button"
-          :aria-expanded="showWarnings"
-          @click="showWarnings = !showWarnings"
-        >
-          {{ warningCount }} 条排版提示{{ showWarnings ? ' ▴' : ' ▾' }}
-        </button>
-        <span v-else-if="html && !rendering" class="hint">无排版问题</span>
-      </div>
-      <div class="bar-actions">
-        <span v-if="notice" class="bar-notice">{{ notice }}</span>
-        <NButton size="tiny" :disabled="!html" @click="copyHtml">{{ copied ? '已复制' : '复制 HTML' }}</NButton>
-        <NButton size="tiny" :disabled="!html" @click="openWindow">新窗口打开</NButton>
-      </div>
-    </header>
+    <!-- 统计和复制按钮属于工具条，不在正文卡片里；由成稿台提供挂载点 -->
+    <Teleport to="#paper-preview-bar-slot">
+      <header class="preview-bar">
+        <div class="bar-metrics">
+          <span v-if="rendering" class="bar-loading" role="status">渲染中…</span>
+          <span v-else-if="html" class="bar-ready">已同步</span>
+          <span v-if="stats">{{ sourceChars }} 字 · 约 {{ readingMinutes }} 分钟</span>
+          <span v-if="imageCount">· {{ imageCount }} 图</span>
+          <button
+            v-if="warningCount"
+            class="warn-toggle"
+            type="button"
+            :aria-expanded="showWarnings"
+            @click="showWarnings = !showWarnings"
+          >
+            {{ warningCount }} 条排版提示{{ showWarnings ? ' ▴' : ' ▾' }}
+          </button>
+          <span v-else-if="html && !rendering" class="hint">无排版问题</span>
+        </div>
+        <div class="bar-actions">
+          <span v-if="notice" class="bar-notice">{{ notice }}</span>
+          <NButton size="tiny" :disabled="!html || rendering" @click="copyHtml">{{ copied ? '已复制' : '复制 HTML' }}</NButton>
+          <NButton size="tiny" :disabled="!html || rendering" @click="openWindow">新窗口打开</NButton>
+        </div>
+      </header>
+    </Teleport>
 
     <ul v-if="showWarnings && warningCount" class="warn-list">
       <li v-for="(item, index) in warnings" :key="index" :class="item.level">
@@ -218,7 +223,10 @@ onBeforeUnmount(() => {
 .layout-preview {
   display: flex;
   flex-direction: column;
-  min-height: 520px;
+  /* 高度由稿纸剩余空间决定（父级 flex:1）；这里不再写死 520px，
+     否则长文只能在一个矮框里滚，短文又在框底下留一大块空白 */
+  flex: 1 1 auto;
+  min-height: 0;
   background: var(--paper-bg);
   border: 1px solid var(--paper-line);
   border-radius: 14px;
@@ -272,14 +280,15 @@ onBeforeUnmount(() => {
   overflow: auto;
 }
 .warn-field { margin-right: 6px; opacity: 0.7; font-variant-numeric: tabular-nums; }
-.preview-frame { flex: 1; width: 100%; min-height: 480px; border: 0; background: var(--paper-bg); }
+/* height:0 配合 flex:1 才能让 iframe 吃到父级分配的高度，否则它按内容最小高度把卡片撑破 */
+.preview-frame { flex: 1 1 0; width: 100%; height: 0; min-height: 0; border: 0; background: var(--paper-bg); }
 .preview-skeleton {
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 30px 26px;
-  min-height: 480px;
+  min-height: 0;
 }
 .skeleton-line {
   height: 12px;

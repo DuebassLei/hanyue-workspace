@@ -212,3 +212,20 @@ def validate_manifest(raw: dict | None) -> dict:
         )
         raise ManifestInvalid(details) from exc
     return model.model_dump(exclude_none=True)
+
+
+_THEME_KEYS = {"defaultTheme", "theme", "theme_id", "themeId"}
+
+
+def entry_manifest(entry, owner_user_id: str | None = None) -> dict:
+    """运行期读 manifest 的统一入口：直接取条目 manifest 并剔除排版主题残留。
+
+    创作规则模块（skill_writing_rules 表 + /writing-rules 管理页）已下线；
+    owner_user_id 参数仅为兼容旧调用点保留，已无效果。
+    规则型 key 的权威源回到条目 manifest（builtin_skills.json 同步写入）。
+    entry 为 None 返回空 dict，调用方走各自的内置兜底。
+    """
+    if entry is None:
+        return {}
+    manifest = entry.manifest if isinstance(entry.manifest, dict) else {}
+    return {key: value for key, value in manifest.items() if key not in _THEME_KEYS}

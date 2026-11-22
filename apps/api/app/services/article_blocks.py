@@ -174,6 +174,7 @@ def build_article(topic: str = "", material: str = "", markdown: str = "") -> di
     return {
         "topic": str(topic).strip()[:400],
         "material": str(material)[:60000],
+        "writer_style": "tutorial",
         "front": parsed["front"],
         "title": parsed["title"],
         "titles": [],

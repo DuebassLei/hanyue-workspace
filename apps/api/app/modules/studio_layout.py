@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from .. import models
 from ..core.deps import CurrentUser, DbSession, not_found
@@ -31,10 +31,14 @@ def _load(db, user, article_id: str) -> tuple[models.StudioArticle, dict]:
 
 @router.post("/studio/articles/{article_id}/render")
 def render_studio_article(
-    article_id: str, db: DbSession, user: CurrentUser, payload: RenderIn | None = None,
+    article_id: str, db: DbSession, user: CurrentUser, request: Request,
+    payload: RenderIn | None = None,
 ) -> dict:
     _row, data = _load(db, user, article_id)
-    return studio_render.render_article(data, payload.options if payload else None)
+    # 把正文里的 asset:// 记号换成绝对直链：预览的 iframe 只认 http/https 的地址
+    return studio_render.render_article(
+        data, payload.options if payload else None, base_url=str(request.base_url)
+    )
 
 
 @router.get("/studio/articles/{article_id}/render/options")

@@ -18,7 +18,7 @@
 
 ## 项目一句话描述
 
-**汉月工作台**：面向自媒体创作者的全栈 AI 创作平台。纵向切片：灵感 → AI 创作 → 配图 → 发布审核 → 数据复盘，含受控 Agent 执行层（原「选题库」已下线，创作由创作空间的 AI 写作承接）。
+**汉月工作台**：面向自媒体创作者的全栈 AI 创作平台。纵向切片：灵感 → AI 创作 → 配图 → 发布审核 → 数据复盘，含受控 Agent 执行层（原「选题库」与「创作空间」「创作规则」已下线，成稿由成稿台承接）。
 
 ---
 
@@ -93,7 +93,7 @@ hanyue-workspace/
 | `workspaces.py`    | `/api/v1/workspaces`           | 工作区 CRUD、多工作区隔离                                         |
 | `topics.py`        | `/api/v1/workspaces/current`   | 当前工作区上下文（选题库已下线，仅保留此端点）                                 |
 | `content.py`       | `/api/v1/content`              | 稿件版本、平台版本                                               |
-| `ai_content.py`    | `/api/v1/ai`                   | SSE 流式生成、大纲/正文/润色（`GET /ai/hot-topics` 为创作空间「灵感」面板数据源）  |
+| `ai_content.py`    | `/api/v1/ai`                   | SSE 流式生成、大纲/正文/润色（`GET /ai/hot-topics` 为贴图构思等数据源）  |
 | `hot_topics.py`    | `/api/v1/hot-topics`           | 热点选题：多源采集、事件合并、评分、筛选、一键成稿                               |
 | `ai_images.py`     | `/api/v1/ai/image-generations` | AI 生图任务                                                 |
 | `assets.py`        | `/api/v1/assets`               | 素材上传、7 种图像处理、分格                                         |
@@ -107,6 +107,8 @@ hanyue-workspace/
 | `studio_layout.py` | `/api/v1/studio`               | 成稿台排版：正文渲染与风格/配色/SVG 卡目录（预览直接用，不跳排版工作台）                    |
 | `studio_media.py`  | `/api/v1/studio`               | 成稿台媒体：封面生成/选图、正文插图生成与回填、SVG 动画卡插入                              |
 | `studio_publish.py`| `/api/v1/studio`               | 成稿台发布：存入文章管理、按平台建发布任务、排期与复盘                                     |
+| `skill_center.py`  | `/api/v1/skill-center`         | 技能中心：技能卡 CRUD、蒸馏、导入导出（独立技能库；创作规则模块已下线）                     |
+| `pet_chat.py`      | `/api/v1/pet`                  | 成稿台悬浮助手：会话读写，技能来自技能中心                                          |
 | `platform_auth.py` | `/api/v1/platforms`            | Phase 0 核验、OAuth 连接器、维护视图                               |
 | `agent.py`         | `/api/v1/agent`                | Agent 会话、Skill、工具授权、审批                                  |
 | `jobs.py`          | `/api/v1/jobs`                 | 统一任务查询（keyset 分页）                                       |
@@ -133,18 +135,19 @@ hanyue-workspace/
 | `publish_state.py`  | 发布状态机、幂等提交、排期自动提升                      |
 | `wechat_article.py` | 公众号文章三步推送（封面→正文图→draft/add）            |
 | `wechat_layout.py`  | 公众号排版渲染（内联样式、预设/自定义主题）                 |
-| `hot_sources.py`    | 热点多源采集（7 路，统一走 SSRF；单源失败只记 notes）      |
 | `hot_ranking.py`    | 纯函数：标题归一、同事件合并、赛道/风险词表、100 分评分         |
-| `hot_topics.py`     | 热点选题编排：灌库幂等、聚簇落库、筛选读取、一键成稿；兼作「灵感」面板数据源 |
+| `hot_topics.py`     | 热点选题：固定格式 ingest、当天全量重算、聚簇落库、筛选读取、一键成稿；兼作「灵感」面板数据源 |
 | `card_paginator.py` | 图文卡片 `/cards/paginate` 协同模式            |
 | `provider_probe.py` | 模型供应商连通性探测                             |
 | `article_blocks.py` | 纯函数：Markdown 分段、块类型、applyOps 白名单改稿、快照/版本 diff、修复分组 |
 | `article_quality.py` | 质检：朱雀 API 检测与片段对齐、报告解析回填、无密钥时的本地规则打分 |
-| `studio_pipeline.py` | 成稿流水线：写正文/出标题/对话改稿/单段与批量修复/横幅，含任务并发与停止 |
+| `studio_pipeline.py` | 成稿流水线：写正文/出标题/对话改稿/单段与批量修复/横幅，含任务并发与停止；写正文按 `resources/studio_skills/styles/*.md` 的风格档拼 prompt |
 | `studio_render.py`   | 排版渲染：选项合并补默认、封面/插图取图、横幅前置、复用 `wechat_layout_engine` 出正文 |
 | `studio_media.py`    | 媒体：生图入队与 job 回填、插图插块/移除、SVG 卡 fence 插块（状态都在稿件 JSON 里） |
 | `studio_publish.py`  | 发布：导出成正式稿件后建 `publish_jobs`、平台归一与幂等、按稿件聚合复盘状态 |
 | `studio_repo.py`     | 成稿台仓储：文章头 + 段落 + 快照在 ORM 与 dict 之间搬运 |
+| `author_skills.py`   | 技能中心：独立技能卡 CRUD、config 校验、编译 prompt、资料蒸馏、导入导出 |
+| `pet_conversation_service.py` | 宠物对话：意图识别 → 技能编译 → 模型生成；只写对话，不改稿件 |
 
 ---
 
@@ -153,9 +156,8 @@ hanyue-workspace/
 | 文件                   | 路由            | 功能                                                          |
 | -------------------- | ------------- | ----------------------------------------------------------- |
 | `OverviewView.vue`   | `/`           | 总览仪表盘                                                       |
-| `CalendarView.vue`   | `/calendar`   | 内容日历（`/topics` 已重定向到创作空间）                                   |
+| `CalendarView.vue`   | `/calendar`   | 内容日历（`/topics` 已重定向到文章管理）                                   |
 | `HotTopicsView.vue`  | `/hot-topics` | 热点选题：多平台事件的合并、评分、筛选与一键成稿                                    |
-| `StudioView.vue`     | `/studio`     | AI 创作主界面（大纲/正文/润色/配图）                                       |
 | `PaperView.vue`      | `/paper`      | 成稿台：段号稿纸/排版预览双视图，点整段进编辑、逐段改稿、对话改稿、质检修复、标题、横幅、封面插图、发布复盘（一页完成） |
 | `components/paper/`  | —             | 成稿台组件：右栏四个面板 + 单段编辑器 `PaperBlockEditor`（显式保存/快捷键/本机草稿）、卡片插入弹窗 `PaperCardInsert`（图片/长图/长提示词）、批注条 `PaperAnnotation`（改写建议与主操作）、逐段 diff `PaperDiffDialog` |
 | `composables/useParagraphDrafts.js` | — | 成稿台段落草稿：模块级单例 + localStorage 暂存，切稿/刷新不丢未保存的修改 |
@@ -263,11 +265,11 @@ curl -X POST http://127.0.0.1:8000/api/v1/auth/login \
 ```bash
 cd apps/api
 # 增量：只跑受影响的测试文件（多数改动 10 秒内出结果）
-.venv/Scripts/python.exe -m pytest tests/test_writing_rules_api.py -q
+.venv/Scripts/python.exe -m pytest tests/test_skills.py -q
 # 跨文件但不想全量时按关键字收窄
-.venv/Scripts/python.exe -m pytest -q -k "writing_rules or skill_registry"
+.venv/Scripts/python.exe -m pytest -q -k "skill_registry or skills"
 # 改了 import / 语法、想快速确认能编译：只编译改过的文件，不要 compileall 整棵 app
-.venv/Scripts/python.exe -m py_compile app/modules/writing_rules.py
+.venv/Scripts/python.exe -m py_compile app/modules/skill_center.py
 ```
 
 选测试文件的规则：路由改动对应 `tests/test_<模块名>.py`；服务改动先找引用它的测试文件，找不到再加一个最小用例，不要靠全量碰运气。
@@ -345,10 +347,7 @@ cd ../web && npm run build                             # 前端生产构建
 | `IMAGE_PROVIDER_BASE_URL/API_KEY/MODEL`     | 空                            | 三项齐全才启用 AI 生图               |
 | `WECHAT_MP_APPID` / `WECHAT_MP_APPSECRET`   | 空                            | 同时存在才启用公众号草稿箱               |
 | `PLATFORM_EVIDENCE_FILE`                    | 空                            | Phase 0 核验证据 JSON 路径        |
-| `HOT_TOPICS_PLATFORMS`                      | 空（全部 7 路）                    | 热点采集源，逗号分隔，如 `微博,知乎`        |
-| `HOT_TOPICS_TIMEOUT`                        | `12`                         | 热点单源请求超时（秒）                 |
-| `HOT_TOPICS_REFRESH_COOLDOWN`               | `15`                         | 热点刷新冷却（秒），0 关闭              |
-| `HOT_TOPICS_API_URL`                        | 空                            | 旧版单源热点接口；仅在库中无评分簇时回落使用      |
+| `HOT_TOPICS_REFRESH_COOLDOWN`               | `15`                         | 热点「重算评分」冷却（秒），0 关闭；采集在各平台定时任务里 |
 | `ENVIRONMENT`                               | `development`                | 设 `production` 开启安全门禁       |
 | `ALLOW_DEV_LOGIN`                           | `true`（本地）                   | 生产必须为 `false`               |
 | `ALLOW_REGISTRATION`                        | `false`                      | 开放注册；首个密码账号始终放行（bootstrap）  |
@@ -371,6 +370,7 @@ cd ../web && npm run build                             # 前端生产构建
 | `docs/paper-studio.md`    | 成稿台产品说明：段落模型、改稿流程、质检与发布           |
 | `docs/paper-studio-contract.md` | 成稿台与参考项目的接口契约、实施偏差表                |
 | `docs/paper-editing-contract.md` | 成稿台段落编辑契约：组件接口、快捷键、草稿生命周期、批注与 diff 规则 |
+| `docs/skill-center.md` | 技能中心：独立技能库模型、三类技能 config、蒸馏与导入导出契约、宠物集成 |
 | `README.md`               | 全量功能说明、部署指南、已实现/未实现能力边界            |
 
 ---

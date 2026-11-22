@@ -1,5 +1,9 @@
 # Agent F 地基交接说明（agent/f-foundation）
 
+> **后续变更（2026-11-22）**：本文第 3、4 节描述的「22 路内置采集源 + catalog + 总任务」
+> 已被移除。热点采集改为「一个平台一条定时任务 → `POST /hot-topics/ingest`」，
+> 现状以 `docs/hot-topics-config.md` 与 `docs/hot-topics.md` 为准；本文仅保留为历史交接记录。
+
 > 基线：564 passed。本分支门禁：**570 passed**（564 基线 + 6 新增），`compileall -q app` 通过。
 > 所有改动仅限 F 独占文件；未碰任何前端或其他 Agent 的模块文件。
 >

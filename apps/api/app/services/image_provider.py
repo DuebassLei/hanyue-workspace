@@ -153,7 +153,25 @@ def _provider_from_entry(connection, entry) -> dict | None:
         "modelCode": entry.model_code,
         CAPABILITY_NEGATIVE_PROMPT: _option_is_true(entry, CAPABILITY_NEGATIVE_PROMPT),
         CAPABILITY_SEED: _option_is_true(entry, CAPABILITY_SEED),
+        "supportedImageSizes": (entry.options or {}).get("supportedImageSizes"),
     }
+
+
+def exact_image_sizes(provider: dict | None) -> dict[str, str]:
+    """仅使用模型明确登记、且宽高与比例一致的尺寸。"""
+    sizes = (provider or {}).get("supportedImageSizes")
+    if not isinstance(sizes, dict):
+        return {}
+    result = {}
+    for ratio, size in sizes.items():
+        try:
+            rw, rh = (float(part) for part in ratio.split(":"))
+            width, height = (int(part) for part in size.split("x"))
+            if rw > 0 and rh > 0 and width > 0 and height > 0 and abs(width / height - rw / rh) < 0.001:
+                result[ratio] = size
+        except (ValueError, TypeError, AttributeError, ZeroDivisionError):
+            continue
+    return result
 
 
 def provider_supports_edits(db, owner_user_id: str, model_id: str | None) -> bool | None:
@@ -434,6 +452,7 @@ def generate_images(
     negative_prompt: str | None = None,
     seed: int | None = None,
     merge_meta: dict | None = None,
+    exact_aspect: bool = False,
 ) -> list[tuple[bytes, str]]:
     """文生图走 /images/generations；带参考图时改走 /images/edits（multipart）。
 
@@ -457,7 +476,12 @@ def generate_images(
             "image_provider_unavailable",
             "未接入图像生成供应商；请在设置中配置支持 image.generate 能力的模型，或上传素材后指定 assetId",
         )
-    size = SIZE_MAP.get(aspect_ratio, "1024x1536")
+    if exact_aspect:
+        size = exact_image_sizes(provider).get(aspect_ratio)
+        if not size:
+            raise ImageProviderUnavailable("unsupported_aspect_ratio", f"当前模型未确认支持 {aspect_ratio} 比例，请在模型管理配置支持的精确尺寸。")
+    else:
+        size = SIZE_MAP.get(aspect_ratio, "1024x1536")
     wanted = max(1, min(count, 4))
     collected: list[tuple[bytes, str]] = []
     last_error: ImageProviderUnavailable | None = None
@@ -501,7 +525,13 @@ def generate_images(
             if collected:
                 break
             raise last_error
-        collected.append(_decode_image(items[0]))
+        decoded = _decode_image(items[0])
+        if exact_aspect:
+            with Image.open(io.BytesIO(decoded[0])) as image:
+                rw, rh = (float(part) for part in aspect_ratio.split(":"))
+                if abs(image.width / image.height - rw / rh) >= 0.001:
+                    raise ImageProviderUnavailable("unexpected_aspect_ratio", f"供应商返回的图片比例不符合 {aspect_ratio}，请检查模型尺寸支持。")
+        collected.append(decoded)
     if not collected and last_error:
         raise last_error
     return collected
