@@ -18,7 +18,7 @@ scikit-learn==1.4.2
 jieba==0.42.1
 # Phase 2: NLP + 结构分析 + 缓存
 transformers==4.36.2          # BERT 等预训练模型用于关键词提取
-torch==2.1.2                   # transformers 依赖（重型库）
+torch==2.2.2                   # transformers 依赖（重型库）；2.1.x 无 cp312 wheel，3.12 镜像需 >=2.2
 networkx==3.2.1                # 结构对比与图论
 nltk==3.8.1                    # NLP 工具包
 redis==5.0.1                   # 缓存后端
