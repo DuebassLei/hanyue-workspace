@@ -25,5 +25,5 @@ redis==5.0.1                   # 缓存后端
 # Phase 3: 向量嵌入 + 报告导出 + 批量任务
 sentence-transformers==2.2.2   # 语义相似度（轻量级向量模型）
 reportlab==4.0.7               # PDF 生成
-openpyxl==3.11.0               # Excel 生成
+openpyxl==3.1.5                # Excel 生成
 celery==5.3.4                  # 后台任务队列
