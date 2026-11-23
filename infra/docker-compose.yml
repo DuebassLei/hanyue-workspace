@@ -34,6 +34,10 @@ x-app-env: &app-env
   ALLOW_DEV_LOGIN: ${ALLOW_DEV_LOGIN:-false}
   # 开放注册默认关闭；库内还没有密码账号时后端会自动放行首个账号（bootstrap）
   ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+  # 系统级定时任务（热点采集源等）的写权限。Docker 部署按单租户默认 any，
+  # 允许登录用户在界面直接增删改；要收紧成 dev（仅开发态）/ never（只读走 seed）
+  # 在 infra/.env 里覆盖，见 .env.example。
+  SCHEDULER_SYSTEM_WRITE: ${SCHEDULER_SYSTEM_WRITE:-any}
   # 密码策略与登录爆破防护
   PASSWORD_MIN_LENGTH: ${PASSWORD_MIN_LENGTH:-8}
   AUTH_LOCK_THRESHOLD: ${AUTH_LOCK_THRESHOLD:-5}
