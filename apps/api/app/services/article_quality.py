@@ -235,8 +235,12 @@ def _heavier(a: dict, b: dict) -> bool:
     return RANK[a["level"]] > RANK[b["level"]] or (a["level"] == b["level"] and a["score"] > b["score"])
 
 
-def mark_blocks(article: dict, parsed: dict, source: str = "pdf") -> dict:
-    """把一轮检测结果落到段落上：标红、通过，或者（对不上的）不下结论。"""
+def mark_blocks(article: dict, parsed: dict, source: str = "pdf", scope: set[int] | None = None) -> dict:
+    """把一轮检测结果落到段落上：标红、通过，或者（对不上的）不下结论。
+
+    scope 非空时只重算这些下标对应的段落，scope 外的段落既有结论原样保留；
+    文章级 flagged/passed 仍按整篇段落重新计数，避免局部检测后总数失真。
+    """
     found: dict[int, dict] = {}
     for row in (parsed.get("segments") or [])[:2000]:
         if not isinstance(row, dict):
@@ -251,6 +255,8 @@ def mark_blocks(article: dict, parsed: dict, source: str = "pdf") -> dict:
         blocks = article["blocks"]
         if not (0 <= index < len(blocks)) or not is_checkable(blocks[index]["text"]):
             continue
+        if scope is not None and index not in scope:
+            continue
         if not (0 <= score <= 1):
             continue
         if not given and score < 0.5:
@@ -261,12 +267,16 @@ def mark_blocks(article: dict, parsed: dict, source: str = "pdf") -> dict:
 
     covered = parsed.get("covered") if isinstance(parsed.get("covered"), set) else None
     round_no = int((article.get("zhuque") or {}).get("round") or 0) + 1
-    flagged = passed = unmatched = 0
+    unmatched = 0
     for index, block in enumerate(article["blocks"]):
+        # 局部检测：scope 外的段落不动，保留上一轮的 check 结论
+        if scope is not None and index not in scope:
+            continue
         if not is_checkable(block["text"]):
             block["check"] = None
             continue
         hit = found.get(index)
+        reasons = (parsed.get("blockHits") or {}).get(index) if source == LOCAL_SOURCE else None
         before = block.get("check") or {}
         if not hit:
             if covered is not None and index not in covered:
@@ -274,9 +284,9 @@ def mark_blocks(article: dict, parsed: dict, source: str = "pdf") -> dict:
                 unmatched += 1
                 continue
             block["check"] = {"status": "pass", "round": round_no}
-            passed += 1
+            if reasons:
+                block["check"]["hits"] = reasons
             continue
-        flagged += 1
         # 上一轮改过、这一轮反而更重：提示退回上一版（zhuque skill 第 5 步）
         worse = (
             before.get("status") == "fixed"
@@ -293,6 +303,17 @@ def mark_blocks(article: dict, parsed: dict, source: str = "pdf") -> dict:
             "fixes": before.get("fixes") or 0,
             "worse": worse,
         }
+        if reasons:
+            block["check"]["hits"] = reasons
+
+    # 整篇重算：局部检测后其它段落的旧 flag/pass 也要算进总数
+    flagged = passed = 0
+    for block in article["blocks"]:
+        status = (block.get("check") or {}).get("status")
+        if status == "flag":
+            flagged += 1
+        elif status == "pass":
+            passed += 1
 
     overall = parsed.get("overall") if isinstance(parsed.get("overall"), dict) else None
     if overall:
@@ -441,90 +462,114 @@ async def apply_report(article: dict, report_text: str, *, mapper=None) -> dict:
     return mark_blocks(article, merged, "pdf")
 
 
-# ---------------- 本地启发式兜底 ----------------
-#
-# 没有朱雀密钥时的降级路径。规则只覆盖「结构层面」的高置信特征：
-# 整齐并列、对仗金句、段尾总结、套路过渡、三连排比。
-# 打分仅用于排序与提示，界面必须标注「本地规则」，不能冒充朱雀结论。
+# ---------------- 本地写作质量 ----------------
 
-_PATTERNS = (
-    (r"首先|其次|再次|最后|第一[，、]|第二[，、]|第三[，、]", 0.16, "整齐并列"),
-    (r"总之|综上|由此可见|总的来说|总而言之|说白了就是", 0.22, "段尾总结"),
-    (r"不仅[^。]{0,20}而且|既[^。]{0,12}又|不是[^。]{0,16}而是|与其[^。]{0,16}不如", 0.2, "对仗金句"),
-    (r"更重要的是|值得注意的是|换句话说|与此同时|在这个[^。]{0,8}时代", 0.14, "套路过渡"),
-    (r"、[^、。]{1,10}、[^、。]{1,10}、[^、。]{1,10}、", 0.12, "三连排比"),
+_LOCAL_AXES = (
+    ("wording", "用词自然度"),
+    ("structure", "句式多样性"),
+    ("sentence_rhythm", "阅读节奏"),
+    ("transitions", "衔接自然度"),
+    ("specificity", "表达具体度"),
+    ("redundancy", "内容去重"),
 )
+_LOCAL_WORDING = re.compile(r"赋能|抓手|生态闭环|颗粒度|降维打击|沉淀最佳实践|全方位|至关重要|不容忽视")
+_LOCAL_TRANSITION = re.compile(
+    r"^(首先|其次|再次|最后|总之|综上所述|总的来说|总而言之|由此可见|值得注意的是|更重要的是|"
+    r"换句话说|与此同时)(?=[，、,:：\s]|$)"
+)
+_LOCAL_VAGUE = re.compile(r"具有.{0,3}(?:意义|价值)|发挥.{0,4}作用|带来.{0,4}影响|有助于.{0,5}(?:发展|提升|优化)")
+_LOCAL_DETAIL = re.compile(r"\d|[一二三四五六七八九十两百千]+(?:个|件|次|天|月|年|点|元|成)|例如|比如|以.+为例|[「“][^」”]+[」”]")
+_LOCAL_TEMPLATE = re.compile(r"不仅[^，,]{1,24}[，,]?\s*而且|不是[^，,]{1,24}[，,]?\s*而是|既[^，,]{1,16}[，,]?\s*又")
 
 
-def local_check(article: dict) -> dict:
-    """本地规则打分，返回段落风险及文章维度分，不修改文章。"""
-    from .article_workflow import check_ai_tone
-
+def local_check(article: dict, scope: set[int] | None = None) -> dict:
+    """只在本次选区内检查，用有上限的段落长度加权汇总六轴。"""
     segments = []
-    checked_chars = 0
-    weighted = 0.0
-    tone_total = structure_total = rhythm_total = 0.0
+    block_hits = {}
+    totals = dict.fromkeys((axis for axis, _ in _LOCAL_AXES), 0)
+    total_weight = 0
+    seen_sentences: set[str] = set()
+    previous_index = -2
+    previous_grams: set[str] = set()
     for index, block in enumerate(article["blocks"]):
-        if not is_checkable(block["text"]):
+        raw = block["text"]
+        if (scope is not None and index not in scope) or not is_checkable(raw):
             continue
-        text = plain_of(block["text"])
-        hits = []
-        tone_hits = check_ai_tone(block["text"])["hits"]
-        tone_penalty = min(0.36, 0.06 * len(tone_hits))
-        if tone_hits:
-            hits.extend(sorted({str(hit.get("ruleId")) for hit in tone_hits})[:4])
-        structure_penalty = 0.0
-        for pattern, weight, name in _PATTERNS:
-            if re.search(pattern, text):
-                structure_penalty += weight
-                hits.append(name)
-        # 长段落里句句同构更像 AI：按句号切分后看长度方差
-        rhythm_penalty = 0.0
-        sentences = [s for s in re.split(r"[。！？]", text) if len(s.strip()) >= 8]
-        if len(sentences) >= 3:
-            lengths = [len(s) for s in sentences]
-            mean = sum(lengths) / len(lengths)
-            variance = sum((n - mean) ** 2 for n in lengths) / len(lengths)
-            if variance < 12:
-                rhythm_penalty = 0.12
-                hits.append("句长一致")
-        score = min(0.99, round(0.08 + tone_penalty + structure_penalty + rhythm_penalty, 2))
-        chars = len(text)
-        checked_chars += chars
-        weighted += score * chars
-        tone_total += tone_penalty * chars
-        structure_total += structure_penalty * chars
-        rhythm_total += rhythm_penalty * chars
-        if score >= 0.5:
-            segments.append({
-                "block": index + 1,
-                "score": score,
-                "level": "ai" if score >= 0.99 else "suspect",
-                "hits": hits,
-            })
-    overall_score = round(weighted / checked_chars, 3) if checked_chars else 0.0
-    # 每个轴按自己的最大扣分归一化；高分表示该轴的规则命中较少。
-    axes = (
-        ("wording", "用词自然度", tone_total, 0.36),
-        ("structure", "句式灵活度", structure_total, sum(weight for _, weight, _ in _PATTERNS)),
-        ("sentence_rhythm", "句长变化", rhythm_total, 0.12),
-    )
-    dimensions = []
-    if checked_chars:
-        dimensions = [
-            {"id": axis, "label": label, "score": round(100 * (1 - min(1, penalty / (checked_chars * maximum))))}
-            for axis, label, penalty, maximum in axes
-        ]
+        text = plain_of(raw)
+        # 保留小数点和英文缩写，按中文标点、换行或英文句末切句。
+        sentences = [part.strip() for part in re.split(r"[。！？!?；;\n]+|\.(?=\s|$)", text) if part.strip()]
+        unique = []
+        repeated = 0
+        normalized = []
+        for sentence in sentences:
+            key = re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", sentence).casefold())
+            normalized.append(key)
+            if len(key) >= 10:
+                if key in seen_sentences:
+                    repeated += 1
+                    continue
+                seen_sentences.add(key)
+            unique.append(sentence)
+
+        paragraph = "".join(normalized)
+        grams = {paragraph[start:start + 4] for start in range(len(paragraph) - 3)} if len(paragraph) >= 40 else set()
+        shared = len(grams & previous_grams) if index == previous_index + 1 else 0
+        near_duplicate = shared >= 28 and shared >= 0.8 * len(grams | previous_grams)
+        previous_index, previous_grams = index, grams
+
+        penalties = {}
+        if repeated:
+            penalties["redundancy"] = (min(85, 50 + 10 * (repeated - 1)), f"有 {repeated} 句与本段或前文重复")
+        elif near_duplicate:
+            penalties["redundancy"] = (50, "与上一段存在大段重复表述")
+            unique = []
+
+        wording = sum(len(_LOCAL_WORDING.findall(sentence)) for sentence in unique)
+        if wording >= 2:
+            penalties["wording"] = (min(65, wording * 10), f"有 {wording} 处套话或空泛修饰")
+
+        transitions = sum(bool(_LOCAL_TRANSITION.match(sentence)) for sentence in unique)
+        if transitions >= 2 and transitions * 2 >= len(unique):
+            penalties["transitions"] = (min(65, (transitions - 1) * 18), f"有 {transitions} 句以固定过渡语开头")
+
+        # 去掉已归为衔接问题的句首。列表逐项使用相同句式很常见。
+        bodies = [_LOCAL_TRANSITION.sub("", sentence).lstrip("，、,:： ") for sentence in unique]
+        prefixes = [re.match(r"[\u3400-\u9fff]{3}", sentence) for sentence in bodies]
+        same_opening = any(a and b and c and a[0] == b[0] == c[0] for a, b, c in zip(prefixes, prefixes[1:], prefixes[2:]))
+        templates = sum(len(_LOCAL_TEMPLATE.findall(sentence)) for sentence in bodies)
+        if not re.match(r"^\s*(?:[-*+]|\d+[.)])\s", raw) and (same_opening or templates >= 2):
+            reason = "连续三句使用相同开头" if same_opening else "多次使用固定对举句式"
+            penalties["structure"] = (min(60, max(30, templates * 12)), reason)
+
+        lengths = [len(re.sub(r"\s+", "", sentence)) for sentence in bodies]
+        long_sentences = sum(length > 75 for length in lengths)
+        if long_sentences:
+            penalties["sentence_rhythm"] = (min(65, long_sentences * 22), f"有 {long_sentences} 句超过 75 字")
+        elif len(lengths) >= 4 and not same_opening and min(lengths) >= 8 and max(lengths) - min(lengths) <= 3 and "\n" not in text:
+            penalties["sentence_rhythm"] = (18, "连续多句长度接近，阅读节奏偏单一")
+
+        vague = sum(bool(_LOCAL_VAGUE.search(sentence)) and not _LOCAL_DETAIL.search(sentence) for sentence in bodies)
+        if vague >= 2:
+            penalties["specificity"] = (min(65, vague * 14), f"有 {vague} 句泛泛评价，可补充实例或数量")
+
+        weight = min(240, len(text))
+        total_weight += weight
+        for axis, (points, _) in penalties.items():
+            totals[axis] += points * weight
+        burden = min(100, sum(points for points, _ in penalties.values()))
+        if penalties:
+            block_hits[index] = [f"{label}：{penalties[axis][1]}" for axis, label in _LOCAL_AXES if axis in penalties]
+        if burden >= 50:
+            segments.append({"block": index + 1, "score": burden / 100, "level": "suspect"})
+
     return {
         "segments": segments,
-        "dimensions": dimensions,
-        "overall": {
-            "human": round((1 - overall_score) * 100, 1),
-            "suspect": round(overall_score * 100, 1),
-            "ai": 0.0,
-        },
+        "blockHits": block_hits,
+        "dimensions": [
+            {"id": axis, "label": label, "score": round(100 - totals[axis] / total_weight)}
+            for axis, label in _LOCAL_AXES
+        ] if total_weight else [],
         "source": LOCAL_SOURCE,
-        "overallScore": overall_score,
     }
 
 

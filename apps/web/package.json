@@ -29,6 +29,7 @@
     "@vue-flow/controls": "^1.1.2",
     "@vue-flow/core": "^1.41.5",
     "@vue-flow/minimap": "^1.5.2",
+    "echarts": "^6.1.0",
     "html-to-image": "^1.11.13",
     "jszip": "^3.10.2",
     "naive-ui": "^2.45.3",

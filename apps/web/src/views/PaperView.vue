@@ -19,12 +19,15 @@ import { apiUrl } from '../api/client'
 import { markdownToHtml } from '../utils/markdownSerializer'
 import { confirm, toast } from '../ui/feedback'
 import { useParagraphDrafts } from '../composables/useParagraphDrafts'
+import { usePaperParagraphSelection } from '../composables/usePaperParagraphSelection'
+import PaperParagraphPickControls from '../components/paper/PaperParagraphPickControls.vue'
 import PaperLayoutPreview from '../components/paper/PaperLayoutPreview.vue'
 import PaperLayoutPanel from '../components/paper/PaperLayoutPanel.vue'
 import PaperMediaPanel from '../components/paper/PaperMediaPanel.vue'
 import PaperPublishPanel from '../components/paper/PaperPublishPanel.vue'
 import PaperBlockEditor from '../components/paper/PaperBlockEditor.vue'
 import PaperAnnotation from '../components/paper/PaperAnnotation.vue'
+import QualityRadar from '../components/paper/QualityRadar.vue'
 
 const articles = ref([])
 const article = ref(null)
@@ -40,6 +43,10 @@ const articleQuery = ref('')
 const createError = ref('')
 const error = ref('')
 const tab = ref('quality')
+const mediaSection = ref('cover')
+watch(mediaSection, (value) => {
+  if (value !== 'svg') sourceSelection.stop()
+})
 const showPublish = ref(false)
 const petOpen = ref(false)
 const petMode = ref('chat')
@@ -66,11 +73,27 @@ const reportFile = ref(null)
 const sheetMode = ref('paper')
 const layoutOptions = ref({})
 const selectedBlockId = ref('')
-// 素材段落多选：开启后在正文点段就是勾选，不再进编辑；关掉才恢复「点正文改这一段」。
-// 选中的段落给 SVG 卡做合并素材，比在侧栏的长列表里翻勾选框顺手。
-const sourcePickMode = ref(false)
-const sourceBlockIds = ref([])
-let sourceAnchorId = ''
+const getPaperBlocks = () => article.value?.blocks || []
+const sourceSelection = usePaperParagraphSelection(getPaperBlocks)
+const detectSelection = usePaperParagraphSelection(getPaperBlocks)
+const { active: sourcePickMode, ids: sourceBlockIds } = sourceSelection
+const { active: detectPickMode, ids: detectBlockIds } = detectSelection
+const activeSelection = computed(() => detectPickMode.value ? detectSelection : sourcePickMode.value ? sourceSelection : null)
+const svgSourceIds = computed(() => {
+  if (sourceSelection.touched.value) return sourceBlockIds.value
+  return getPaperBlocks().some((block) => block.id === selectedBlockId.value) ? [selectedBlockId.value] : []
+})
+const visiblePickedIds = computed(() => {
+  if (tab.value === 'media') return svgSourceIds.value
+  if (tab.value === 'quality' && detectScope.value === 'selection') return detectBlockIds.value
+  return []
+})
+watch(tab, (value) => {
+  if (value !== 'media') sourceSelection.stop()
+  if (value !== 'quality') detectSelection.stop()
+})
+const detectScope = ref('all')
+const qualitySource = ref(localStorage.getItem('hanyue-quality-source') || 'auto')
 let timer = null
 let stateRequest = 0
 let articleRequest = 0
@@ -93,23 +116,6 @@ const qualityDimensions = computed(() => {
   const report = article.value?.zhuque
   if (report?.source !== 'local' || !Array.isArray(report.dimensions)) return []
   return report.dimensions.filter((item) => item?.id && item.label && Number.isFinite(item.score) && item.score >= 0 && item.score <= 100)
-})
-const qualityRadar = computed(() => {
-  const dimensions = qualityDimensions.value
-  if (dimensions.length < 3) return null
-  const axes = dimensions.map((dimension, index) => {
-    const angle = (2 * Math.PI * index) / dimensions.length - Math.PI / 2
-    const at = (percent) => [90 + Math.cos(angle) * percent * 0.74, 90 + Math.sin(angle) * percent * 0.74]
-    const [cx, cy] = at(dimension.score)
-    const [x, y] = at(100)
-    const [lx, ly] = at(112)
-    return { ...dimension, at, cx, cy, x, y, lx, ly }
-  })
-  return {
-    axes,
-    rings: [25, 50, 75, 100].map((scale) => axes.map((axis) => axis.at(scale).join(',')).join(' ')),
-    outline: axes.map(({ cx, cy }) => `${cx},${cy}`).join(' '),
-  }
 })
 const job = computed(() => article.value?.job || null)
 // 草稿变化不会改 article 对象，这里显式订阅 draftVersion，
@@ -247,9 +253,9 @@ function activateArticle(next) {
   applySnapshot(next)
   layoutOptions.value = { ...(next.layoutOptions || {}) }
   selectedBlockId.value = ''
-  sourcePickMode.value = false
-  sourceBlockIds.value = []
-  sourceAnchorId = ''
+  sourceSelection.reset()
+  detectSelection.reset()
+  detectScope.value = 'all'
   // 草稿仍保存在本机；这里只重置编辑器和导航的瞬态。
   editingBlockId.value = ''
   lastBlockId.value = lastParagraph(next.id) || ''
@@ -455,8 +461,7 @@ function onBlockSaved(snapshot) {
  */
 async function deleteBlock(block, index) {
   if (editingLocked.value || deletingBlockId.value) return
-  // 选素材时点段号是勾选，别让删除按钮混进这个模式
-  if (sourcePickMode.value) return
+  if (activeSelection.value) return
   // 这一段正开着编辑器：交给编辑器里的删除，它会一并处理草稿、焦点和冲突态
   if (editingBlockId.value === block.id) return
   if (!article.value) return
@@ -497,59 +502,39 @@ function jumpTo(blockId, open = false) {
   else nextTick(() => document.getElementById(`paper-block-${block.id}`)?.scrollIntoView({ block: 'center' }))
 }
 
-// ---------------- 素材段落多选 ----------------
-// 开关打开后，点正文/段号=勾选或取消；Shift 点=以锚点连选一段区间。
-function toggleSourcePick() {
-  sourcePickMode.value = !sourcePickMode.value
-  // 第一次开启时把当前段带上，少点一次；之后保留已选，方便再点几段
-  if (sourcePickMode.value && !sourceBlockIds.value.length && selectedBlockId.value) {
-    sourceBlockIds.value = [selectedBlockId.value]
-    sourceAnchorId = selectedBlockId.value
-  }
-}
-
 function startSourcePick() {
+  openMedia('svg')
+  closeEditor()
+  detectSelection.stop()
+  sourceSelection.start(selectedBlockId.value)
+}
+
+function toggleSourcePick() {
+  if (sourcePickMode.value) sourceSelection.stop()
+  else startSourcePick()
+}
+
+function setDetectScope(value) {
+  detectScope.value = value
+  if (value !== 'selection') detectSelection.stop()
+}
+
+function setQualitySource(value) {
+  qualitySource.value = value
+  localStorage.setItem('hanyue-quality-source', value)
+}
+
+function startDetectPick() {
   sheetMode.value = 'paper'
-  sourcePickMode.value = true
+  closeEditor()
+  sourceSelection.stop()
+  detectSelection.start(selectedBlockId.value)
 }
 
-function pickSourceBlock(block, event) {
-  const ids = [...sourceBlockIds.value]
-  const index = ids.indexOf(block.id)
-  if (event?.shiftKey && sourceAnchorId && sourceAnchorId !== block.id) {
-    const blocks = article.value?.blocks || []
-    const from = blocks.findIndex((item) => item.id === sourceAnchorId)
-    const to = blocks.findIndex((item) => item.id === block.id)
-    if (from !== -1 && to !== -1) {
-      const [start, end] = from <= to ? [from, to] : [to, from]
-      const range = blocks.slice(start, end + 1).map((item) => item.id)
-      // 连选只替换这一区间，区间外已勾的段落保留
-      sourceBlockIds.value = [...ids.filter((id) => !range.includes(id)), ...range]
-      selectedBlockId.value = block.id
-      return
-    }
-  }
-  if (index === -1) ids.push(block.id)
-  else ids.splice(index, 1)
-  sourceBlockIds.value = ids
-  sourceAnchorId = block.id
-  selectedBlockId.value = block.id
-}
-
-function clearSourceBlocks() {
-  sourceBlockIds.value = []
-  sourceAnchorId = ''
-}
-
-function finishSourcePick() {
-  sourcePickMode.value = false
-  openMedia()
-}
-
-// 正文与段号的点击统一入口：选素材模式/按住 Ctrl 时是勾选，否则进编辑。
 function onBlockClick(block, event) {
-  if (sourcePickMode.value || event?.ctrlKey || event?.metaKey) {
-    pickSourceBlock(block, event)
+  const selection = activeSelection.value || (event?.ctrlKey || event?.metaKey ? sourceSelection : null)
+  if (selection) {
+    selection.toggle(block.id, event?.shiftKey)
     return
   }
   openEditor(block)
@@ -559,7 +544,12 @@ const fixBlock = (block) => run('fix', () => studioApi.fixBlock(article.value.id
 const keepBlock = (block) => run('keep', () => studioApi.keepBlock(article.value.id, block.id), { poll: false })
 const revertBlock = (block) => run('revert', () => studioApi.revertBlock(article.value.id, block.id), { poll: false })
 const undo = () => run('undo', () => studioApi.undo(article.value.id), { poll: false })
-const detect = () => run('detect', () => studioApi.detect(article.value.id))
+const detect = () => {
+  if (!article.value) return
+  const body = { source: qualitySource.value }
+  if (detectScope.value === 'selection' && detectBlockIds.value.length) body.blockIds = detectBlockIds.value
+  return run('detect', () => studioApi.detect(article.value.id, body))
+}
 const fixAll = () => run('fixAll', () => studioApi.fixAll(article.value.id))
 const stop = () => run('stop', () => studioApi.stop(article.value.id), { poll: false })
 const regenTitles = () => run('titles', () => studioApi.titles(article.value.id))
@@ -663,7 +653,8 @@ function openLayout() {
   tab.value = 'layout'
 }
 
-function openMedia() {
+function openMedia(section) {
+  mediaSection.value = section
   sheetMode.value = 'paper'
   tab.value = 'media'
 }
@@ -677,7 +668,7 @@ function jumpToReadiness(id) {
   }
   if (id === 'title') openPet('tools')
   else if (id === 'quality') tab.value = 'quality'
-  else if (id === 'cover') tab.value = 'media'
+  else if (id === 'cover') openMedia('cover')
   else if (id === 'banner') tab.value = 'layout'
 }
 
@@ -956,8 +947,8 @@ onBeforeUnmount(() => {
               </button>
               <template v-if="sourcePickMode">
                 <span class="nav-hint">点正文勾选，Shift 连选</span>
-                <button v-if="sourceBlockIds.length" class="nav-btn" @click="clearSourceBlocks">清空</button>
-                <button class="nav-btn primary" :disabled="!sourceBlockIds.length" @click="finishSourcePick">完成</button>
+                <button v-if="sourceBlockIds.length" class="nav-btn" @click="sourceSelection.clear">清空</button>
+                <button class="nav-btn primary" @click="sourceSelection.stop">完成</button>
               </template>
               <span class="nav-grow" />
               <!-- 撤销贴着正文放：它回退的是稿纸上的内容，撤完的提示也出现在正文正上方 -->
@@ -967,7 +958,7 @@ onBeforeUnmount(() => {
                 :title="job ? '后台任务正在改这篇，等它结束再撤销' : '撤销上一篇改稿，可按提示恢复'"
                 @click="undo"
               >撤销一步</button>
-              <button class="text-button" @click="openMedia">配插图 →</button>
+              <button class="text-button" @click="openMedia('inline')">配插图 →</button>
               <NPopover v-if="unsavedCount" v-model:show="showUnsaved" trigger="click" placement="bottom-end" :show-arrow="false">
                 <template #trigger>
                 <button
@@ -995,23 +986,23 @@ onBeforeUnmount(() => {
                 :class="[block.check?.status || '', {
                   editing: editingBlockId === block.id,
                   selected: selectedBlockId === block.id,
-                  picking: sourcePickMode,
-                  'source-picked': sourceBlockIds.includes(block.id),
+                  picking: sourcePickMode || detectPickMode,
+                  picked: visiblePickedIds.includes(block.id),
                 }]"
               >
                 <div class="block-head">
                   <button
                     class="block-no"
-                    :disabled="editingLocked && !sourcePickMode"
-                    :aria-label="sourcePickMode ? `把第 ${index + 1} 段加入或移出素材` : `编辑第 ${index + 1} 段`"
-                    :aria-pressed="sourcePickMode ? sourceBlockIds.includes(block.id) : undefined"
+                    :disabled="editingLocked && !sourcePickMode && !detectPickMode"
+                    :aria-label="detectPickMode ? `把第 ${index + 1} 段加入或移出检测` : (sourcePickMode ? `把第 ${index + 1} 段加入或移出素材` : `编辑第 ${index + 1} 段`)"
+                    :aria-pressed="activeSelection ? visiblePickedIds.includes(block.id) : undefined"
                     @click="onBlockClick(block, $event)"
                   >
-                    <span v-if="sourcePickMode" class="pick-box" aria-hidden="true">{{ sourceBlockIds.includes(block.id) ? '✓' : '' }}</span>
-                    {{ index + 1 }}<span v-if="!sourcePickMode" class="pencil" aria-hidden="true">✎</span>
+                    <span v-if="activeSelection" class="pick-box" aria-hidden="true">{{ visiblePickedIds.includes(block.id) ? '✓' : '' }}</span>
+                    {{ index + 1 }}<span v-if="!sourcePickMode && !detectPickMode" class="pencil" aria-hidden="true">✎</span>
                   </button>
                   <span class="block-kind">{{ kindLabel[block.kind] || block.kind }}</span>
-                  <span v-if="sourceBlockIds.includes(block.id)" class="badge source">素材</span>
+                  <span v-if="visiblePickedIds.includes(block.id)" class="badge picked-label">{{ tab === 'quality' ? '待检' : '素材' }}</span>
                   <span v-if="block.check?.status" class="badge" :class="block.check.status">
                     {{ statusLabel[block.check.status] || block.check.status }}
                     <template v-if="block.check.score">· {{ block.check.score }}</template>
@@ -1023,7 +1014,7 @@ onBeforeUnmount(() => {
                   <!-- 段头右端的快捷删除：hover 才浮出；选素材/编辑中/任务运行时不显示。
                        不放段号正旁边，是因为段号本身占满了 44px 的左侧留白，紧贴会压住「正文」标签。 -->
                   <button
-                    v-if="!sourcePickMode && editingBlockId !== block.id"
+                    v-if="!sourcePickMode && !detectPickMode && editingBlockId !== block.id"
                     class="block-del"
                     type="button"
                     :disabled="editingLocked || deletingBlockId === block.id"
@@ -1046,15 +1037,18 @@ onBeforeUnmount(() => {
                 <div
                   v-else
                   class="block-body"
-                  :class="{ locked: editingLocked }"
-                  :role="editingLocked && !sourcePickMode ? undefined : 'button'"
-                  :tabindex="editingLocked && !sourcePickMode ? -1 : 0"
-                  :title="sourcePickMode ? '点一下加入或移出素材；Shift 点连选一段' : editingLocked ? '后台任务正在改这篇，等它结束再编辑' : '点一下直接改这一段'"
+                  :class="{ locked: editingLocked && !activeSelection }"
+                  :role="editingLocked && !sourcePickMode && !detectPickMode ? undefined : 'button'"
+                  :tabindex="editingLocked && !sourcePickMode && !detectPickMode ? -1 : 0"
+                  :title="detectPickMode ? '点一下加入或移出检测；Shift 点连选一段' : (sourcePickMode ? '点一下加入或移出素材；Shift 点连选一段' : (editingLocked ? '后台任务正在改这篇，等它结束再编辑' : '点一下直接改这一段'))"
                   @click="onBlockClick(block, $event)"
                   @keydown.enter.prevent="onBlockClick(block, $event)"
                 >
                   <div class="block-html" v-html="renderBody(block.text)" />
                   <span v-if="dirtyIds.has(block.id)" class="block-unsaved">有未保存的修改</span>
+                  <ul v-if="block.check?.hits?.length" class="block-reasons">
+                    <li v-for="reason in block.check.hits" :key="reason">{{ reason }}</li>
+                  </ul>
                 </div>
 
                 <PaperAnnotation
@@ -1098,40 +1092,74 @@ onBeforeUnmount(() => {
         </div>
 
 
-        <section v-if="tab === 'quality'" class="panel">
-          <div class="quality-head">
-            <div>
-              <strong>{{ sourceLabel }}</strong>
-              <span v-if="article?.zhuque?.round">第 {{ article.zhuque.round }} 轮 · {{ flagged }} 段待改 · {{ fixedCount }} 段已改</span>
-              <span v-else>还没有检测记录</span>
+        <section v-if="tab === 'quality'" class="panel quality-panel" aria-label="稿件质检">
+          <div class="quality-summary">
+            <div class="quality-head">
+              <div>
+                <strong>稿件质检</strong>
+                <span>{{ sourceLabel }}<template v-if="article?.zhuque?.round"> · 第 {{ article.zhuque.round }} 轮</template></span>
+              </div>
             </div>
-            <NButton size="tiny" :disabled="!article" :loading="actionBusy === 'detect'" @click="detect">检测</NButton>
+
+            <div class="quality-controls">
+              <div class="qc-row">
+                <span class="qc-label">检测范围</span>
+                <div class="seg" role="group" aria-label="检测范围">
+                  <button :class="{ active: detectScope === 'all' }" @click="setDetectScope('all')">全文</button>
+                  <button :class="{ active: detectScope === 'selection' }" @click="setDetectScope('selection')">指定段落</button>
+                </div>
+              </div>
+              <div class="qc-row">
+                <span class="qc-label">质检来源</span>
+                <div class="seg" role="group" aria-label="质检来源">
+                  <button :class="{ active: qualitySource === 'auto' }" @click="setQualitySource('auto')">自动</button>
+                  <button
+                    :class="{ active: qualitySource === 'zhuque' }"
+                    :title="settings.zhuqueConfigured ? '优先用朱雀，失败自动兜底本地规则' : '未配置 Key，将自动兜底本地规则'"
+                    @click="setQualitySource('zhuque')"
+                  >朱雀 AI</button>
+                  <button :class="{ active: qualitySource === 'local' }" @click="setQualitySource('local')">本地规则</button>
+                </div>
+              </div>
+              <PaperParagraphPickControls
+                v-if="detectScope === 'selection'"
+                :active="detectPickMode"
+                :count="detectBlockIds.length"
+                :disabled="!article?.blocks?.length"
+                @start="startDetectPick"
+                @clear="detectSelection.clear"
+                @finish="detectSelection.stop"
+              />
+            </div>
+
+            <NButton
+              size="small"
+              type="primary"
+              :disabled="!article || (detectScope === 'selection' && !detectBlockIds.length)"
+              :loading="actionBusy === 'detect'"
+              @click="detect"
+            >{{ detectScope === 'selection' ? `检测选中 ${detectBlockIds.length} 段` : (article?.zhuque?.round ? '重新检测全文' : '开始检测') }}</NButton>
+            <dl v-if="article?.zhuque?.round" class="quality-counts" aria-live="polite">
+              <div><dt>待改段落</dt><dd :class="{ 'needs-work': flagged }">{{ flagged }}</dd></div>
+              <div><dt>已改段落</dt><dd>{{ fixedCount }}</dd></div>
+            </dl>
+            <p v-else class="quality-empty">{{ article ? '开始检测后，可查看待改段落和质检结果。' : '选择稿件后即可开始检测。' }}</p>
+            <div v-if="flagged || job?.kind === 'fixall'" class="panel-row">
+              <NButton size="small" :disabled="!article || !!job || !flagged" :loading="actionBusy === 'fixAll'" @click="fixAll">一键处理 {{ flagged }} 段</NButton>
+              <NButton v-if="job?.kind === 'fixall'" size="small" @click="stop">停止</NButton>
+            </div>
           </div>
           <p v-if="article?.zhuque?.note" class="hint">{{ article.zhuque.note }}</p>
-          <figure v-if="qualityDimensions.length" class="quality-radar">
+          <p v-else-if="article?.zhuque?.source === 'local'" class="hint">这是旧版三维结果，再检测一次后显示六维写作质量。</p>
+          <figure v-if="qualityDimensions.length >= 6" class="quality-radar">
             <figcaption><strong>本地质检维度</strong><span>0–100 分 · 越高越好</span></figcaption>
-            <div class="radar-content">
-              <svg v-if="qualityRadar" class="radar-plot" viewBox="0 0 180 180" aria-hidden="true" focusable="false">
-                <polygon v-for="ring in qualityRadar.rings" :key="ring" class="radar-grid" :points="ring" />
-                <line v-for="axis in qualityRadar.axes" :key="axis.id" class="radar-grid" x1="90" y1="90" :x2="axis.x" :y2="axis.y" />
-                <polygon class="radar-mark" :points="qualityRadar.outline" />
-                <g v-for="(axis, index) in qualityRadar.axes" :key="axis.id">
-                  <circle class="radar-dot" :cx="axis.cx" :cy="axis.cy" r="3" />
-                  <text class="radar-number" :x="axis.lx" :y="axis.ly">{{ index + 1 }}</text>
-                  <circle class="radar-hit" :cx="axis.x" :cy="axis.y" r="10">
-                    <title>{{ axis.label }}：{{ axis.score }} 分</title>
-                  </circle>
-                </g>
-              </svg>
-              <table class="radar-scores" aria-label="本地质检各维度分数">
-                <tbody>
-                  <tr v-for="(dimension, index) in qualityDimensions" :key="dimension.id">
-                    <th scope="row"><span v-if="qualityRadar" class="radar-index">{{ index + 1 }}.</span> {{ dimension.label }}</th>
-                    <td>{{ dimension.score }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+            <QualityRadar :dimensions="qualityDimensions" />
+            <ul class="radar-legend" aria-label="本地质检各维度分数">
+              <li v-for="dimension in qualityDimensions" :key="dimension.id">
+                <span class="radar-legend-label">{{ dimension.label }}</span>
+                <span class="radar-legend-score">{{ dimension.score }}</span>
+              </li>
+            </ul>
           </figure>
           <details v-if="!settings.zhuqueConfigured" class="report-box">
             <summary>配置朱雀 API Key（不配则走本地规则）</summary>
@@ -1140,13 +1168,6 @@ onBeforeUnmount(() => {
             <NButton size="tiny" :loading="actionBusy === 'quality-settings'" @click="saveQuality">保存</NButton>
           </details>
           <p v-else class="hint">朱雀 Key 已配置（{{ settings.zhuqueKeyHint }}）。检测会优先调用朱雀接口。</p>
-
-          <div class="panel-row">
-            <NButton size="small" :disabled="!article || !!job || !flagged" :loading="actionBusy === 'fixAll'" @click="fixAll">
-              一键处理 {{ flagged ? `${flagged} 段` : '' }}
-            </NButton>
-            <NButton v-if="job?.kind === 'fixall'" size="small" @click="stop">停止</NButton>
-          </div>
 
           <details class="report-box">
             <summary>用朱雀报告回填（PDF 或文字）</summary>
@@ -1169,13 +1190,17 @@ onBeforeUnmount(() => {
 
         <section v-else-if="tab === 'media'" class="panel">
           <PaperMediaPanel
+            v-model:section="mediaSection"
             :article="article"
             :selected-block-id="selectedBlockId"
-            :source-block-ids="sourceBlockIds"
+            :source-block-ids="svgSourceIds"
+            :source-pick-mode="sourcePickMode"
             :busy="actionBusy"
             @saved="applyPanelSnapshot"
             @notify="notifyPanel"
             @pick-in-paper="startSourcePick"
+            @clear-pick="sourceSelection.clear"
+            @finish-pick="sourceSelection.stop"
             @select-block="onSelectBlock"
           />
         </section>
@@ -1605,21 +1630,19 @@ onBeforeUnmount(() => {
 /* 触屏没有 hover，常驻半透明，免得根本找不到删除入口 */
 @media (hover: none) { .block-del { opacity: .6; } .block-del:disabled { opacity: 0; } }
 
-/* 素材多选：开启时整段可点，选中的段用稿纸强调色描边，和「正在编辑」区分开 */
+/* 稿纸勾选：质检和素材统一用绿色显示已选段落。 */
 .block.picking { cursor: pointer; }
 .block.picking:hover { background: var(--paper-accent-tint); }
 .block.picking .block-body { cursor: pointer; }
-.block.source-picked { background: var(--paper-accent-tint); border-color: var(--paper-accent); }
+.block.picked { background: var(--paper-success-soft); border-color: var(--paper-success); }
+.block.picked .block-no .pick-box { background: var(--paper-success); border-color: var(--paper-success); color: var(--paper-on-accent); }
+.badge.picked-label { border-color: var(--paper-success); color: var(--paper-success); }
 .block-no .pick-box {
   display: inline-flex; align-items: center; justify-content: center;
   width: 12px; height: 12px; margin-right: 2px;
   border: 1px solid var(--paper-line-strong); border-radius: 3px;
   font-size: 9px; line-height: 1;
 }
-.block.source-picked .block-no .pick-box {
-  background: var(--paper-accent); border-color: var(--paper-accent); color: var(--paper-on-accent);
-}
-.badge.source { border-color: var(--paper-accent); color: var(--paper-accent); }
 
 /* 正文：整块可点，点哪儿都进编辑；内部链接不响应点击，否则一改稿就跳走 */
 .block-body { position: relative; padding: 2px 6px; margin: 0 -6px; border-radius: 6px; outline: none; cursor: text; }
@@ -1755,21 +1778,32 @@ onBeforeUnmount(() => {
 }
 .chat-anchor-off:hover { color: var(--paper-danger); }
 
-.quality-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 12px; }
+.quality-summary { display: grid; gap: 12px; padding: 12px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); }
+.quality-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.quality-head strong { font-size: 15px; }
+.quality-counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; padding-top: 10px; border-top: 1px solid var(--color-border); }
+.quality-counts div + div { padding-inline-start: 12px; border-inline-start: 1px solid var(--color-border); }
+.quality-counts dt, .quality-empty { margin: 0; color: var(--color-text-secondary); font-size: 12px; }
+.quality-counts dd { margin: 4px 0 0; font-size: 24px; font-weight: 600; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.quality-counts .needs-work { color: var(--paper-danger); }
+.quality-controls { display: grid; gap: 8px; }
+.qc-row { display: flex; align-items: center; gap: 8px; }
+.qc-label { flex: none; width: 56px; font-size: 12px; color: var(--color-text-secondary); }
+.seg { display: inline-flex; flex: 1; min-width: 0; border: 1px solid var(--color-border); border-radius: 7px; overflow: hidden; background: var(--color-surface); }
+.seg button { flex: 1; min-width: 0; border: none; background: none; padding: 5px 6px; font-size: 12px; color: var(--color-text-secondary); cursor: pointer; white-space: nowrap; }
+.seg button + button { border-inline-start: 1px solid var(--color-border); }
+.seg button.active { background: var(--paper-accent-tint); color: var(--paper-accent); font-weight: 600; }
+.seg button:focus-visible { outline: 2px solid var(--paper-accent); outline-offset: -2px; }
+.quality-panel .report-box { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--color-border); }
+.quality-panel summary:focus-visible { outline: 2px solid var(--paper-accent); outline-offset: 2px; }
+.quality-panel .report-box input { max-width: 100%; }
 .quality-radar { margin: 0; padding-block: 10px; border-block: 1px solid var(--color-border); }
-.quality-radar figcaption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; font-size: 12px; }
-.quality-radar figcaption span, .radar-index { color: var(--color-text-secondary); }
-.radar-content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(104px, 1fr); align-items: center; gap: 6px 10px; }
-.radar-plot { width: 100%; max-width: 180px; }
-.radar-grid { fill: none; stroke: var(--paper-line-strong); stroke-width: 1; }
-.radar-mark { fill: var(--paper-accent-tint); stroke: var(--paper-accent); stroke-width: 2; stroke-linejoin: round; }
-.radar-dot { fill: var(--paper-accent); stroke: var(--color-surface); stroke-width: 1; }
-.radar-number { fill: var(--color-text-secondary); font: 11px sans-serif; text-anchor: middle; dominant-baseline: central; }
-.radar-hit { fill: transparent; pointer-events: all; }
-.radar-scores { grid-column: 2; width: 100%; font-size: 12px; border-spacing: 0 4px; }
-.radar-scores:first-child { grid-column: 1 / -1; }
-.radar-scores th { font-weight: 400; text-align: start; overflow-wrap: anywhere; }
-.radar-scores td { padding-inline-start: 5px; text-align: end; font-variant-numeric: tabular-nums; }
+.quality-radar figcaption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; font-size: 12px; margin-bottom: 2px; }
+.quality-radar figcaption span { color: var(--color-text-secondary); }
+.radar-legend { list-style: none; margin: 6px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(82px, 1fr)); gap: 6px; }
+.radar-legend li { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-surface); }
+.radar-legend-label { font-size: 11px; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+.radar-legend-score { font-size: 16px; font-weight: 600; color: var(--paper-accent); font-variant-numeric: tabular-nums; line-height: 1.2; }
 .quality-head div { display: flex; flex-direction: column; gap: 2px; }
 .quality-head span { color: var(--color-text-tertiary); }
 
@@ -1791,6 +1825,8 @@ onBeforeUnmount(() => {
 .badge.pass { color: var(--paper-success); }
 .badge.kept { color: var(--color-text-tertiary); }
 .badge.unsaved { color: var(--color-warning); }
+.block-reasons { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.block-reasons li { padding: 2px 8px; border-radius: 999px; font-size: 11px; color: var(--paper-ink-soft); background: var(--paper-warning-soft); border: 1px solid var(--paper-warning-line); }
 .hint { margin: 0; font-size: 11px; color: var(--color-text-tertiary); line-height: 1.6; }
 .empty { font-size: 12px; color: var(--color-text-tertiary); }
 .sheet-loading { font-size: 13px; color: var(--color-text-tertiary); }

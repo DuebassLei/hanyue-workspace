@@ -1985,6 +1985,13 @@ class StudioScheduleIn(CamelModel):
     at: datetime | None = None
 
 
+class StudioDetectIn(CamelModel):
+    """质检检测。blockIds 只检指定段落（缺省=全文）；source 缺省=自动。"""
+
+    block_ids: list[str] | None = None
+    source: str | None = None
+
+
 class StudioSettingsIn(CamelModel):
     """朱雀质检凭据。key 为空表示不配置，检测自动降级为本地启发式。"""
 

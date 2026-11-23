@@ -694,49 +694,111 @@ class StudioPipeline:
 
     # ---- 质检：API / 报告 / 本地兜底 ----
 
-    def detect(self, article_id: str, *, key: str | None, endpoint: str | None, fixed_lines: list[str] | None = None) -> dict:
+    def detect(
+        self,
+        article_id: str,
+        *,
+        key: str | None,
+        endpoint: str | None,
+        fixed_lines: list[str] | None = None,
+        block_ids: list[str] | None = None,
+        source_pref: str = "auto",
+    ) -> dict:
         return self.jobs.start(
-            article_id, "report", "朱雀检测", lambda job: self._detect(article_id, job, key, endpoint, fixed_lines or [])
+            article_id,
+            "report",
+            "朱雀检测",
+            lambda job: self._detect(article_id, job, key, endpoint, fixed_lines or [], block_ids or [], source_pref),
         )
 
-    def detect_now(self, article_id: str, *, key: str | None, endpoint: str | None, fixed_lines: list[str] | None = None) -> None:
+    def detect_now(
+        self,
+        article_id: str,
+        *,
+        key: str | None,
+        endpoint: str | None,
+        fixed_lines: list[str] | None = None,
+        block_ids: list[str] | None = None,
+        source_pref: str = "auto",
+    ) -> None:
         self.jobs.run_now(
-            "report", "朱雀检测", lambda job: self._detect(article_id, job, key, endpoint, fixed_lines or [])
+            "report",
+            "朱雀检测",
+            lambda job: self._detect(article_id, job, key, endpoint, fixed_lines or [], block_ids or [], source_pref),
         )
 
-    async def _detect(self, article_id: str, job: dict, key: str | None, endpoint: str | None, fixed_lines: list[str]) -> None:
+    async def _detect(
+        self,
+        article_id: str,
+        job: dict,
+        key: str | None,
+        endpoint: str | None,
+        fixed_lines: list[str],
+        block_ids: list[str],
+        source_pref: str,
+    ) -> None:
         with SessionLocal() as db:
             row = _session_article(db, article_id)
             data = studio_repo.row_to_dict(row)
 
         found = None
         reason = "未配置朱雀 API Key"
-        if key:
-            text = _detection_text(AB.to_markdown(data), fixed_lines)
+        # 只有「自动且有 key」或「明确选朱雀」才尝试调朱雀；强制本地直接跳过
+        want_zhuque = source_pref == "zhuque" or (source_pref == "auto" and bool(key))
+        if want_zhuque and key:
+            scope_preview = _resolve_scope(data["blocks"], block_ids)
+            if scope_preview is not None:
+                sub = {**data, "blocks": [b for i, b in enumerate(data["blocks"]) if i in scope_preview]}
+                markdown = AB.to_markdown(sub)
+            else:
+                markdown = AB.to_markdown(data)
+            text = _detection_text(markdown, fixed_lines)
             try:
                 found = await AQ.detect(text, key=key, endpoint=endpoint)
             except AQ.QualityError as exc:
-                if exc.status != 502:
+                # 选了朱雀就一律兜底本地；自动模式只在 502 时兜底，其它错误照常抛出
+                if source_pref == "zhuque":
+                    reason = str(exc) or "朱雀接口不可用"
+                elif exc.status != 502:
                     raise
-                reason = "朱雀接口暂不可用"
+                else:
+                    reason = "朱雀接口暂不可用"
+        elif source_pref == "zhuque":
+            reason = "未配置朱雀 API Key"
 
         with SessionLocal() as db:
             row = _session_article(db, article_id)
             latest = studio_repo.row_to_dict(row)
-            covered = set()
+            scope = _resolve_scope(latest["blocks"], block_ids)
+            covered: set[int] = set()
+            segments: list[dict] = []
             if found is not None:
-                segments, covered = AQ.map_segments(latest["blocks"], found["segments"])
+                if scope is not None:
+                    ordered = sorted(scope)
+                    sub_blocks = [latest["blocks"][i] for i in ordered]
+                    sub_segments, sub_covered = AQ.map_segments(sub_blocks, found["segments"])
+                    for seg in sub_segments:
+                        number = seg.get("block")
+                        if isinstance(number, int) and 1 <= number <= len(ordered):
+                            seg = dict(seg)
+                            seg["block"] = ordered[number - 1] + 1
+                        segments.append(seg)
+                    covered = {ordered[n] for n in sub_covered if isinstance(n, int) and 0 <= n < len(ordered)}
+                else:
+                    segments, covered = AQ.map_segments(latest["blocks"], found["segments"])
                 reason = "朱雀未返回可对齐的检测结果"
+            scope_note = f"（仅检测 {len(scope)} 段）" if scope else ""
             if covered:
                 parsed = {"segments": segments, "covered": covered, "overall": found.get("overall")}
-                summary = AQ.mark_blocks(latest, parsed, "api")
+                summary = AQ.mark_blocks(latest, parsed, "api", scope)
                 extra = f"本次用了 {found['tokens']} token。" if found.get("tokens") is not None else ""
+                extra += scope_note
             else:
-                result = AQ.local_check(latest)
-                summary = AQ.mark_blocks(latest, result, AQ.LOCAL_SOURCE)
+                result = AQ.local_check(latest, scope)
+                summary = AQ.mark_blocks(latest, result, AQ.LOCAL_SOURCE, scope)
                 latest["zhuque"]["dimensions"] = result["dimensions"]
-                latest["zhuque"]["note"] = f"{reason}，本次为本地规则打分，不能与朱雀结论直接比较"
-                extra = f"（{reason}，使用本地规则）"
+                latest["zhuque"]["note"] = f"{reason}，本次为本地规则打分，不能与朱雀结论直接比较{scope_note}"
+                extra = f"（{reason}，使用本地规则）{scope_note}"
             latest["notice"] = {
                 "text": _round_notice(summary, latest["zhuque"]["round"], extra),
                 "at": latest["zhuque"]["lastAt"],
@@ -846,6 +908,17 @@ def _check_banner(spec: dict) -> list[str]:
         return wechat_layout_engine.check_banner(copy.deepcopy(spec), [wechat_layout_engine.build_banner(copy.deepcopy(spec))])
     except Exception as exc:  # noqa: BLE001 - 画不出来本身就是一条问题
         return [f"规格画不出来：{type(exc).__name__}: {exc}"]
+
+
+def _resolve_scope(blocks: list[dict], block_ids: list[str] | None) -> set[int] | None:
+    """把前端传来的段落 id 列表解析成原文下标集合；空列表/None 表示全文。
+
+    只保留可检段落（正文/引用/列表），无效或已删的 id 直接忽略。
+    """
+    if not block_ids:
+        return None
+    wanted = set(block_ids)
+    return {i for i, block in enumerate(blocks) if block.get("id") in wanted and AB.is_checkable(block.get("text"))}
 
 
 def _round_notice(summary: dict, round_no: int, extra: str = "") -> str:

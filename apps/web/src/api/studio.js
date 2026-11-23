@@ -38,7 +38,8 @@ export const studioApi = {
   stop: (id) => api.post(`${base(id)}/job/stop`, {}),
   banner: (id, style) => api.post(`${base(id)}/banner`, { style }),
 
-  detect: (id) => api.post(`${base(id)}/zhuque/detect`, {}),
+  // body: { blockIds?: string[], source?: 'auto'|'zhuque'|'local' }，缺省=全文+自动
+  detect: (id, body) => api.post(`${base(id)}/zhuque/detect`, body || {}),
   schedule: (id, at) => api.post(`${base(id)}/schedule`, { at }),
   saveLayout: (id, options) => api.post(`${base(id)}/layout/preferences`, options),
   clearNotice: (id) => api.post(`${base(id)}/notice/clear`, {}),

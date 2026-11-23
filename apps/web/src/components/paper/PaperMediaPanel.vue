@@ -20,9 +20,16 @@ const props = defineProps({
   selectedBlockId: { type: String, default: '' },
   // 正文里多选的素材段落（SVG 卡按这些段合并生成）
   sourceBlockIds: { type: Array, default: () => [] },
+  sourcePickMode: Boolean,
   busy: { type: String, default: '' },
 })
-const emit = defineEmits(['saved', 'notify', 'pick-in-paper', 'select-block'])
+const emit = defineEmits(['saved', 'notify', 'pick-in-paper', 'clear-pick', 'finish-pick', 'select-block'])
+const section = defineModel('section', { type: String, required: true })
+const sections = [
+  { key: 'cover', label: '封面' },
+  { key: 'inline', label: '正文插图' },
+  { key: 'svg', label: 'SVG 卡' },
+]
 
 const ASPECTS = ['2.35:1', '16:9', '4:3', '1:1', '3:4', '9:16']
 const capabilities = ref(null)
@@ -275,7 +282,7 @@ const removeInline = (item) =>
 const makeSvgCard = (kind, blockIds) =>
   run(
     'svg',
-    () => studioExtraApi.svgCard(props.article.id, props.selectedBlockId, kind, blockIds),
+    () => studioExtraApi.svgCard(props.article.id, blockIds[0], kind, blockIds),
     blockIds?.length > 1 ? 'SVG 卡已生成，插在所选最后一处段落之后' : 'SVG 卡已插入该段之后',
   )
 
@@ -351,17 +358,20 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="media-panel" aria-label="封面与插图">
-    <header class="panel-head">
-      <span>封面 · 插图</span>
-      <span class="panel-note">{{ runningInline || coverStatus === 'running' ? '生成中…' : '自动刷新' }}</span>
-    </header>
+  <section class="media-panel" aria-label="稿件素材">
 
     <p v-if="error" class="panel-error" role="alert">{{ error }}</p>
     <p v-if="!article" class="panel-empty">左侧选一篇稿件。</p>
 
     <template v-else>
-      <section class="block-section">
+      <fieldset class="media-switcher" aria-label="素材类型">
+        <label v-for="item in sections" :key="item.key" class="media-option">
+          <input v-model="section" type="radio" name="paper-media-section" :value="item.key" :aria-controls="`paper-media-${item.key}`" />
+          <span>{{ item.label }}<i v-if="(item.key === 'cover' && coverStatus === 'running') || (item.key === 'inline' && runningInline) || (item.key === 'svg' && isAction('svg'))" aria-label="生成中" class="running-dot" /></span>
+        </label>
+      </fieldset>
+
+      <section v-show="section === 'cover'" id="paper-media-cover" class="block-section" aria-label="封面">
         <div class="setting-head">
           <h3>封面</h3>
           <span class="state" :class="coverStatus">{{ statusLabel[coverStatus] || coverStatus }}</span>
@@ -383,14 +393,14 @@ onBeforeUnmount(() => {
           <NButton size="tiny" :disabled="busyAction" :loading="isAction('cover-pick')" @click="assetPicker = 'cover'">
             从素材图库选
           </NButton>
-          <NButton v-if="coverImage" size="tiny" :disabled="busyAction || !capabilities?.ratios?.includes(coverRatio)" :loading="isAction('cover')" @click="generateCover">
-            换一张
-          </NButton>
           <NButton v-if="coverImage" size="tiny" :disabled="busyAction" :loading="isAction('cover-remove')" @click="removeCover">
             移除
           </NButton>
         </div>
 
+        <details class="media-tools">
+          <summary>封面提示词{{ coverPrompt ? ' · 已填写' : '（可选）' }}</summary>
+          <div class="tools-body">
         <NSelect :value="null" size="small" filterable :options="coverPromptOptions" placeholder="从提示词库选择封面模板" @update:value="(value) => applyPrompt(value, 'cover')" />
         <p v-if="promptError" class="hint strong">{{ promptError }}</p>
         <label class="field">
@@ -423,8 +433,10 @@ onBeforeUnmount(() => {
             </button>
           </li>
         </ul>
+          </div>
+        </details>
         <NSelect v-model:value="coverStyle" size="small" :options="styles" aria-label="封面风格" />
-        <p class="hint">{{ capabilityError || (capabilities?.ratios?.length ? '默认比例不可用时，请选择列表中已确认的比例。' : '当前模型没有已登记的精确比例，请在模型管理编辑默认生图模型并登记供应商支持的尺寸后重新打开；环境变量供应商无法登记，请改选已配置的默认模型。') }}</p>
+        <p v-if="capabilityError || (capabilities && !capabilities.ratios?.includes(coverRatio))" class="hint strong">{{ capabilityError || (capabilities.ratios?.length ? '请选择模型支持的比例。' : '请在模型管理为默认生图模型配置支持的尺寸。') }}</p>
         <div class="row">
           <NSelect
             :value="coverRatio"
@@ -447,9 +459,9 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="block-section">
+      <section v-show="section === 'inline'" id="paper-media-inline" class="block-section" aria-label="正文插图">
         <div class="setting-head">
-          <h3>正文插图</h3>
+          <h3>插图目标</h3>
           <span class="state" :class="runningInline ? 'running' : inlineItems.length ? 'ready' : 'idle'">
             {{ runningInline ? `${runningInline} 张生成中` : `${inlineItems.length} 张` }}
           </span>
@@ -460,6 +472,9 @@ onBeforeUnmount(() => {
           目标段落 <b>第 {{ blockIndex(selectedBlockId) }} 段</b>：{{ selectedExcerpt || '（空段落）' }}
         </p>
 
+        <details class="media-tools">
+          <summary>提示词模板与 AI 配图建议</summary>
+          <div class="tools-body">
         <div class="row">
           <NButton
             size="small"
@@ -492,8 +507,10 @@ onBeforeUnmount(() => {
 
         <NSelect :value="null" size="small" filterable :options="inlinePromptOptions" placeholder="从提示词库选择插图模板" @update:value="(value) => applyPrompt(value, 'inline')" />
         <p v-if="promptError" class="hint strong">{{ promptError }}</p>
+          </div>
+        </details>
         <label class="field">
-          <span>画面描述（选择后可修改，不影响提示词库）</span>
+          <span>画面描述</span>
           <NInput
             :value="inlinePrompt"
             size="small"
@@ -505,7 +522,7 @@ onBeforeUnmount(() => {
           />
         </label>
         <NSelect v-model:value="inlineStyle" size="small" :options="styles" aria-label="插图风格" />
-        <p class="hint">{{ capabilityError || (capabilities?.ratios?.length ? '默认比例不可用时，请选择列表中已确认的比例。' : '当前模型没有已登记的精确比例，请在模型管理编辑默认生图模型并登记供应商支持的尺寸后重新打开；环境变量供应商无法登记，请改选已配置的默认模型。') }}</p>
+        <p v-if="capabilityError || (capabilities && !capabilities.ratios?.includes(inlineRatio))" class="hint strong">{{ capabilityError || (capabilities.ratios?.length ? '请选择模型支持的比例。' : '请在模型管理为默认生图模型配置支持的尺寸。') }}</p>
         <div class="row">
           <NSelect
             :value="inlineRatio"
@@ -561,14 +578,18 @@ onBeforeUnmount(() => {
       </section>
 
       <PaperSvgCardPicker
+        v-show="section === 'svg'"
+        id="paper-media-svg"
         :catalog="catalog"
-        :selected-block-id="selectedBlockId"
         :selected-block-ids="sourceBlockIds"
+        :picking="sourcePickMode"
         :blocks="blocks"
         :busy="busyAction"
         :loading="isAction('svg')"
         @confirm="makeSvgCard"
         @pick-in-paper="emit('pick-in-paper')"
+        @clear-pick="emit('clear-pick')"
+        @finish-pick="emit('finish-pick')"
       />
 
       <PaperAssetPicker
@@ -603,14 +624,41 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   background: var(--color-surface);
 }
-.panel-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  font-size: 13px;
-  font-weight: 600;
+.media-switcher {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-muted);
 }
-.panel-note { font-size: 11px; font-weight: 400; color: var(--color-text-tertiary); }
+.media-option { position: relative; cursor: pointer; }
+.media-option input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.media-option span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 0 3px;
+  border-radius: 5px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+.media-option input:checked + span {
+  background: var(--paper-accent-tint);
+  color: var(--color-text-primary);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--paper-accent);
+}
+.media-option input:focus-visible + span { outline: 2px solid var(--paper-accent); outline-offset: 2px; }
+.running-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--paper-warning); }
+.media-tools { font-size: 12px; }
+.media-tools summary { padding: 5px 0; cursor: pointer; color: var(--color-text-secondary); }
+.tools-body { display: grid; gap: 8px; padding-top: 4px; }
 .block-section {
   display: flex;
   flex-direction: column;

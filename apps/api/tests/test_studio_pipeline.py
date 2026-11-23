@@ -170,8 +170,49 @@ def test_local_detect_marks_blocks_without_key(client):
     assert all(set(axis) == {"id", "label", "score"} and axis["label"] for axis in dimensions)
     assert all(0 <= axis["score"] <= 100 for axis in dimensions)
     scores = {axis["id"]: axis["score"] for axis in dimensions}
-    assert len(scores) == len(dimensions) == 3
-    assert scores["structure"] < scores["sentence_rhythm"] == 100
+    assert list(scores) == ["wording", "structure", "sentence_rhythm", "transitions", "specificity", "redundancy"]
+    assert scores["transitions"] < scores["redundancy"] == 100
+    assert data["zhuque"]["overall"] is None
+    assert any((block.get("check") or {}).get("hits") for block in data["blocks"])
+
+
+@pytest.mark.parametrize(("text", "axis"), [
+    ("这个方案赋能业务、构建生态闭环，还要沉淀最佳实践。", "wording"),
+    ("我们把设备搬到二楼。我们把电源接进机柜。我们把线缆藏到桌下。", "structure"),
+    ("设备重启了。" + "我沿着楼梯检查每个机柜的接线" * 7 + "！", "sentence_rhythm"),
+    ("值得注意的是，灯亮了。更重要的是，楼下停电了。", "transitions"),
+    ("这件事本身具有重要意义。它一直发挥着重要作用。", "specificity"),
+    ("下午三点我把损坏的电表换了。下午三点我把损坏的电表换了。", "redundancy"),
+])
+def test_local_quality_penalizes_each_dimension(text, axis):
+    from app.services.article_quality import local_check
+
+    result = local_check({"blocks": [{"text": text}]})
+    scores = {dimension["id"]: dimension["score"] for dimension in result["dimensions"]}
+    assert scores[axis] < 100
+    assert all(0 <= score <= 100 for score in scores.values())
+
+
+def test_local_quality_passes_ordinary_lists_and_single_contrast():
+    from app.services.article_quality import local_check
+
+    result = local_check({"blocks": [
+        {"text": "- 核对三张发票的金额\n- 检查二楼机房的温度\n- 把两台机器搬到库房"},
+        {"text": "首先，先检查左侧的电源。问题不是设备坏了，而是插头没插牢。"},
+    ]})
+    assert not result["segments"]
+
+
+def test_local_quality_duplicate_detection_stays_inside_scope():
+    from app.services.article_quality import local_check
+
+    sentence = "下午三点我把损坏的电表换了。"
+    article = {"blocks": [{"text": sentence + "旧表已经交给库管。"}, {"text": sentence + "新表读数为零。"}]}
+    full = local_check(article)
+    scoped = local_check(article, {1})
+    assert full["dimensions"][-1]["score"] < scoped["dimensions"][-1]["score"] == 100
+    assert [row["block"] for row in full["segments"]] == [2]
+    assert scoped["segments"] == []
 
 
 def test_detect_falls_back_when_zhuque_times_out(client, monkeypatch):
@@ -242,6 +283,97 @@ def test_detect_uses_only_usable_zhuque_results(client, monkeypatch, reply):
         assert data["blocks"][0]["check"]["status"] == "flag"
         assert "本地规则" in data["notice"]["text"]
     assert "private provider diagnostics" not in response.text
+
+
+def test_detect_scope_only_rechecks_selected_blocks(client):
+    from app.core.db import SessionLocal
+    from app import models
+    from app.services import studio_pipeline as SP, studio_repo
+
+    headers, article = _client_with_article(client, "studio-detect-scope")
+    SP.PIPELINE.detect_now(article["id"], key=None, endpoint=None)
+    with SessionLocal() as db:
+        data = studio_repo.row_to_dict(db.get(models.StudioArticle, article["id"]))
+    assert data["zhuque"]["round"] == 1
+    before = {block["id"]: block.get("check") for block in data["blocks"]}
+
+    # 只重检第一段；其余可检段落应保留上一轮结论，文章级计数仍按整篇重算
+    SP.PIPELINE.detect_now(article["id"], key=None, endpoint=None, block_ids=[article["blocks"][0]["id"]], source_pref="local")
+    with SessionLocal() as db:
+        data = studio_repo.row_to_dict(db.get(models.StudioArticle, article["id"]))
+
+    assert data["zhuque"]["round"] == 2
+    assert data["zhuque"]["source"] == "local"
+    assert "仅检测 1 段" in (data["zhuque"].get("note") or "")
+    assert data["blocks"][0]["check"]["round"] == 2
+    assert data["blocks"][1]["check"] == before[article["blocks"][1]["id"]]
+    assert data["blocks"][3]["check"] == before[article["blocks"][3]["id"]]
+    assert data["blocks"][1]["check"]["round"] == 1
+    assert data["zhuque"]["flagged"] + data["zhuque"]["passed"] == sum(
+        1 for b in data["blocks"] if (b.get("check") or {}).get("status") in ("flag", "pass")
+    )
+
+
+def test_detect_source_local_skips_zhuque_even_with_key(client, monkeypatch):
+    from app.services import article_quality as AQ, studio_pipeline as SP
+
+    headers, article = _client_with_article(client, "studio-detect-force-local")
+    called = {"n": 0}
+
+    async def fake_detect(*args, **kwargs):
+        called["n"] += 1
+        raise AssertionError("朱雀不应被调用")
+
+    monkeypatch.setattr(AQ, "detect", fake_detect)
+    SP.PIPELINE.detect_now(article["id"], key="test-key", endpoint=None, source_pref="local")
+
+    data = client.get(f"/api/v1/studio/articles/{article['id']}", headers=headers).json()
+    assert called["n"] == 0
+    assert data["zhuque"]["source"] == "local"
+    assert "本地规则" in data["zhuque"]["note"]
+
+
+def test_detect_source_zhuque_falls_back_on_any_error(client, monkeypatch):
+    from app.services import article_quality as AQ, studio_pipeline as SP
+
+    headers, article = _client_with_article(client, "studio-detect-zhuque-fallback")
+
+    async def fake_detect(*args, **kwargs):
+        raise AQ.QualityError("朱雀 Key 无效", status=401)
+
+    monkeypatch.setattr(AQ, "detect", fake_detect)
+    # 选了朱雀：401 也兜底本地，不抛错
+    SP.PIPELINE.detect_now(article["id"], key="test-key", endpoint=None, source_pref="zhuque")
+    data = client.get(f"/api/v1/studio/articles/{article['id']}", headers=headers).json()
+    assert data["zhuque"]["source"] == "local"
+    assert data["zhuque"]["round"] == 1
+    assert "本地规则" in data["zhuque"]["note"]
+    assert "朱雀 Key 无效" in data["zhuque"]["note"]
+
+    # 自动模式：非 502 错误照常抛出，不静默兜底
+    with pytest.raises(AQ.QualityError):
+        SP.PIPELINE.detect_now(article["id"], key="test-key", endpoint=None, source_pref="auto")
+
+
+def test_detect_route_parses_scope_and_source_body(client):
+    headers, article = _client_with_article(client, "studio-detect-route-body")
+    # 带 body 不应 422：路由能解析 blockIds / source
+    resp = client.post(
+        f"/api/v1/studio/articles/{article['id']}/zhuque/detect",
+        json={"blockIds": [article["blocks"][0]["id"]], "source": "local"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    # 选中的段落都不可检（小标题）→ 400
+    headers2, other = _client_with_article(client, "studio-detect-route-bad-scope")
+    heading_id = next(b["id"] for b in other["blocks"] if b["kind"] == "heading")
+    bad = client.post(
+        f"/api/v1/studio/articles/{other['id']}/zhuque/detect",
+        json={"blockIds": [heading_id]},
+        headers=headers2,
+    )
+    assert bad.status_code == 400, bad.text
 
 
 def test_detect_does_not_hide_database_error(client, monkeypatch):

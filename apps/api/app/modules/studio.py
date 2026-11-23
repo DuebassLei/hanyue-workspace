@@ -546,17 +546,28 @@ def banner(article_id: str, payload: schemas.StudioBannerIn, db: DbSession, user
 
 
 @router.post("/studio/articles/{article_id}/zhuque/detect", response_model=schemas.StudioArticleOut)
-def zhuque_detect(article_id: str, db: DbSession, user: CurrentUser):
+def zhuque_detect(article_id: str, db: DbSession, user: CurrentUser, payload: schemas.StudioDetectIn | None = None):
     _row, data = _data(db, user, article_id)
     _busy(article_id)
-    if not any(AB.is_checkable(block["text"]) for block in data["blocks"]):
+    block_ids = (payload.block_ids or []) if payload else []
+    if block_ids:
+        wanted = set(block_ids)
+        scope = [i for i, block in enumerate(data["blocks"]) if block.get("id") in wanted and AB.is_checkable(block["text"])]
+        if not scope:
+            raise _fail("选中的段落里没有可检测的正文。", 400)
+    elif not any(AB.is_checkable(block["text"]) for block in data["blocks"]):
         raise _fail("这篇文章还没有可以检测的正文段落。", 400)
+    source = (payload.source or "auto") if payload else "auto"
+    if source not in ("auto", "zhuque", "local"):
+        source = "auto"
     settings = _quality_settings(db)
     SP.PIPELINE.detect(
         article_id,
         key=settings.get("key") or None,
         endpoint=settings.get("endpoint") or None,
         fixed_lines=settings.get("fixedLines") or [],
+        block_ids=block_ids or None,
+        source_pref=source,
     )
     return _out(data)
 
