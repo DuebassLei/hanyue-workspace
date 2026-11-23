@@ -108,11 +108,12 @@ def build_schema() -> str:
     #      幂等的 ADD COLUMN IF NOT EXISTS——可空、不带约束/默认值，与应用
     #      init_db 的补列语义一致；新库上列已存在，均为空操作。
     lines.append("-- ---------- 老库补列（可空、不带约束，与应用 init_db 补列语义一致） ----------\n")
+    preparer = PG_DIALECT.identifier_preparer
     for table in Base.metadata.sorted_tables:
         alters = [
             "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS {c} {ty};".format(
-                t=table.name,
-                c=column.name,
+                t=preparer.quote(table.name),
+                c=preparer.quote(column.name),
                 ty=str(column.type.compile(dialect=PG_DIALECT)),
             )
             for column in table.columns
