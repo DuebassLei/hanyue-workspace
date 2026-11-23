@@ -13,8 +13,9 @@
   - 补充索引（db.py 的 _INDEXES）与两个特殊唯一索引 -> 直接 import db.py 的清单复用，
     因为这些索引不在 metadata 中（当初是纯 SQL 创建的），不带上会导致生成的库与应用不一致。
 
-生成物是**幂等**的（CREATE TABLE/INDEX IF NOT EXISTS + ON CONFLICT DO NOTHING），可在空库直接执行，
-也可在已有库重跑（不会改已有表结构；老库补列仍由应用 init_db 负责）。
+生成物是**幂等**的（CREATE TABLE/INDEX IF NOT EXISTS + ADD COLUMN IF NOT EXISTS +
+ON CONFLICT DO NOTHING），可在空库直接执行，也可在已有库重跑（只补缺失对象；老库
+补列用可空语义，不带约束/默认值，约束差异由应用 init_db 兜底）。
 
 生成物只包含结构，不包含引导账号或固定口令哈希。部署后必须立即运行
 infra/scripts/dev-pg.sh bootstrap（Windows 用 dev-pg.ps1 bootstrap）设置首个账号的
@@ -68,7 +69,8 @@ HEADER = """\
 --   cd apps/api && python scripts/export_pg_schema.py -o ../../infra/postgres/schema.sql --check
 --
 -- 适用：全新数据库一次性建表。幂等（IF NOT EXISTS），已有库重跑只补缺失对象、
---       绝不覆盖已有数据——老库补列仍由应用启动时的 init_db() 负责。
+--       绝不覆盖已有数据；补列段用 ADD COLUMN IF NOT EXISTS 为老库补齐模型新增列
+--       （可空、不带约束/默认值，约束差异仍由应用启动时的 init_db() 兜底）。
 -- 部署后必须立即运行 bootstrap 设置独立强密码，见 docs/setup.md；本文件不播种账号。
 -- 说明：本脚本按「当前模型的理想全新库」建表，个别列会比渐进迁移的老库更严格
 --       （如新列是 NOT NULL，而老库经 ALTER TABLE ADD COLUMN 补列时为可空）——这是
@@ -98,6 +100,25 @@ def build_schema() -> str:
     for table in Base.metadata.sorted_tables:
         lines.append(f"-- {table.name}")
         lines.append(_stmt(CreateTable(table, if_not_exists=True)))
+        lines.append("")
+
+    # 1.5) 老库补列：CREATE TABLE IF NOT EXISTS 对已存在的表是空操作，老库建表
+    #      之后模型新增的列不会补上；索引段又引用这些列，ON_ERROR_STOP 下会因
+    #      列缺失直接失败（如 scheduled_tasks.active_job_id）。这里为每列生成
+    #      幂等的 ADD COLUMN IF NOT EXISTS——可空、不带约束/默认值，与应用
+    #      init_db 的补列语义一致；新库上列已存在，均为空操作。
+    lines.append("-- ---------- 老库补列（可空、不带约束，与应用 init_db 补列语义一致） ----------\n")
+    for table in Base.metadata.sorted_tables:
+        alters = [
+            "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS {c} {ty};".format(
+                t=table.name,
+                c=column.name,
+                ty=str(column.type.compile(dialect=PG_DIALECT)),
+            )
+            for column in table.columns
+        ]
+        lines.append(f"-- {table.name}")
+        lines.extend(alters)
         lines.append("")
 
     # 2) 模型内定义的索引（表级 Index，不在 CreateTable 输出里）
