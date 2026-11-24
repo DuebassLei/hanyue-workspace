@@ -6,6 +6,26 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import json
+
+from sqlalchemy import select
+from .. import models
+
+
+def lock_project(db, project_id):
+    """Serialize cooperating novel writers on PostgreSQL until transaction ends."""
+    return db.scalars(select(models.NovelProject).where(models.NovelProject.id == project_id).with_for_update().execution_options(populate_existing=True)).first()
+
+
+def context_snapshot(db, project_id, target_order):
+    db.expire_all()
+    project = db.get(models.NovelProject, project_id)
+    chapters = db.scalars(select(models.NovelChapter).where(models.NovelChapter.project_id == project_id, models.NovelChapter.sort_order < target_order).order_by(models.NovelChapter.sort_order, models.NovelChapter.id)).all()
+    characters = db.scalars(select(models.NovelCharacter).where(models.NovelCharacter.project_id == project_id).order_by(models.NovelCharacter.id)).all()
+    aliases = db.scalars(select(models.NovelAlias).where(models.NovelAlias.project_id == project_id).order_by(models.NovelAlias.id)).all()
+    value = [project.rules, [(c.id, c.sort_order, c.title, c.status, c.stale, c.accepted_text, c.facts) for c in chapters], [(c.id, c.original_name, c.new_name, c.relations, c.speech_style, c.state) for c in characters], [(a.id, a.kind, a.original_name, a.new_name) for a in aliases]]
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
 
 _MIN_NAME = 2
 _DEATH_MARKERS = ("死", "离场")
@@ -20,19 +40,18 @@ def _rule(rules: dict | None, key: str) -> str:
 
 def _facts(raw) -> dict:
     data = raw if isinstance(raw, dict) else {}
-    return {
-        "characterChanges": list(data.get("characterChanges") or []),
-        "itemHoldings": list(data.get("itemHoldings") or []),
-        "events": list(data.get("events") or []),
-        "openHooks": list(data.get("openHooks") or []),
-    }
+    result = {}
+    for key in ('characterChanges', 'itemHoldings', 'events', 'openHooks'):
+        value = data.get(key)
+        result[key] = value if isinstance(value, list) else ([] if value is None else [value])
+    return result
 
 
 def _as_text(item) -> str:
     if isinstance(item, str):
         return item.strip()
     if isinstance(item, dict):
-        return str(item.get("text") or item.get("name") or "").strip()
+        return str(item.get("text") or item.get("name") or json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)).strip()
     return str(item or "").strip()
 
 
@@ -48,9 +67,9 @@ def _shown_name(character) -> str:
 
 def build_continue_prompt(accepted_chapters, previous_text: str, characters, aliases, rules) -> str:
     """只收已接受章的 facts、上一章正文、人物、别名和写作规则。"""
-    person = _rule(rules, "person")
-    style = _rule(rules, "style")
-    banned = _rule(rules, "banned")
+    person = _rule(rules, "person")[:500]
+    style = _rule(rules, "style")[:500]
+    banned = _rule(rules, "banned")[:500]
     lines = [
         "你在续写下一章小说。只输出正文，不要标题，不要解释。",
         "只能依据下面已经接受的事实和上一章正文往下写。",
@@ -61,7 +80,7 @@ def build_continue_prompt(accepted_chapters, previous_text: str, characters, ali
     ]
 
     fact_lines = []
-    ordered = sorted(accepted_chapters or [], key=lambda row: int(getattr(row, "sort_order", 0) or 0))
+    ordered = sorted((row for row in accepted_chapters or [] if getattr(row, 'status', 'accepted') == 'accepted' and not getattr(row, 'stale', False)), key=lambda row: int(getattr(row, "sort_order", 0) or 0))
     for chapter in ordered:
         facts = _facts(getattr(chapter, "facts", None))
         title = str(getattr(chapter, "title", "") or "").strip() or f"第 {getattr(chapter, 'sort_order', 0)} 章"
@@ -76,8 +95,17 @@ def build_continue_prompt(accepted_chapters, previous_text: str, characters, ali
             values = [item for item in values if item]
             if values:
                 bits.append(f"{label}：" + "；".join(values))
-        if bits:
-            fact_lines.append(f"- {title}：" + " ".join(bits))
+        if not bits:
+            bits.append('正文片段：' + str(getattr(chapter, 'accepted_text', '') or '')[:200])
+        fact_lines.append(f"- {title} [章节 {getattr(chapter, 'id', getattr(chapter, 'sort_order', 0))}]：" + " ".join(bits)[:600])
+    budget = 6000
+    retained = []
+    for line in reversed(fact_lines):
+        if budget <= 0:
+            break
+        retained.append(line[:budget])
+        budget -= len(retained[-1]) + 1
+    fact_lines = list(reversed(retained))
     lines.append("已接受章节的事实：")
     lines.append("\n".join(fact_lines) if fact_lines else "- （无）")
 
@@ -96,10 +124,11 @@ def build_continue_prompt(accepted_chapters, previous_text: str, characters, ali
         if not original and not new_name:
             continue
         shown = new_name or original
-        extra = "、".join(part for part in (relations, state) if part)
+        speech = str(character.get('speech_style') or character.get('speechStyle') or '') if isinstance(character, dict) else str(getattr(character, 'speech_style', '') or '')
+        extra = "、".join(part for part in (relations, state, speech) if part)
         character_lines.append(f"- {original or shown}（文中用 {shown}）" + (f"：{extra}" if extra else ""))
     lines.append("人物表：")
-    lines.append("\n".join(character_lines) if character_lines else "- （无）")
+    lines.append(("\n".join(character_lines)[:2000]) if character_lines else "- （无）")
 
     alias_lines = []
     for alias in aliases or []:
@@ -118,10 +147,10 @@ def build_continue_prompt(accepted_chapters, previous_text: str, characters, ali
         else:
             alias_lines.append(f"- {original}：该名称保持原名（{kind}）")
     lines.append("别名表：")
-    lines.append("\n".join(alias_lines) if alias_lines else "- （无）")
+    lines.append(("\n".join(alias_lines)[:1000]) if alias_lines else "- （无）")
 
     lines.append("上一章已接受正文：")
-    lines.append(str(previous_text or ""))
+    lines.append(str(previous_text or "")[-4000:])
     return "\n".join(lines)
 
 

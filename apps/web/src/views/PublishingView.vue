@@ -3,27 +3,27 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import {
   NAlert,
   NButton,
-  NCheckbox,
-  NDatePicker,
   NForm,
   NFormItem,
   NInput,
-  NModal,
   NSelect,
   NSpace,
-  NEmpty,
   NTab,
   NTabs,
-  NTag,
 } from 'naive-ui'
 import { api } from '../api/client'
-import StatusTag from '../components/StatusTag.vue'
+import { useRouter } from 'vue-router'
+import JobRow from '../features/publish/queue/JobRow.vue'
+import { canRetry as canRetryDraft } from '../features/publish/queue/jobActions'
+import { useJobsPolling } from '../features/publish/queue/useJobsPolling'
+import { isManualRecord } from '../features/publish/queue/draftQueue'
 import PlatformCard from '../features/publish/accounts/PlatformCard.vue'
 import { usePermission } from '../composables/usePermission'
 import { confirm, toast } from '../ui/feedback'
 
 // 页面只要 publishing.view（能看记录）；真正会推到公众号的动作判 publishing.use。
 // 只读用户看到的是完整队列 + 一行说明，而不是一个点进去就 403 的入口。
+const router = useRouter()
 const { can, disabledReason } = usePermission()
 const canPublish = computed(() => can('publishing.use'))
 const publishDenied = computed(() => disabledReason('publishing.use', '发布管理'))
@@ -42,9 +42,10 @@ const queueSearch = ref('')
 
 const queueStatusOptions = [
   { value: 'all', label: '全部' },
-  { value: 'queued', label: '排队中' },
-  { value: 'publishing', label: '发布中' },
-  { value: 'succeeded', label: '成功' },
+  { value: 'queued', label: '待推送' },
+  { value: 'publishing', label: '推送中' },
+  { value: 'succeeded', label: '推送成功' },
+  { value: 'needs_attention', label: '需核实' },
   { value: 'failed', label: '失败' },
   { value: 'cancelled', label: '已取消' },
 ]
@@ -80,10 +81,6 @@ const accountSelectOptions = computed(() =>
     .map((account) => ({ value: account.id, label: `${account.platformLabel} · ${account.displayName}` })),
 )
 
-const contentSelectOptions = computed(() =>
-  contents.value.map((item) => ({ value: item.id, label: item.title })),
-)
-
 const filteredJobs = computed(() => {
   const keyword = queueSearch.value.trim().toLowerCase()
   return jobs.value.filter((job) => {
@@ -98,7 +95,7 @@ const filteredJobs = computed(() => {
 const queueSummary = computed(() => ({
   total: jobs.value.length,
   active: jobs.value.filter((job) => ['queued', 'publishing', 'approved'].includes(job.status)).length,
-  succeeded: jobs.value.filter((job) => job.status === 'succeeded').length,
+  succeeded: jobs.value.filter((job) => job.status === 'succeeded' && job.remoteContentId && !isManualRecord(job)).length,
   attention: jobs.value.filter((job) => ['failed', 'needs_attention'].includes(job.status)).length,
 }))
 
@@ -106,43 +103,7 @@ function jobAccountLabel(job) {
   return accounts.value.find((account) => account.id === job.accountId)?.displayName || '未知账号'
 }
 
-function jobTargetLabel(job) {
-  return job.target === 'draft' ? '草稿箱' : '平台发布'
-}
-
 const activeTab = ref('queue')
-
-const showPublish = ref(false)
-const publishForm = reactive({
-  accountId: null,
-  contentId: null,
-  title: '',
-  body: '',
-  scheduledAt: '',
-  variantId: '',
-  mode: 'manual',
-})
-const contents = ref([])
-const selectedArticle = ref(null)
-const articleLoading = ref(false)
-const manualEntry = ref(false)
-const idempotencyKey = ref('')
-const previewResult = ref(null)
-const publishError = ref('')
-
-const accountOptions = accountSelectOptions
-
-// n-date-picker 用时间戳；提交时再转回 ISO，和原来 datetime-local 的契约一致
-const scheduledAtTs = computed({
-  get: () => {
-    if (!publishForm.scheduledAt) return null
-    const ts = new Date(publishForm.scheduledAt).getTime()
-    return Number.isNaN(ts) ? null : ts
-  },
-  set: (value) => {
-    publishForm.scheduledAt = value ? new Date(value).toISOString() : ''
-  },
-})
 
 async function load(options = {}) {
   const queueOnly = options.queueOnly === true
@@ -150,12 +111,11 @@ async function load(options = {}) {
   else loading.value = true
   error.value = ''
   try {
-    const [caps, accs, jobList, conns, contentList] = await Promise.all([
+    const [caps, accs, jobList, conns] = await Promise.all([
       api.get('/platforms/capabilities'),
       api.get('/platform-accounts'),
       api.get('/publishing/jobs'),
       api.get('/platforms/connectors/status'),
-      api.get('/content'),
     ])
     capabilities.value = caps.platforms
     if (!activePlatform.value || !caps.platforms.some((platform) => platform.platform === activePlatform.value)) {
@@ -163,8 +123,8 @@ async function load(options = {}) {
     }
     accounts.value = accs
     jobs.value = jobList
+    polling.updateJobs(jobList)
     connectorStatuses.value = Object.fromEntries(conns.platforms.map((s) => [s.platform, s]))
-    contents.value = contentList
   } catch (err) {
     error.value = err.message
   } finally {
@@ -172,6 +132,11 @@ async function load(options = {}) {
     else loading.value = false
   }
 }
+
+const polling = useJobsPolling(async () => {
+  await load({ queueOnly: true })
+  return !error.value
+}, 5000)
 
 async function refreshQueue() {
   await load({ queueOnly: true })
@@ -241,41 +206,7 @@ async function unbind(account) {
 }
 
 function openPublish() {
-  publishForm.accountId = accountOptions.value[0]?.value || null
-  publishForm.contentId = null
-  publishForm.title = ''
-  publishForm.body = ''
-  publishForm.scheduledAt = ''
-  publishForm.variantId = ''
-  publishForm.mode = 'manual'
-  selectedArticle.value = null
-  manualEntry.value = false
-  previewResult.value = null
-  publishError.value = ''
-  idempotencyKey.value = `pub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  showPublish.value = true
-}
-
-async function onSelectArticle() {
-  selectedArticle.value = null
-  publishForm.title = ''
-  publishForm.body = ''
-  previewResult.value = null
-  if (!publishForm.contentId) return
-  articleLoading.value = true
-  publishError.value = ''
-  try {
-    const detail = await api.get(`/content/${publishForm.contentId}`)
-    const item = detail.item
-    const version = detail.versions?.[0]
-    selectedArticle.value = item
-    publishForm.title = item.draftTitle || item.title || ''
-    publishForm.body = item.draftBody ?? version?.body ?? ''
-  } catch (err) {
-    publishError.value = err.message
-  } finally {
-    articleLoading.value = false
-  }
+  router.push({ name: 'paper' })
 }
 
 // 渠道目录：左侧平台导航使用真实能力与账号状态，右侧维护当前平台。
@@ -306,73 +237,6 @@ function openBind(platform) {
   showWechatBind.value = true
 }
 
-async function doPreview() {
-  publishError.value = ''
-  previewResult.value = null
-  try {
-    previewResult.value = await api.post('/publishing/preview', {
-      accountId: publishForm.accountId,
-      title: publishForm.title,
-      body: publishForm.body,
-      scheduledAt: publishForm.scheduledAt ? new Date(publishForm.scheduledAt).toISOString() : null,
-      variantId: publishForm.variantId || null,
-    })
-  } catch (err) {
-    publishError.value = err.message
-  }
-}
-
-async function submitJob() {
-  publishError.value = ''
-  try {
-    const job = await api.post('/publishing/jobs', {
-      accountId: publishForm.accountId,
-      contentItemId: publishForm.contentId || null,
-      idempotencyKey: idempotencyKey.value,
-      title: publishForm.title,
-      body: publishForm.body,
-      scheduledAt: publishForm.scheduledAt ? new Date(publishForm.scheduledAt).toISOString() : null,
-      variantId: publishForm.variantId || null,
-      reviewed: true,
-      mode: publishForm.mode,
-    })
-    jobs.value.unshift(job)
-    showPublish.value = false
-    toast(
-      publishForm.mode === 'manual'
-        ? '已加入排期。请在平台侧手动发布后回到本页回填结果。'
-        : '已创建自动发布任务。平台能力未核验时不会真实提交到平台。',
-    )
-  } catch (err) {
-    publishError.value = err.message
-  }
-}
-
-const recordingJob = ref(null)
-const recordForm = reactive({ remoteContentId: '', permalink: '' })
-
-function openRecord(job) {
-  recordingJob.value = job
-  recordForm.remoteContentId = ''
-  recordForm.permalink = ''
-}
-
-async function submitRecord() {
-  try {
-    const updated = await api.post(`/publishing/jobs/${recordingJob.value.id}/record-manual-result`, {
-      remoteContentId: recordForm.remoteContentId || null,
-      permalink: recordForm.permalink || null,
-    })
-    Object.assign(recordingJob.value, updated)
-    recordingJob.value = null
-    toast('已回填手动发布结果（来源标记为手动记录）。')
-  } catch (err) {
-    error.value = err.message
-  }
-}
-
-const canRecord = (job) => ['approved', 'queued', 'needs_attention', 'failed', 'publishing'].includes(job.status)
-
 async function cancelJob(job) {
   try {
     const updated = await api.post(`/publishing/jobs/${job.id}/cancel`)
@@ -382,12 +246,20 @@ async function cancelJob(job) {
   }
 }
 
+const actingJobId = ref('')
 async function retryJob(job) {
+  if (!canRetryDraft(job) || actingJobId.value) return
+  actingJobId.value = job.id
+  error.value = ''
   try {
     const updated = await api.post(`/publishing/jobs/${job.id}/retry`)
     Object.assign(job, updated)
+    polling.updateJobs(jobs.value)
+    toast('重试推送任务已入队，尚未推送成功')
   } catch (err) {
     error.value = err.message
+  } finally {
+    actingJobId.value = ''
   }
 }
 
@@ -410,10 +282,6 @@ async function deleteJob(job) {
     deletingJobId.value = ''
   }
 }
-
-const canRetry = (job) =>
-  ['failed', 'needs_attention'].includes(job.status) && !job.remoteContentId
-const canCancel = (job) => ['pending_review', 'approved', 'queued', 'needs_attention'].includes(job.status)
 
 // ---------------- 公众号账号绑定 ----------------
 const wechatBusy = ref(false)
@@ -487,7 +355,7 @@ async function bindWechat() {
     <div class="page-head">
       <div>
         <h1 class="page-title">发布管理</h1>
-        <p class="page-sub">渠道平台维护与发布任务追踪分开管理</p>
+        <p class="page-sub">草稿推送队列 · 立即任务与定时任务均自动执行，成功后进入平台草稿箱</p>
       </div>
       <n-space :size="8">
         <template v-if="activeTab === 'queue'">
@@ -495,10 +363,10 @@ async function bindWechat() {
           <n-button
             type="primary"
             :disabled="!canPublish"
-            :title="publishDenied || '创建一条新的发布排期任务'"
+            :title="publishDenied || '在成稿台选择稿件、平台和账号创建推送任务'"
             @click="openPublish"
           >
-            新建排期任务
+            去成稿台创建推送
           </n-button>
         </template>
         <n-button
@@ -607,42 +475,12 @@ async function bindWechat() {
           <span>可以切换筛选条件，或刷新队列获取最新任务。</span>
         </div>
         <div v-else class="list">
-          <div v-for="job in filteredJobs" :key="job.id" class="list-row job-row">
-            <div class="list-main">
-              <div class="list-title">
-                <router-link v-if="job.contentItemId" class="job-article-link" :to="{ name: 'articles', query: { id: job.contentItemId } }">
-                  {{ job.contentTitle || '未命名稿件' }}
-                </router-link>
-                <span v-else>{{ job.contentTitle || '未关联稿件' }}</span>
-                <span class="job-title-divider">·</span>
-                {{ job.platformLabel }} · {{ jobTargetLabel(job) }}
-              </div>
-              <div class="list-meta">
-                账号 {{ jobAccountLabel(job) }} · 请求号 {{ job.requestId.slice(0, 8) }} · 尝试 {{ job.attemptCount }} 次
-                <span v-if="job.scheduledAt"> · 计划 {{ job.scheduledAt.slice(0, 16).replace('T', ' ') }}</span>
-                <span v-if="job.remoteContentId"> · 远端 ID {{ job.remoteContentId }}</span>
-              </div>
-              <div v-if="job.errorMessage" class="list-meta" style="color: var(--color-danger)">
-                {{ job.errorCode }}：{{ job.errorMessage }}
-              </div>
-            </div>
-            <StatusTag :status="job.status" />
-            <n-button v-if="canPublish && canRecord(job)" size="small" secondary @click="openRecord(job)">
-              回填手发结果
-            </n-button>
-            <n-button v-if="canPublish && canRetry(job)" size="small" secondary @click="retryJob(job)">重试</n-button>
-            <n-button v-if="canPublish && canCancel(job)" size="small" secondary @click="cancelJob(job)">取消</n-button>
-            <n-button
-              v-if="canPublish && canDelete(job)"
-              size="small"
-              type="error"
-              secondary
-              :loading="deletingJobId === job.id"
-              @click="deleteJob(job)"
-            >
-              删除
-            </n-button>
-          </div>
+          <JobRow
+            v-for="job in filteredJobs" :key="job.id" :job="job"
+            :account-label="jobAccountLabel(job)" :readonly="!canPublish"
+            :deleting="deletingJobId === job.id" :busy="Boolean(actingJobId)"
+            @retry="retryJob(job)" @cancel="cancelJob(job)" @delete="deleteJob(job)"
+          />
         </div>
       </section>
     </template>
@@ -828,120 +666,6 @@ async function bindWechat() {
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showPublish" preset="card" title="新建发布任务" style="width: min(560px, calc(100vw - 32px))">
-      <p class="modal-desc">先预览校验，确认后才会入队。</p>
-      <n-form label-placement="top">
-        <n-form-item label="目标账号">
-          <n-select
-            v-model:value="publishForm.accountId"
-            :options="accountOptions"
-            placeholder="选择已连接账号"
-            :fallback-option="false"
-          />
-        </n-form-item>
-        <p v-if="!accountOptions.length" class="field-hint">还没有已连接账号，请先在列表中绑定并标记已连接。</p>
-        <n-form-item v-if="!manualEntry" label="选择稿件">
-          <n-select
-            v-model:value="publishForm.contentId"
-            :options="contentSelectOptions"
-            :loading="articleLoading"
-            :disabled="articleLoading"
-            placeholder="请选择要发布的稿件"
-            :fallback-option="false"
-            @update:value="onSelectArticle"
-          />
-        </n-form-item>
-        <p v-if="!manualEntry && !contents.length" class="field-hint">
-          还没有稿件，请先在文章管理新建一篇，或切换为手动填写。
-        </p>
-        <p v-else-if="!manualEntry" class="field-hint">标题与正文会自动取自稿件的最新内容，无需重复输入。</p>
-
-        <div v-if="selectedArticle && !manualEntry" class="card-flat article-preview">
-          <div class="row row-tight">
-            <strong>{{ selectedArticle.title }}</strong>
-            <n-tag size="small" round>{{ selectedArticle.status === 'published' ? '已发布' : '草稿' }}</n-tag>
-          </div>
-          <p class="article-excerpt">{{ (selectedArticle.draftBody ?? publishForm.body ?? '').slice(0, 160) || '稿件暂无正文' }}</p>
-          <router-link class="article-link" :to="{ name: 'articles', query: { id: selectedArticle.id } }">
-            在文章管理打开
-          </router-link>
-        </div>
-
-        <p v-if="articleLoading" class="field-hint">正在读取稿件内容…</p>
-
-        <template v-if="manualEntry">
-          <n-form-item label="标题">
-            <n-input v-model:value="publishForm.title" />
-          </n-form-item>
-          <n-form-item label="正文">
-            <n-input v-model:value="publishForm.body" type="textarea" :autosize="{ minRows: 5, maxRows: 12 }" />
-          </n-form-item>
-        </template>
-        <n-button
-          v-if="!manualEntry"
-          text
-          type="primary"
-          size="small"
-          @click="manualEntry = true; publishForm.contentId = null; selectedArticle = null"
-        >
-          没有对应稿件，改用手动填写
-        </n-button>
-        <n-button v-else text type="primary" size="small" @click="manualEntry = false">
-          返回从列表选择稿件
-        </n-button>
-        <n-form-item label="计划时间（可选）">
-          <n-date-picker v-model:value="scheduledAtTs" type="datetime" clearable style="width: 100%" />
-        </n-form-item>
-        <p class="field-hint">
-          本页只做「排期 + 手动发布」与结果回填。
-        </p>
-
-        <n-button secondary size="small" @click="doPreview">校验并预览</n-button>
-
-        <div v-if="previewResult" class="card-flat" style="margin-top: 12px">
-          <n-space :size="6">
-            <n-tag size="small" round>{{ previewResult.platformLabel }}</n-tag>
-            <n-tag v-if="previewResult.issues.length" size="small" round type="warning">{{ previewResult.issues.length }} 项待检查</n-tag>
-            <n-tag v-else size="small" round type="success">校验通过</n-tag>
-          </n-space>
-          <ul v-if="previewResult.issues.length" class="preview-issues">
-            <li v-for="(issue, index) in previewResult.issues" :key="index">{{ issue.message }}</li>
-          </ul>
-        </div>
-
-        <n-alert v-if="publishError" type="error" :bordered="false" style="margin-top: 12px">{{ publishError }}</n-alert>
-      </n-form>
-      <template #footer>
-        <n-space justify="end">
-          <n-button quaternary @click="showPublish = false">取消</n-button>
-          <n-button
-            type="primary"
-            :disabled="!publishForm.accountId || (!manualEntry && !publishForm.contentId) || articleLoading"
-            @click="submitJob"
-          >
-            确认并提交
-          </n-button>
-        </n-space>
-      </template>
-    </n-modal>
-
-    <n-modal :show="!!recordingJob" preset="card" title="回填手动发布结果" style="width: min(480px, calc(100vw - 32px))" @update:show="(value) => { if (!value) recordingJob = null }">
-      <p class="modal-desc">你在平台侧发布完成后填写；此处记录会标注来源为手动。</p>
-      <n-form label-placement="top">
-        <n-form-item label="平台内容 ID（可选）">
-          <n-input v-model:value="recordForm.remoteContentId" placeholder="平台返回的帖子 ID" />
-        </n-form-item>
-        <n-form-item label="链接（可选）">
-          <n-input v-model:value="recordForm.permalink" placeholder="https://" />
-        </n-form-item>
-      </n-form>
-      <template #footer>
-        <n-space justify="end">
-          <n-button quaternary @click="recordingJob = null">取消</n-button>
-          <n-button type="primary" @click="submitRecord">确认回填</n-button>
-        </n-space>
-      </template>
-    </n-modal>
   </div>
 </template>
 

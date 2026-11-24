@@ -57,6 +57,13 @@ class IntentClassifier:
             (intent, confidence): 意图类型 和 置信度 (0-1)
         """
         text_lower = text.lower()
+        # 功能咨询与内容问答不能误触发生成；命令式请求即使包含疑问词仍是任务。
+        command = bool(re.search(r"^(?:请|帮我|麻烦|给我|为我|替我|根据|把|将|用|写|生成|创作|润色|改写|去ai味|制作|插入)", text_lower.strip()))
+        if not command:
+            if re.search(r"你能做什么|怎么用|如何使用|使用说明|怎么使用|^帮助$|^help$", text_lower):
+                return "query_help", 0.9
+            if re.search(r"[？?]|^(?:如何|怎么|为什么|什么是|哪些|是否|能否|可以吗)", text_lower):
+                return "query_article", 0.85
         # 明确动作优先，避免“根据文章生成卡片”被泛化的“文章”吞掉。
         for intent, terms in (
             ("generate_svg_card", ("动态卡", "卡片", "svg", "生成卡", "插卡")),
@@ -69,7 +76,7 @@ class IntentClassifier:
             return "select_skill", 0.9
         # 只有明确的求助句式才算 query_help；「用一句话说明…」这类是在给创作需求，
         # 不能因为含「说明」就当成功能咨询打发掉。
-        if "帮助" in text_lower or re.search(r"你能做什么|怎么用|如何使用|使用说明|怎么使用|help", text_lower):
+        if not command and ("帮助" in text_lower or re.search(r"你能做什么|怎么用|如何使用|使用说明|怎么使用|help", text_lower)):
             return "query_help", 0.8
         # 宠物场景的默认意图是创作：绝大多数输入都是「写点什么」。
         return "create_article", 0.8
@@ -89,10 +96,11 @@ class IntentClassifier:
         entities = {}
 
         # 提取 URL
-        url_pattern = r"https?://[^\s]+"
-        urls = re.findall(url_pattern, text)
+        url_pattern = r"https?://[^\s，。；！？、<>\"'（）]+"
+        urls = [url.rstrip(".,;!?)]}") for url in re.findall(url_pattern, text, flags=re.IGNORECASE)]
         if urls:
             entities["url"] = urls[0]
+            entities["urls"] = list(dict.fromkeys(urls))
 
         # 提取标题（通常在引号内或首行）
         title_pattern = r'["\'"]([^"\'"\n]+)["\'"]|^(.+?)[:：]'

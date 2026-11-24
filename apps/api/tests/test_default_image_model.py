@@ -72,6 +72,50 @@ def no_env_image_provider(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+def test_provider_sizes_and_explicit_environment_selection(client, monkeypatch):
+    from app.core.db import SessionLocal
+    from app.services import image_provider
+
+    headers = _headers(client, "image-provider-sizes")
+    conn = _connection(client, headers, "生图")
+    model = _catalog(client, headers, conn, "image-test", ["image.generate"])
+    response = client.patch(f"{PREFIX}/models/catalog/{model['id']}", json={"supportedImageSizes": {"1:1": "1024x1024", "5:4": "1250x1000"}}, headers=headers)
+    assert response.status_code == 200
+    monkeypatch.setenv("IMAGE_PROVIDER_BASE_URL", "https://env.example.com/v1")
+    monkeypatch.setenv("IMAGE_PROVIDER_API_KEY", "env-key")
+    monkeypatch.setenv("IMAGE_PROVIDER_MODEL", "env-model")
+    providers = _providers(client, headers)["providers"]
+    personal = next(item for item in providers if item["modelId"] == model["id"])
+    env = next(item for item in providers if item["source"] == "env")
+    assert personal["supportedImageSizes"] == {"1:1": "1024x1024", "5:4": "1250x1000"}
+    assert env["modelId"] == "__env__" and env["supportedImageSizes"] == {}
+    monkeypatch.setenv("IMAGE_PROVIDER_SUPPORTED_SIZES", '{"1:1":"1024x1024","16:9":"1536x1024"}')
+    env = next(item for item in _providers(client, headers)["providers"] if item["source"] == "env")
+    assert env["supportedImageSizes"] == {"1:1": "1024x1024"}
+    with SessionLocal() as db:
+        provider = image_provider.resolve_image_provider(db, "any-user", "__env__")
+        assert provider["modelCode"] == "env-model"
+        assert image_provider.exact_image_sizes(provider) == {"1:1": "1024x1024"}
+
+
+def test_image_generation_queues_exact_aspect_and_selected_model(client, monkeypatch):
+    from app.core import queue
+
+    headers = _headers(client, "image-exact-request")
+    captured = {}
+    def enqueue(db, **kwargs):
+        captured.update(kwargs["payload"])
+        return "test-job"
+    monkeypatch.setattr(queue, "enqueue", enqueue)
+    response = client.post(f"{PREFIX}/ai/image-generations", headers=headers, json={
+        "prompt": "test", "modelId": "chosen-model", "aspectRatio": "5:4", "exactAspect": True,
+    })
+    assert response.status_code == 202, response.text
+    assert captured["modelId"] == "chosen-model"
+    assert captured["aspectRatio"] == "5:4"
+    assert captured["exactAspect"] is True
+
+
 def test_image_size_registration_preserves_other_options_and_validates(client):
     from app import models
     from app.core.db import SessionLocal

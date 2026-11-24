@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
@@ -27,6 +28,8 @@ from .. import models, schemas
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.rbac import require_permission
 from ..services import (
+    ai_gateway,
+    author_skills,
     article_blocks as AB,
     article_quality as AQ,
     studio_calendar,
@@ -171,6 +174,7 @@ def update_settings(payload: schemas.StudioSettingsIn, db: DbSession, user: Curr
 def create_article(payload: schemas.StudioNewIn, db: DbSession, user: CurrentUser):
     workspace = default_workspace(db, user)
     style = _style_or_fail(payload.writer_style)
+    skill_prompt = author_skills.build_system_prompt(db, user.id, payload.skill_ids) if payload.draft and not payload.markdown.strip() else ""
     row = studio_repo.create(
         db,
         owner_user_id=user.id,
@@ -184,7 +188,10 @@ def create_article(payload: schemas.StudioNewIn, db: DbSession, user: CurrentUse
     article_id = row.id
     has_body = bool(payload.markdown.strip())
     if payload.draft and not has_body:
-        SP.PIPELINE.draft(article_id)
+        if skill_prompt:
+            SP.PIPELINE.draft(article_id, skill_prompt=skill_prompt)
+        else:
+            SP.PIPELINE.draft(article_id)
     elif has_body and payload.titles:
         SP.PIPELINE.titles(article_id)
     row = _article(db, user, article_id)
@@ -429,12 +436,61 @@ def chat(article_id: str, payload: schemas.StudioChatIn, db: DbSession, user: Cu
     message = payload.message.strip()
     if not message:
         raise _fail("消息为空", 400)
+    if payload.target_block_id is not None:
+        _block_index(data, payload.target_block_id)
+    if payload.model_id:
+        try:
+            ai_gateway.resolve_selection(db, user.id, payload.model_id)
+        except ai_gateway.InvalidModelSelection as exc:
+            raise ApiError(exc.code, exc.message, status_code=400) from exc
     data["chat"] = (data.get("chat") or []) + [{"role": "user", "text": message}]
     data["notice"] = None
     AB.touch(data)
+    base = SP.chat_base(data)
     _commit_article(db, row, data)
-    SP.PIPELINE.chat(article_id, message)
+    SP.PIPELINE.chat(article_id, message, target_block_id=payload.target_block_id, preview=payload.preview, base=base, model_id=payload.model_id)
     return _out(data)
+
+
+def _proposal_action(article_id, proposal_id, db, user, *, accept):
+    _busy(article_id)
+    _begin_sqlite_write(db)
+    row = db.scalar(select(models.StudioArticle).where(
+        models.StudioArticle.id == article_id, models.StudioArticle.owner_user_id == user.id
+    ).with_for_update().execution_options(populate_existing=True))
+    if row is None:
+        raise not_found("稿件")
+    data = studio_repo.row_to_dict(row)
+    proposal = next((turn.get("proposal") for turn in data.get("chat", [])
+                     if isinstance(turn, dict) and isinstance(turn.get("proposal"), dict)
+                     and turn["proposal"].get("id") == proposal_id), None)
+    if proposal is None:
+        raise not_found("改稿建议")
+    if proposal.get("status") != "pending":
+        raise _fail("这条改稿建议已处理。", 409)
+    if accept:
+        if SP.chat_base(data) != proposal.get("base"):
+            raise _fail("稿件在生成建议后发生变化，请重新生成。", 409)
+        ops = SP.validate_chat_ops(proposal.get("ops"), data, proposal.get("targetBlockId"))
+        before = copy.deepcopy(data)
+        receipts, _ = AB.apply_ops(data, ops)
+        if receipts:
+            studio_repo.snapshot(db, row, before, "接受改稿建议")
+        proposal["status"] = "accepted"
+    else:
+        proposal["status"] = "discarded"
+    _commit_article(db, row, data)
+    return _out(data)
+
+
+@router.post("/studio/articles/{article_id}/chat/proposals/{proposal_id}/accept", response_model=schemas.StudioArticleOut)
+def accept_chat_proposal(article_id: str, proposal_id: str, db: DbSession, user: CurrentUser):
+    return _proposal_action(article_id, proposal_id, db, user, accept=True)
+
+
+@router.post("/studio/articles/{article_id}/chat/proposals/{proposal_id}/discard", response_model=schemas.StudioArticleOut)
+def discard_chat_proposal(article_id: str, proposal_id: str, db: DbSession, user: CurrentUser):
+    return _proposal_action(article_id, proposal_id, db, user, accept=False)
 
 
 @router.post("/studio/articles/{article_id}/titles", response_model=schemas.StudioArticleOut)
@@ -560,13 +616,14 @@ def draft(
     empty_only: bool = Query(default=False, alias="emptyOnly"),
 ):
     row, data = _data(db, user, article_id)
+    skill_prompt = author_skills.build_system_prompt(db, user.id, payload.skill_ids) if payload else ""
     if empty_only:
         if data["blocks"]:
             return _out(data)
         job = _job_out(article_id)
         if not job:
             try:
-                job = SP.PIPELINE.draft(article_id, empty_only=True)
+                job = SP.PIPELINE.draft(article_id, empty_only=True, **({"skill_prompt": skill_prompt} if skill_prompt else {}))
             except SP.PipelineError as exc:
                 if exc.status != 409:
                     raise
@@ -583,7 +640,7 @@ def draft(
             data["writer_style"] = style
             AB.touch(data)
             _commit_article(db, row, data)
-    SP.PIPELINE.draft(article_id)
+    SP.PIPELINE.draft(article_id, **({"skill_prompt": skill_prompt} if skill_prompt else {}))
     return _out(data)
 
 

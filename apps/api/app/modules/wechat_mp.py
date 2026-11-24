@@ -646,7 +646,7 @@ def push_draft(
     return _job_out(enqueue_draft(db, user, payload))
 
 
-def enqueue_draft(db, user, payload: schemas.WeChatDraftIn, *, studio_article_id: str | None = None):
+def enqueue_draft(db, user, payload: schemas.WeChatDraftIn, *, studio_article_id: str | None = None, scheduled_at=None):
     """供发布中心和成稿台共用的校验与持久化入队。"""
     existing = db.scalar(
         select(models.PublishJob).where(
@@ -655,7 +655,18 @@ def enqueue_draft(db, user, payload: schemas.WeChatDraftIn, *, studio_article_id
         )
     )
     if existing:
-        return existing
+        if existing.status != publish_state.CANCELLED:
+            return existing
+        # Release the request key only after a completed cancellation. A new
+        # request gets a fresh immutable snapshot; the cancelled audit row stays.
+        changed = db.execute(update(models.PublishJob).where(
+            models.PublishJob.id == existing.id,
+            models.PublishJob.status == publish_state.CANCELLED,
+            models.PublishJob.idempotency_key == payload.idempotency_key,
+        ).values(idempotency_key=f"cancelled:{existing.id}")
+            .execution_options(synchronize_session=False)).rowcount
+        if changed != 1:
+            raise ApiError("job_changed", "任务状态已变化，请刷新后重试", status_code=409)
 
     account = _target_account(db, user, payload.account_id)
     if account.auth_source != "app_secret" or account.status != "connected":
@@ -700,6 +711,7 @@ def enqueue_draft(db, user, payload: schemas.WeChatDraftIn, *, studio_article_id
         connected_account_id=account.id,
         platform=PLATFORM,
         target="draft",
+        scheduled_at=scheduled_at,
         idempotency_key=payload.idempotency_key,
         status=publish_state.QUEUED,
         request_id=uuid.uuid4().hex,
@@ -707,6 +719,7 @@ def enqueue_draft(db, user, payload: schemas.WeChatDraftIn, *, studio_article_id
         layout_snapshot=dict(studio_options),
         payload_snapshot={
             "mode": "draft",
+            "accountName": account.display_name,
             # 草稿要推全文，不能像发布预览那样截断
             "title": payload.title.strip(),
             "body": payload.body,
@@ -728,7 +741,7 @@ def enqueue_draft(db, user, payload: schemas.WeChatDraftIn, *, studio_article_id
     db.add(job)
     try:
         db.flush()
-        background_id = _create_draft_background_job(db, job)
+        background_id = _create_draft_background_job(db, job) if scheduled_at is None else None
         db.commit()
     except IntegrityError:  # 并发同键：任务和后台队列一起回滚
         db.rollback()
@@ -742,7 +755,8 @@ def enqueue_draft(db, user, payload: schemas.WeChatDraftIn, *, studio_article_id
             return raced
         raise
 
-    queue.dispatch(background_id)
+    if background_id:
+        queue.dispatch(background_id)
     return job
 
 
@@ -790,6 +804,7 @@ def can_retry_draft(job: models.PublishJob) -> bool:
     return (
         job.target == "draft"
         and job.status in {publish_state.FAILED, publish_state.NEEDS_ATTENTION}
+        and job.error_code not in {"draft_result_unknown", "timeout", "network_error", "worker_crashed", "internal_error"}
         and publish_state.retry_allowed(job.status, job.error_code, job.remote_content_id)
     )
 

@@ -145,6 +145,9 @@ def run_job(job_id: str) -> None:
                 return
             try:
                 result = _execute(db, job)
+                if job.kind == 'novel.continue':
+                    queue.chain_next_if_done(payload_of(db, job_id), owner_user_id=job.owner_user_id)
+                    return
                 if _current_status(job_id) == "cancelled":
                     queue.chain_next_if_done(payload_of(db, job_id), owner_user_id=job.owner_user_id)
                     return
@@ -259,7 +262,9 @@ def _advance_publish_job_on_failure(db, publish_job: models.PublishJob, error_co
     if publish_job.remote_content_id:
         target = publish_state.SUCCEEDED
         note = f"后台执行失败但远端已有内容，视为成功（{code}）"
-    elif code in {"auth_expired", "forbidden", "validation_failed", "content_rejected"}:
+    elif (publish_job.target == "draft" and code not in {
+        "draft_result_unknown", "worker_crashed", "internal_error", "timeout", "network_error",
+    }) or code in {"auth_expired", "forbidden", "validation_failed", "content_rejected"}:
         target = publish_state.FAILED
         note = f"执行失败：{code}"
     else:
@@ -992,10 +997,31 @@ def _handle_platform_publish(db, job: models.BackgroundJob) -> dict:
     publish_job = db.get(models.PublishJob, payload.get("publishJobId"))
     if not publish_job:
         raise JobFailure("publish_job_not_found", "发布任务不存在")
+    is_draft = (publish_job.target or "publish") == "draft" or payload.get("target") == "draft"
+    if is_draft:
+        if publish_job.owner_user_id != job.owner_user_id:
+            raise JobFailure("forbidden", "草稿推送任务归属不匹配")
+        now = _utcnow()
+        when = publish_job.scheduled_at
+        if when is not None and (when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when) > now:
+            return {"skipped": "not_due"}
+        history = [*(publish_job.status_history or []), publish_state.history_entry(
+            publish_state.PUBLISHING, note="开始推送公众号草稿箱",
+        )]
+        claimed = db.execute(update(models.PublishJob).where(
+            models.PublishJob.id == publish_job.id,
+            models.PublishJob.status.in_([publish_state.QUEUED, publish_state.APPROVED]),
+            models.PublishJob.remote_content_id.is_(None),
+        ).values(status=publish_state.PUBLISHING, status_history=history)
+            .execution_options(synchronize_session=False)).rowcount
+        db.commit()
+        if claimed != 1:
+            return {"skipped": "already_claimed_or_cancelled"}
+        db.refresh(publish_job)
     account = db.get(models.ConnectedAccount, publish_job.connected_account_id)
-    if not account:
-        raise JobFailure("account_not_found", "平台账号不存在")
-    if (publish_job.target or "publish") == "draft" or payload.get("target") == "draft":
+    if not account or account.owner_user_id != job.owner_user_id:
+        raise JobFailure("account_not_found", "平台账号不存在或无权访问")
+    if is_draft:
         return _handle_wechat_draft(db, job, publish_job, account)
     connector = registry.get_connector(account.platform, db)
     access_token = decrypt_secret(account.access_token_ciphertext)
@@ -1145,6 +1171,11 @@ def _handle_novel_extract(db, job: models.BackgroundJob) -> dict:
         meta=meta,
     )
     characters, aliases = novel_rewrite.parse_extract(raw)
+    from . import novel_continue
+    db.expire_all()
+    project = novel_continue.lock_project(db, payload.get('novelProjectId'))
+    if not project:
+        raise JobFailure('not_found', '小说项目不存在', retryable=False)
     novel_rewrite.apply_extract(db, project, characters, aliases)
     db.commit()
     return {"characters": len(characters), "aliases": len(aliases), **meta}
@@ -1179,6 +1210,12 @@ def _handle_novel_rewrite(db, job: models.BackgroundJob) -> dict:
     )
     if not str(text or "").strip():
         raise JobFailure("empty_model_output", "模型没有返回正文", retryable=False)
+    from . import novel_continue
+    db.expire_all()
+    project = novel_continue.lock_project(db, payload.get('novelProjectId'))
+    chapter = db.get(models.NovelChapter, payload.get('novelChapterId'))
+    if not project or not chapter:
+        raise JobFailure('not_found', '小说项目或章节不存在', retryable=False)
     outcome = novel_rewrite.apply_rewrite_result(
         db, chapter, text, expected_version=payload["expectedVersion"]
     )
@@ -1196,11 +1233,18 @@ def _handle_novel_continue(db, job: models.BackgroundJob) -> dict:
     project = db.get(models.NovelProject, chapter.project_id)
     if not project or project.owner_user_id != job.owner_user_id:
         raise JobFailure("not_found", "小说项目不存在", retryable=False)
+    context_hash = payload.get('contextHash')
+    if not context_hash:
+        raise JobFailure('context_changed', '旧续写任务缺少上下文快照，请重试', retryable=False)
+    if novel_continue.context_snapshot(db, project.id, chapter.sort_order) != context_hash:
+        raise JobFailure('context_changed', '续写上下文已改变，请重试', retryable=False)
     accepted = db.scalars(
         select(models.NovelChapter)
         .where(
             models.NovelChapter.project_id == project.id,
             models.NovelChapter.status == "accepted",
+            models.NovelChapter.stale.is_(False),
+            models.NovelChapter.sort_order < chapter.sort_order,
             models.NovelChapter.id != chapter.id,
         )
         .order_by(models.NovelChapter.sort_order)
@@ -1231,13 +1275,28 @@ def _handle_novel_continue(db, job: models.BackgroundJob) -> dict:
     )
     if not str(text or "").strip():
         raise JobFailure("empty_model_output", "模型没有返回正文", retryable=False)
+    db.expire_all()
+    project = novel_continue.lock_project(db, payload.get('novelProjectId'))
+    chapter = db.get(models.NovelChapter, payload.get('novelChapterId'))
+    if not project or not chapter:
+        raise JobFailure('not_found', '小说项目或章节不存在', retryable=False)
+    locked_job = db.scalars(select(models.BackgroundJob).where(models.BackgroundJob.id == job.id).with_for_update().execution_options(populate_existing=True)).first()
+    if not locked_job or locked_job.status != 'running':
+        raise JobFailure('job_cancelled', '续写任务已取消或结束', retryable=False)
+    if novel_continue.context_snapshot(db, project.id, chapter.sort_order) != context_hash:
+        raise JobFailure('context_changed', '续写上下文已改变，请重试', retryable=False)
     outcome = novel_rewrite.apply_rewrite_result(
         db, chapter, text, expected_version=payload["expectedVersion"]
     )
     scanned = chapter.draft_text if outcome == "applied" else ""
     warnings = novel_continue.scan_warnings(scanned, characters, aliases)
+    result = {"outcome": outcome, "warnings": warnings, **meta}
+    locked_job.status = 'succeeded'
+    locked_job.progress = 100
+    locked_job.result = result
+    locked_job.completed_at = _utcnow()
     db.commit()
-    return {"outcome": outcome, "warnings": warnings, **meta}
+    return result
 
 
 def _read_asset_bytes(asset: models.Asset) -> bytes:
@@ -1280,11 +1339,6 @@ def _handle_wechat_draft(
     if not assets:
         raise JobFailure("thumb_required", "微信草稿必须有封面图（第一张素材作为 thumb_media_id）")
 
-    publish_state.apply_transition(
-        publish_job, publish_state.PUBLISHING, actor="system", note="开始推送公众号草稿箱"
-    )
-    db.commit()
-
     try:
         thumb_data, thumb_mime, thumb_name = wechat_article.prepare_thumb(
             _read_asset_bytes(assets[0])
@@ -1313,9 +1367,18 @@ def _handle_wechat_draft(
             need_open_comment=1 if snapshot.get("needOpenComment") else 0,
             only_fans_can_comment=1 if snapshot.get("onlyFansCanComment") else 0,
         )
-        media_id = connector.add_draft(db, article=article)
+        # Once draft/add is in flight a network failure may mean remote success.
+        # Never auto-replay this non-idempotent call after an ambiguous response.
+        try:
+            media_id = connector.add_draft(db, article=article)
+        except WeChatMPError as exc:
+            if exc.code in {"network_error", "provider_error", "invalid_response"}:
+                raise JobFailure("draft_result_unknown", "微信草稿请求结果未知，请先到公众号草稿箱核实，勿重复推送") from exc
+            raise
+        except Exception as exc:
+            raise JobFailure("draft_result_unknown", "微信草稿请求结果未知，请先到公众号草稿箱核实，勿重复推送") from exc
     except WeChatMPError as exc:
-        raise JobFailure(exc.code, exc.message, exc.retryable) from exc
+        raise JobFailure(exc.code, exc.message, False) from exc
     except wechat_article.ArticleError as exc:
         raise JobFailure("invalid_image", str(exc)) from exc
 

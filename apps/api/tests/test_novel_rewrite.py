@@ -89,8 +89,12 @@ def test_apply_extract_keeps_user_new_names():
     db.add(models.NovelCharacter(
         project_id=project.id, original_name="甲", new_name="林昭", relations="旧", speech_style="旧", state="present",
     ))
+    db.add(models.NovelCharacter(
+        project_id=project.id, original_name="遗漏角色", new_name="保留", relations="友人", speech_style="简短", state="dead",
+    ))
     db.add(models.NovelAlias(project_id=project.id, kind="person", original_name="甲", new_name="林昭"))
     db.add(models.NovelAlias(project_id=project.id, kind="place", original_name="城南", new_name=""))
+    db.add(models.NovelAlias(project_id=project.id, kind="org", original_name="旧门派", new_name="旧名"))
     db.flush()
 
     apply_extract(
@@ -110,13 +114,17 @@ def test_apply_extract_keeps_user_new_names():
     aliases = db.query(models.NovelAlias).filter_by(project_id=project.id).all()
     by_name = {row.original_name: row for row in characters}
     assert by_name["甲"].new_name == "林昭"
-    assert by_name["甲"].relations == "新关系"
+    assert by_name["甲"].relations == "旧"
+    assert by_name["甲"].speech_style == "旧"
+    assert by_name["遗漏角色"].state == "dead"
+    assert by_name["遗漏角色"].new_name == "保留"
     assert by_name["乙"].new_name == ""
     assert by_name["乙"].state == "absent"
     alias_names = {(row.kind, row.original_name): row.new_name for row in aliases}
     assert alias_names[("person", "甲")] == "林昭"
     assert alias_names[("place", "城南")] == ""
     assert alias_names[("org", "衙门")] == ""
+    assert alias_names[("org", "旧门派")] == "旧名"
 
 
 def _chapter(db, project, **overrides):

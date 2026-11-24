@@ -302,6 +302,24 @@ def recover_stale_running(lease_seconds: int | None = None) -> int:
             started = _as_utc(row.started_at)
             if started is None or started.timestamp() > cutoff:
                 continue
+            if row.kind == "wechat_draft":
+                # A crashed draft/add may already exist remotely; replay is unsafe.
+                changed = db.execute(update(models.BackgroundJob).where(
+                    models.BackgroundJob.id == row.id,
+                    models.BackgroundJob.status == "running",
+                    models.BackgroundJob.started_at == row.started_at,
+                ).values(status="failed", error_code="draft_result_unknown",
+                         error_message="执行进程中断，请核实公众号草稿箱结果后处理",
+                         completed_at=datetime.now(timezone.utc))).rowcount
+                if changed == 1:
+                    from ..services import publish_state
+                    pub = db.get(models.PublishJob, (row.payload or {}).get("publishJobId"))
+                    if pub and pub.status not in publish_state.TERMINAL:
+                        pub.error_code = "draft_result_unknown"
+                        pub.error_message = "执行进程中断，请核实公众号草稿箱结果后处理"
+                        publish_state.apply_transition(pub, publish_state.NEEDS_ATTENTION,
+                                                       note=pub.error_message)
+                continue
             if (row.attempt_count or 0) >= MAX_ATTEMPTS:
                 db.execute(
                     update(models.BackgroundJob)

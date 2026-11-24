@@ -78,9 +78,12 @@ async def lifespan(app: FastAPI):
         recovered = queue.recover_pending()
         if stale or recovered:
             logger.info("API 启动恢复：崩溃遗留 %s 个、未开始 %s 个", stale, recovered)
+    from .services import draft_dispatcher
+    draft_dispatcher.start()
     _start_scheduler()
     _warmup_originality()
     yield
+    draft_dispatcher.stop()
     scheduler.stop()
 
 

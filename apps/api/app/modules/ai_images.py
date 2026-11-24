@@ -49,6 +49,7 @@ def create_image_generation(
             "prompt": payload.prompt,
             "purpose": payload.purpose,
             "aspectRatio": payload.aspect_ratio,
+            "exactAspect": payload.exact_aspect,
             "count": payload.count,
             "modelId": payload.model_id,
             "referenceAssetIds": payload.reference_asset_ids,

@@ -102,6 +102,77 @@ html[data-theme='light'] {
   color-scheme: light;
 }
 
+/* 首页品牌语言仅作用于工作台页面外框；作品画布由各工作室自行管理。 */
+html[data-theme='light'] {
+  --brand-canvas: #f3f3ef;
+  --brand-shell: #fafaf7;
+  --brand-ink: #161616;
+  --brand-line: #dfdfd7;
+  --brand-lime: #eaff70;
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .page-title {
+  color: var(--brand-ink);
+  letter-spacing: -0.03em;
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .page-head {
+  border-bottom: 1px solid var(--brand-line);
+  padding-bottom: var(--space-4);
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .card:not(.articles-library),
+html[data-theme='light'] .main-content:not(.brand-sensitive) .metric {
+  border-color: var(--brand-line);
+  border-radius: 15px;
+  box-shadow: 0 2px 0 rgba(22, 22, 22, 0.04);
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .page-title::selection {
+  background: var(--brand-lime);
+  color: var(--brand-ink);
+}
+
+/* 公共工作台的次级容器沿用首页的纸白 / 细线语言；作品画布仍由 brand-sensitive 隔离。 */
+html[data-theme='light'] .main-content:not(.brand-sensitive) .card-flat,
+html[data-theme='light'] .main-content:not(.brand-sensitive) .segmented,
+html[data-theme='light'] .main-content:not(.brand-sensitive) .step-row {
+  border-color: var(--brand-line);
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .card-flat {
+  background: var(--brand-shell);
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .list-row,
+html[data-theme='light'] .main-content:not(.brand-sensitive) table.data th,
+html[data-theme='light'] .main-content:not(.brand-sensitive) table.data td {
+  border-color: var(--brand-line);
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .segmented {
+  background: var(--brand-shell);
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .segmented-item.is-active,
+html[data-theme='light'] .main-content:not(.brand-sensitive) .step-row:hover {
+  background: var(--brand-shell);
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .modal {
+  border-color: var(--brand-line);
+  box-shadow: 0 10px 28px rgba(22, 22, 22, 0.12);
+}
+
+html[data-theme='light'] .main-content:not(.brand-sensitive) .skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--brand-shell) 25%,
+    var(--brand-line) 37%,
+    var(--brand-shell) 63%
+  );
+}
+
 html[data-theme='dark'] {
   color-scheme: dark;
   --color-bg: #191b1a;
@@ -546,6 +617,34 @@ button {
   height: 28px;
   border-radius: var(--radius-sm);
 }
+
+/* 原生表单保持浏览器语义；组件库内部、编辑器及非文本控件不套用。低优先级允许页面按布局覆盖。 */
+:where(input:not([type]), input[type='text'], input[type='search'], input[type='email'], input[type='password'], input[type='url'], input[type='tel'], input[type='number'], input[type='date'], input[type='datetime-local'], input[type='time'], select, textarea):not(:where(.n-input *, .n-select *, .n-input-number *, .n-date-picker *, .n-time-picker *, .ProseMirror *)) {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  font: inherit;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+:where(input:not([type]), input[type='text'], input[type='search'], input[type='email'], input[type='password'], input[type='url'], input[type='tel'], input[type='number'], input[type='date'], input[type='datetime-local'], input[type='time'], select, textarea):not(:where(.n-input *, .n-select *, .n-input-number *, .n-date-picker *, .n-time-picker *, .ProseMirror *)):hover:not(:disabled):not([readonly]) {
+  border-color: var(--color-accent-hover);
+}
+
+:where(input:not([type]), input[type='text'], input[type='search'], input[type='email'], input[type='password'], input[type='url'], input[type='tel'], input[type='number'], input[type='date'], input[type='datetime-local'], input[type='time'], select, textarea):not(:where(.n-input *, .n-select *, .n-input-number *, .n-date-picker *, .n-time-picker *, .ProseMirror *)):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+:where(select):not(:where(.n-select *, .n-date-picker *)) { cursor: pointer; }
+:where(textarea):not(:where(.n-input *, .ProseMirror *)) { resize: vertical; line-height: 1.6; }
+:where(input, textarea):not(:where(.n-input *, .n-select *, .n-input-number *, .n-date-picker *, .n-time-picker *, .ProseMirror *))::placeholder { color: var(--color-text-muted); opacity: 1; }
+:where(input, select, textarea):not(:where(.n-input *, .n-select *, .n-input-number *, .n-date-picker *, .n-time-picker *, .ProseMirror *)):disabled { cursor: not-allowed; opacity: .6; }
+:where(input[type='checkbox'], input[type='radio'], input[type='range']):not(:where(.n-checkbox *, .n-radio *, .n-slider *)) { accent-color: var(--color-accent); }
 
 .input,
 .select,

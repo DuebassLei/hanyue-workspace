@@ -1722,8 +1722,8 @@ def _build_card(spec, themes) -> str:
         o.append(_fPop(L + 36, 356, 1.2,
                        f'<circle cx="{L + 36}" cy="358" r="34" fill="{LT}"/>'
                        f'<image x="{L - 6}" y="314" width="84" height="80" preserveAspectRatio="xMidYMax meet" href="GIF_URL_HERE"/>'))
-        author = _g(c, "author", "林月半子的AI笔记")
-        slogan = _g(c, "slogan", "我是林月半子，教你用AI干掉90%的重复劳动")
+        author = _g(c, "author", "AI小钥的笔记")
+        slogan = _g(c, "slogan", "我是AI小钥，教你学会AI,用好AI~")
         o.append(_fRise(1.35, _pt(L + 86, 352, author, _fit(author, 18, 350), "#1F2937", 700)
                         + _pt(L + 86, 378, slogan, _fit(slogan, 14, 350), "#9CA3AF", 400), 8))
     elif _truthy(_g(spec, "brand")):
@@ -1823,7 +1823,7 @@ def _build_poster(spec, neo, themes) -> str:
         ay = 404
     if _truthy(_g(c, "avatar", True)):
         brand = _g(spec, "brand", {})
-        author = _g(brand, "author", _g(c, "author", "林月半子的AI笔记"))
+        author = _g(brand, "author", _g(c, "author", "AI小钥的笔记"))
         slogan = _g(brand, "slogan")
         o.append(f'<circle cx="96" cy="{ay}" r="34" fill="{LT}"/>'
                  f'<image x="54" y="{ay - 44}" width="84" height="80" preserveAspectRatio="xMidYMax meet" href="GIF_URL_HERE"/>'

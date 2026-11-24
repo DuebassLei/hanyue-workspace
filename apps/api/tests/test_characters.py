@@ -73,6 +73,26 @@ def add_shot(client, headers, project, frame="林夏站在雨里", refs=("platfo
     return response.json()
 
 
+def test_generate_character_draft_without_saving(client, monkeypatch):
+    from app.services import character_extract
+
+    prompts = []
+
+    async def fake_stream(db, user_id, model_id, prompt, system):
+        prompts.append(prompt)
+        return {"name": "星野", "aliases": ["小星"], "appearance": {"hair": "银发", "unknown": "忽略"}, "notes": "剑客"}, "test-model", False
+
+    monkeypatch.setattr(character_extract, "_stream_json", fake_stream)
+    headers = login(client, "char-generate")
+    for prompt in ("银发剑客", ""):
+        response = client.post("/api/v1/characters/generate", json={"prompt": prompt}, headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["appearance"] == {"hair": "银发"}
+        assert response.json()["notes"] == "剑客"
+    assert prompts == ["银发剑客", "请原创设计一个完整角色。"]
+    assert client.get("/api/v1/characters", headers=headers).json() == []
+
+
 def test_character_crud_is_owner_scoped_and_soft_deletes(client):
     headers = login(client, "char-crud")
     other = login(client, "char-other")

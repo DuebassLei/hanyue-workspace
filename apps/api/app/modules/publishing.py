@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query, Response
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.types import String as SaString
 
@@ -88,6 +88,7 @@ def _promote_due_jobs(db, user_id: str) -> int:
         select(models.PublishJob).where(
             models.PublishJob.owner_user_id == user_id,
             models.PublishJob.status == publish_state.QUEUED,
+            models.PublishJob.target != "draft",
             models.PublishJob.scheduled_at.is_not(None),
         )
     ).all()
@@ -393,6 +394,13 @@ def record_manual_result(
     job = db.get(models.PublishJob, job_id)
     if not job or job.owner_user_id != user.id:
         raise not_found("发布任务")
+    if job.target == "draft":
+        # 草稿推送只能由真实接口结果落终态；人工回填会掩盖「是否真的进了草稿箱」
+        raise ApiError(
+            "manual_record_unsupported",
+            "草稿推送任务不支持人工回填结果；失败可在发布管理里重试",
+            status_code=409,
+        )
     if not publish_state.can_record_manual_result(job.status):
         raise ApiError("invalid_transition", f"当前状态 {job.status} 不能回填发布结果", status_code=409)
     # 手动回填是策略允许的直接写终态（MANUAL_RECORDABLE），不走 assert_transition，
@@ -549,6 +557,8 @@ def patch_job(
     job = db.get(models.PublishJob, job_id)
     if not job or job.owner_user_id != user.id:
         raise not_found("发布任务")
+    if job.target == "draft":
+        raise ApiError("draft_snapshot_immutable", "草稿推送使用创建时锁定的版本；如需改期或改稿，请取消后重新创建", status_code=409)
     if job.status not in {publish_state.APPROVED, publish_state.QUEUED}:
         raise ApiError(
             "job_not_editable",
@@ -607,6 +617,13 @@ def approve_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.Publis
     job = db.get(models.PublishJob, job_id)
     if not job or job.owner_user_id != user.id:
         raise not_found("发布任务")
+    if job.target == "draft":
+        # 草稿任务的领取/执行由调度器与队列负责，人工审核会绕开 CAS 与排期校验
+        raise ApiError(
+            "invalid_transition",
+            "草稿推送任务无需人工审核；请在成稿台创建或取消后重新排期",
+            status_code=409,
+        )
     try:
         publish_state.apply_transition(
             job, publish_state.APPROVED, actor="user", note="人工审核通过"
@@ -627,6 +644,23 @@ def cancel_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.Publish
     job = db.get(models.PublishJob, job_id)
     if not job or job.owner_user_id != user.id:
         raise not_found("发布任务")
+    if job.target == "draft":
+        allowed = {publish_state.QUEUED, publish_state.APPROVED, publish_state.FAILED, publish_state.NEEDS_ATTENTION}
+        if job.status not in allowed:
+            raise ApiError("invalid_transition", "执行中的草稿推送不能取消，请等待结果", status_code=409)
+        history = [*(job.status_history or []), publish_state.history_entry(
+            publish_state.CANCELLED, actor="user", note="用户取消任务",
+        )]
+        changed = db.execute(update(models.PublishJob).where(
+            models.PublishJob.id == job.id, models.PublishJob.status == job.status,
+            models.PublishJob.attempt_count == job.attempt_count,
+        ).values(status=publish_state.CANCELLED, status_history=history)
+            .execution_options(synchronize_session=False)).rowcount
+        db.commit()
+        if changed != 1:
+            raise ApiError("invalid_transition", "任务已开始执行或状态已变化，请刷新", status_code=409)
+        db.refresh(job)
+        return _job_out(job)
     try:
         publish_state.apply_transition(job, publish_state.CANCELLED, actor="user", note="用户取消任务")
     except publish_state.TransitionError as exc:
@@ -656,6 +690,9 @@ def retry_job(job_id: str, user: CurrentUser, db: DbSession) -> schemas.PublishJ
     job = db.get(models.PublishJob, job_id)
     if not job or job.owner_user_id != user.id:
         raise not_found("发布任务")
+    if job.target == "draft":
+        from . import wechat_mp
+        return _job_out(wechat_mp.retry_studio_draft(db, job))
     if not publish_state.retry_allowed(job.status, job.error_code, job.remote_content_id):
         raise ApiError(
             "retry_not_allowed",
@@ -740,12 +777,16 @@ def _account_out(account: models.ConnectedAccount) -> schemas.AccountOut:
 def _job_out(job: models.PublishJob) -> schemas.PublishJobOut:
     cap = connectors.get_capability(job.platform)
     snapshot = job.payload_snapshot or {}
+    history = job.status_history or []
+    started = next((entry.get("at") for entry in reversed(history) if entry.get("status") == "publishing"), None)
+    completed = next((entry.get("at") for entry in reversed(history) if entry.get("status") in {"succeeded", "failed", "needs_attention", "cancelled"}), None)
+    from . import wechat_mp
     return schemas.PublishJobOut(
         id=job.id,
         platform=job.platform,
         platform_label=cap.label,
         account_id=job.connected_account_id or "",
-        account_name="",
+        account_name=snapshot.get("accountName", ""),
         content_item_id=job.content_item_id or "",
         content_title=snapshot.get("title", ""),
         target=job.target or "publish",
@@ -760,6 +801,10 @@ def _job_out(job: models.PublishJob) -> schemas.PublishJobOut:
         mode=snapshot.get("mode") or "",
         permalink=snapshot.get("permalink") or "",
         updated_at=job.updated_at,
+        started_at=started,
+        completed_at=completed if job.status in {"succeeded", "failed", "needs_attention", "cancelled"} else None,
+        pushed_at=snapshot.get("pushedAt"),
+        can_retry=wechat_mp.can_retry_draft(job) if job.target == "draft" else publish_state.retry_allowed(job.status, job.error_code, job.remote_content_id),
     )
 
 

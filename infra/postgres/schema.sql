@@ -22,7 +22,7 @@
 -- 任一应用表已存在，全部结构迁移交给 init_db。
 SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p')
-    AND c.relname IN ('agent_approvals', 'agent_events', 'agent_provider_connections', 'agent_runs', 'agent_sessions', 'agent_tool_calls', 'ai_generations', 'analysis_history', 'analysis_keywords', 'analysis_tasks', 'app_settings', 'article_blocks', 'article_revisions', 'assets', 'author_skill_distill_runs', 'author_skill_revisions', 'author_skills', 'background_jobs', 'calendar_entries', 'card_templates', 'characters', 'connected_accounts', 'content_assets', 'content_embeddings', 'content_items', 'content_versions', 'handdraw_colors', 'handdraw_library_meta', 'handdraw_styles', 'hot_clusters', 'hot_items', 'hot_rank_history', 'image_jobs', 'image_styles', 'menus', 'metric_snapshots', 'model_catalog_entries', 'model_connections', 'novel_aliases', 'novel_chapters', 'novel_characters', 'novel_projects', 'originality_analyses', 'originality_reports', 'permissions', 'pet_conversations', 'platform_access_tokens', 'platform_sync_jobs', 'platform_variants', 'prompt_rules', 'prompt_templates', 'publish_jobs', 'publish_records', 'rbac_audit_logs', 'review_comments', 'revoked_tokens', 'role_menus', 'role_permissions', 'roles', 'scheduled_script_versions', 'scheduled_scripts', 'scheduled_task_runs', 'scheduled_tasks', 'similarity_cache', 'skill_distillation_jobs', 'skill_registry_entries', 'skill_usage_logs', 'sticker_images', 'sticker_sets', 'storyboard_projects', 'storyboard_scenes', 'storyboard_shots', 'studio_articles', 'user_preferences', 'user_roles', 'users', 'week_reviews', 'workspace_skills', 'workspaces')) AS hanyue_existing_schema
+    AND c.relname IN ('agent_approvals', 'agent_events', 'agent_provider_connections', 'agent_runs', 'agent_sessions', 'agent_tool_calls', 'ai_generations', 'analysis_history', 'analysis_keywords', 'analysis_tasks', 'app_settings', 'article_blocks', 'article_revisions', 'assets', 'author_skill_distill_runs', 'author_skill_revisions', 'author_skills', 'background_jobs', 'calendar_entries', 'card_templates', 'characters', 'connected_accounts', 'content_assets', 'content_embeddings', 'content_items', 'content_versions', 'handdraw_colors', 'handdraw_library_meta', 'handdraw_styles', 'hot_clusters', 'hot_items', 'hot_rank_history', 'image_jobs', 'image_styles', 'menus', 'metric_snapshots', 'model_catalog_entries', 'model_connections', 'novel_aliases', 'novel_chapters', 'novel_characters', 'novel_projects', 'originality_analyses', 'originality_reports', 'permissions', 'pet_conversations', 'platform_access_tokens', 'platform_model_settings', 'platform_sync_jobs', 'platform_variants', 'prompt_rules', 'prompt_templates', 'publish_jobs', 'publish_records', 'rbac_audit_logs', 'review_comments', 'revoked_tokens', 'role_menus', 'role_permissions', 'roles', 'scheduled_script_versions', 'scheduled_scripts', 'scheduled_task_runs', 'scheduled_tasks', 'similarity_cache', 'skill_distillation_jobs', 'skill_registry_entries', 'skill_usage_logs', 'sticker_images', 'sticker_sets', 'storyboard_projects', 'storyboard_scenes', 'storyboard_shots', 'studio_articles', 'user_preferences', 'user_roles', 'users', 'week_reviews', 'workspace_skills', 'workspaces')) AS hanyue_existing_schema
 \gset
 \if :hanyue_existing_schema
 \echo '检测到已有应用表，跳过 schema.sql；请启动应用执行迁移。'
@@ -196,6 +196,16 @@ CREATE TABLE IF NOT EXISTS platform_access_tokens (
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	PRIMARY KEY (id),
 	CONSTRAINT uq_platform_token UNIQUE (platform, app_id)
+);
+
+-- platform_model_settings
+CREATE TABLE IF NOT EXISTS platform_model_settings (
+	id VARCHAR(32) NOT NULL,
+	default_text_model_id VARCHAR(32),
+	default_image_model_id VARCHAR(32),
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id)
 );
 
 -- platform_sync_jobs

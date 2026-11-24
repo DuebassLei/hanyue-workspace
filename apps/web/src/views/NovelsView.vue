@@ -125,6 +125,7 @@ async function deleteProject(id) {
 }
 
 function backToLibrary() {
+  store.stopPolling()
   store.project.value = null
   router.replace({ query: {} })
 }
@@ -265,7 +266,9 @@ onMounted(loadProjects)
 
         <aside class="side-col">
           <NovelContinue
-            :busy="store.jobBusy.value"
+            :busy="Boolean(store.jobBusy.value || store.starting.value)"
+            :saving="store.saving.value > 0"
+            :chapters="store.chapters.value"
             :warnings="store.warnings.value"
             :impact-chapters="impactChapters"
             @continue="run(() => store.continueNext())"

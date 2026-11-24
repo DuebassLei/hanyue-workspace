@@ -262,8 +262,8 @@ def test_schedule_is_calendar_only(client):
     assert client.get(f"{base}/review", headers=headers).json()["platforms"] == []
     assert client.post(f"{base}/schedule", json={"at": None}, headers=headers).json()["scheduledFor"] is None
     rejected = client.post(f"{base}/publish", json={"scheduledAt": scheduled}, headers=headers)
-    assert rejected.status_code == 422
-    assert rejected.json()["code"] == "schedule_separate"
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "account_not_bound"
 
 
 def test_review_reports_legacy_manual_jobs_and_real_published_links(client):

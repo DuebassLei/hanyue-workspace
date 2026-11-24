@@ -65,7 +65,7 @@ async def refine(db, user_id: str, paragraph: str, refine_type: str = "polish",
 
 
 async def generate_card(db, user_id: str, text: str, title: str | None = None,
-                        theme: str = "blue") -> dict:
+                        theme: str = "blue", *, model_id: str | None = None) -> dict:
     text = _text(text, "卡片内容", 20000)
     if title is not None:
         title = _text(title, "卡片标题", 40)
@@ -84,7 +84,8 @@ async def generate_card(db, user_id: str, text: str, title: str | None = None,
         + "不要代码围栏或额外字段。若指定了标题，保留该标题。"
     )
     raw = await author_skills.generate_text(db, user_id,
-        json.dumps({"text": text, "title": title}, ensure_ascii=False), system)
+        json.dumps({"text": text, "title": title}, ensure_ascii=False), system,
+        **({"model_id": model_id} if model_id else {}))
     data = _json_object(raw, {"kind", "title", "lines"})
     if (not isinstance(data["kind"], str) or not isinstance(data["title"], str)
             or not isinstance(data["lines"], list)

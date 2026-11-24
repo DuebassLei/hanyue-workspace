@@ -38,8 +38,8 @@ def _model_snapshot(db, user_id: str, payload: schemas.NovelModelIn | None) -> d
     return {"modelId": model_id, "modelExplicit": explicit}
 
 
-def _project(db, user, project_id) -> models.NovelProject:
-    row = db.get(models.NovelProject, project_id)
+def _project(db, user, project_id, *, lock=True) -> models.NovelProject:
+    row = novel_continue.lock_project(db, project_id) if lock else db.get(models.NovelProject, project_id)
     if not row or row.owner_user_id != user.id:
         raise not_found("小说项目")
     return row
@@ -58,12 +58,12 @@ def _rules(raw) -> schemas.NovelRules:
 
 
 def _facts(raw) -> schemas.NovelFacts:
-    data = raw if isinstance(raw, dict) else {}
+    data = novel_continue._facts(raw)
     return schemas.NovelFacts(
-        character_changes=list(data.get("characterChanges") or []),
-        item_holdings=list(data.get("itemHoldings") or []),
-        events=list(data.get("events") or []),
-        open_hooks=list(data.get("openHooks") or []),
+        character_changes=data['characterChanges'],
+        item_holdings=data['itemHoldings'],
+        events=data['events'],
+        open_hooks=data['openHooks'],
     )
 
 
@@ -193,7 +193,7 @@ def list_novels(user: CurrentUser, db: DbSession):
 
 @router.get("/novels/{project_id}", response_model=schemas.NovelProjectOut)
 def get_novel(project_id: str, user: CurrentUser, db: DbSession):
-    return _project_out(db, _project(db, user, project_id))
+    return _project_out(db, _project(db, user, project_id, lock=False))
 
 
 @router.patch("/novels/{project_id}", response_model=schemas.NovelProjectOut)
@@ -224,10 +224,13 @@ def delete_novel(project_id: str, user: CurrentUser, db: DbSession):
 @router.post("/novels/{project_id}/split", response_model=list[schemas.NovelChapterOut])
 def split_novel(project_id: str, user: CurrentUser, db: DbSession):
     row = _project(db, user, project_id)
+    existing = db.scalars(select(models.NovelChapter).where(models.NovelChapter.project_id == row.id)).all()
+    if any(c.accepted_text or c.draft_text or c.rewrite_text for c in existing):
+        raise ApiError('split_would_discard', '重新拆分会丢失已有章节内容', status_code=409)
+    if any(_novel_job_busy(db, owner_user_id=user.id, project_id=row.id, kind=kind) for kind in ('novel.extract', 'novel.rewrite', 'novel.continue')):
+        raise ApiError('job_in_progress', '小说任务进行中，不能重新拆分', status_code=409)
     pieces = split_chapters(row.source_text)
-    for chapter in db.scalars(
-        select(models.NovelChapter).where(models.NovelChapter.project_id == row.id)
-    ).all():
+    for chapter in existing:
         db.delete(chapter)
     db.flush()
     created = []
@@ -263,6 +266,8 @@ def patch_chapter(
     if payload.title is not None:
         row.title = payload.title
     if payload.source_text is not None:
+        if row.accepted_text:
+            raise ApiError('accepted_source_locked', '已接受章节不可直接修改原文', status_code=409)
         row.source_text = payload.source_text
         row.status = "pending"
         row.rewrite_text = ""
@@ -380,7 +385,11 @@ def accept_novel_chapter(
     characters = db.scalars(
         select(models.NovelCharacter).where(models.NovelCharacter.project_id == project.id)
     ).all()
+    draft_snapshot = (chapter.draft_version, chapter.draft_text, chapter.status, chapter.stale)
+    history_snapshot = novel_continue.context_snapshot(db, project_id, chapter.sort_order)
+    character_snapshot = sorted((c.id, c.original_name, c.new_name, c.relations, c.speech_style, c.state) for c in characters)
     prompt = novel_rewrite.build_facts_prompt(chapter.draft_text, characters)
+    db.commit()  # Never hold the project lock during a model call.
     try:
         raw = job_runner._novel_complete(
             db,
@@ -392,6 +401,12 @@ def accept_novel_chapter(
     except job_runner.JobFailure as exc:
         status = 400 if exc.code in ("provider_unavailable", "model_not_found") else 502
         raise ApiError(exc.code, exc.message, status_code=status) from exc
+    db.expire_all()
+    project = _project(db, user, project_id)
+    chapter = db.get(models.NovelChapter, chapter_id)
+    characters = db.scalars(select(models.NovelCharacter).where(models.NovelCharacter.project_id == project_id)).all()
+    if not chapter or (chapter.draft_version, chapter.draft_text, chapter.status, chapter.stale) != draft_snapshot or novel_continue.context_snapshot(db, project_id, chapter.sort_order) != history_snapshot or sorted((c.id, c.original_name, c.new_name, c.relations, c.speech_style, c.state) for c in characters) != character_snapshot:
+        raise ApiError('context_changed', '提取事实期间草稿或人物已改变，请重试', status_code=409)
     facts = novel_rewrite.parse_facts(raw)
     novel_rewrite.accept_chapter(db, chapter, facts)
     if chapter.stale:
@@ -513,7 +528,7 @@ def patch_alias(
 
 @router.get("/novels/{project_id}/jobs/{job_id}")
 def get_novel_job(project_id: str, job_id: str, user: CurrentUser, db: DbSession):
-    project = _project(db, user, project_id)
+    project = _project(db, user, project_id, lock=False)
     job = db.get(models.BackgroundJob, job_id)
     payload = (job.payload or {}) if job else {}
     if not job or job.owner_user_id != user.id or payload.get("novelProjectId") != project.id:
@@ -577,13 +592,16 @@ def continue_novel(
     accepted = [row for row in chapters if row.status == "accepted"]
     if not accepted:
         raise ApiError("nothing_to_continue", "没有已接受的章节可续写")
-    if any(row.source == "continuation" and row.status != "accepted" for row in chapters):
-        raise ApiError("draft_pending", "还有未接受的续写草稿")
+    if any(row.stale for row in accepted) or any(row.status != 'accepted' and row.accepted_text and row.sort_order < accepted[-1].sort_order for row in chapters):
+        raise ApiError('stale_history', '历史章节已失效或回退，请先重新接受', status_code=409)
+    pending = [row for row in chapters if row.source == 'continuation' and row.status != 'accepted']
     if _novel_job_busy(db, owner_user_id=user.id, project_id=project.id, kind="novel.continue"):
-        raise ApiError("job_in_progress", "续写任务进行中", status_code=409)
-    next_order = max(row.sort_order for row in chapters) + 1 if chapters else 0
+        raise ApiError("draft_pending", "续写任务进行中")
+    if pending and (len(pending) != 1 or pending[0].status != 'pending' or pending[0].draft_text or pending[0].accepted_text or pending[0].pending_candidate or pending[0].draft_version != 0 or pending[0] is not chapters[-1]):
+        raise ApiError("draft_pending", "还有未接受的续写草稿")
+    next_order = pending[0].sort_order if pending else max(row.sort_order for row in chapters) + 1
     index = sum(1 for row in chapters if row.source == "continuation") + 1
-    chapter = models.NovelChapter(
+    chapter = pending[0] if pending else models.NovelChapter(
         project_id=project.id,
         sort_order=next_order,
         source="continuation",
@@ -594,11 +612,11 @@ def continue_novel(
         facts=dict(_EMPTY_FACTS),
         stale=False,
     )
+    snapshot = _model_snapshot(db, user.id, payload)
+    context_hash = novel_continue.context_snapshot(db, project.id, next_order)
     db.add(chapter)
     db.flush()
-    db.commit()
-    snapshot = _model_snapshot(db, user.id, payload)
-    job_id = queue.enqueue(
+    job = queue.create_job(
         db,
         owner_user_id=user.id,
         queue="novel",
@@ -607,15 +625,19 @@ def continue_novel(
             "novelProjectId": project.id,
             "novelChapterId": chapter.id,
             "expectedVersion": 0,
+            "contextHash": context_hash,
             **snapshot,
         },
     )
-    return {"jobId": job_id, "chapterId": chapter.id, "expectedVersion": 0}
+    job_id, chapter_id = job.id, chapter.id
+    db.commit()
+    queue.dispatch(job_id)
+    return {"jobId": job_id, "chapterId": chapter_id, "expectedVersion": 0}
 
 
 @router.get("/novels/{project_id}/export")
 def export_novel(project_id: str, user: CurrentUser, db: DbSession, format: str = Query(default="md")):
-    project = _project(db, user, project_id)
+    project = _project(db, user, project_id, lock=False)
     fmt = (format or "").strip().lower()
     if fmt not in ("md", "txt"):
         raise ApiError("bad_format", "只支持 md 或 txt")

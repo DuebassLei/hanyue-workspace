@@ -55,7 +55,9 @@ def publish_article(article_id: str, payload: StudioPublishIn, db: DbSession, us
     if not account_id:
         raise ApiError("account_not_bound", "请先在发布中心绑定并验证公众号账号", status_code=409)
     draft = SPUB.draft_payload(db, article, account_id)
-    return SPUB.result(wechat_mp.enqueue_draft(db, user, draft, studio_article_id=article.id))
+    return SPUB.result(wechat_mp.enqueue_draft(
+        db, user, draft, studio_article_id=article.id, scheduled_at=payload.scheduled_at,
+    ))
 
 
 @router.post(

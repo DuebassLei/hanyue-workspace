@@ -317,7 +317,12 @@ def _default_model_id(db, owner_user_id: str) -> str | None:
     return str(value or "").strip() or None
 
 
-def _validate_entry(db, owner_user_id: str, model_id: str):
+def _platform_text_id(db) -> str | None:
+    settings = db.get(models.PlatformModelSettings, "platform")
+    return str(settings.default_text_model_id or "").strip() or None if settings else None
+
+
+def _validate_entry(db, owner_user_id: str, model_id: str, *, allow_platform: bool = False):
     """校验一个 catalog 条目能不能用于文本生成。
 
     返回 (connection, entry, reason)；reason 为 None 表示有效。
@@ -329,7 +334,9 @@ def _validate_entry(db, owner_user_id: str, model_id: str):
     connection = db.get(models.ModelConnection, entry.connection_id)
     if connection is None:
         return None, entry, "connection_missing"
-    if connection.owner_user_id != owner_user_id:
+    if connection.owner_user_id != owner_user_id and not (
+        allow_platform and model_id == _platform_text_id(db)
+    ):
         return None, entry, "foreign"
     if not entry.enabled:
         return connection, entry, "disabled"
@@ -418,7 +425,7 @@ def resolve_selection(
     """
     requested = str(model_id or "").strip() or None
     if requested:
-        connection, entry, reason = _validate_entry(db, owner_user_id, requested)
+        connection, entry, reason = _validate_entry(db, owner_user_id, requested, allow_platform=True)
         if reason:
             raise InvalidModelSelection(
                 "model_not_found",
@@ -447,7 +454,18 @@ def resolve_selection(
         else:
             head = (connection, entry.model_code, entry.id)
             base = [head, *[row for row in base if row[2] != entry.id]]
-    selected = base[: max(limit, 1)]
+    # 平台兜底占一个候选位置，避免个人候选过多时永远无法降级到平台。
+    platform_id = _platform_text_id(db) if apply_default else None
+    platform = None
+    if platform_id:
+        conn, entry, reason = _validate_entry(db, owner_user_id, platform_id, allow_platform=True)
+        if not reason and not any(row[2] == entry.id for row in base):
+            platform = (conn, entry.model_code, entry.id)
+    capacity = max(limit, 1)
+    if platform and (capacity > 1 or not base):
+        selected = base[:capacity - 1] + [platform]
+    else:
+        selected = base[:capacity]
     return {
         "candidates": [(conn, code) for conn, code, _ in selected],
         "entryIds": [entry_id for _, _, entry_id in selected],
@@ -484,7 +502,7 @@ def snapshot_model_id(db, owner_user_id: str, explicit: str | None = None) -> st
     """
     explicit = str(explicit or "").strip() or None
     if explicit:
-        _, _, reason = _validate_entry(db, owner_user_id, explicit)
+        _, _, reason = _validate_entry(db, owner_user_id, explicit, allow_platform=True)
         if reason:
             raise InvalidModelSelection(
                 "model_not_found",
@@ -553,6 +571,7 @@ async def generate_text(
     prompt: str,
     constraints: dict | None = None,
     system_prompt: str | None = None,
+    model_id: str | None = None,
 ) -> dict:
     """非流式生成，供工作流节点等后台链路使用。
 
@@ -560,9 +579,12 @@ async def generate_text(
     逐个尝试所有候选模型（设计 §6.4），全部失败则 text 为空并带 errorCode，
     调用方必须据此把节点标为失败，不得用占位文本伪装成功。
     """
-    candidates = resolve_connections(db, owner_user_id)
+    selection = resolve_selection(db, owner_user_id, model_id)
+    candidates = selection["candidates"]
+    entry_ids = selection["entryIds"]
     if not candidates:
         candidates = [(None, "unconfigured")]
+        entry_ids = [None]
     primary_error: str | None = None
     last_result: dict = {}
     for index, (connection, model_code) in enumerate(candidates):
@@ -578,6 +600,7 @@ async def generate_text(
         if last_result["text"] and not last_result["errorCode"]:
             return {
                 **last_result,
+                "modelId": entry_ids[index],
                 "fallbackUsed": index > 0,
                 "primaryErrorCode": primary_error,
                 "attempts": index + 1,

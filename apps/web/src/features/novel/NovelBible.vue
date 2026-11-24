@@ -14,6 +14,8 @@ const person = ref('')
 const style = ref('')
 const banned = ref('')
 const names = ref({})
+const relations = ref({})
+const speechStyles = ref({})
 const aliasNames = ref({})
 
 watch(
@@ -32,6 +34,8 @@ watch(
     const next = {}
     for (const item of list) next[item.id] = item.newName || ''
     names.value = next
+    relations.value = Object.fromEntries(list.map((item) => [item.id, item.relations || '']))
+    speechStyles.value = Object.fromEntries(list.map((item) => [item.id, item.speechStyle || '']))
   },
   { immediate: true },
 )
@@ -56,6 +60,10 @@ function saveName(character) {
   const next = names.value[character.id] ?? ''
   if (next === (character.newName || '')) return
   emit('patch-character', character.id, { newName: next })
+}
+
+function saveCharacterField(character, field, value) {
+  if (value !== (character[field] || '')) emit('patch-character', character.id, { [field]: value })
 }
 
 function saveAlias(alias) {
@@ -117,6 +125,8 @@ const stateOptions = [
               />
             </div>
             <NInput v-model:value="names[character.id]" size="small" placeholder="新名字" @blur="saveName(character)" />
+            <NInput v-model:value="relations[character.id]" size="small" placeholder="人物关系" aria-label="人物关系" @blur="saveCharacterField(character, 'relations', relations[character.id])" />
+            <NInput v-model:value="speechStyles[character.id]" size="small" placeholder="说话口吻" aria-label="说话口吻" @blur="saveCharacterField(character, 'speechStyle', speechStyles[character.id])" />
           </li>
         </ul>
       </div>

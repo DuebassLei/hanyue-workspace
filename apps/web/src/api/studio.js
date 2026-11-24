@@ -22,7 +22,9 @@ export const studioApi = {
   saveMarkdown: (id, markdown, expectedMarkdown) => api.patch(`${base(id)}/markdown`, { markdown, expectedMarkdown }),
   exportToContent: (id) => api.post(`${base(id)}/export`, {}),
 
-  chat: (id, message) => api.post(`${base(id)}/chat`, { message }),
+  chat: (id, message, options = {}) => api.post(`${base(id)}/chat`, { message, ...options }),
+  acceptChatProposal: (id, proposalId) => api.post(`${base(id)}/chat/proposals/${encodeURIComponent(proposalId)}/accept`, {}),
+  discardChatProposal: (id, proposalId) => api.post(`${base(id)}/chat/proposals/${encodeURIComponent(proposalId)}/discard`, {}),
   titles: (id) => api.post(`${base(id)}/titles`, {}),
   pickTitle: (id, text) => api.post(`${base(id)}/title/pick`, { text }),
   updateBlock: (id, blockId, body) => api.patch(`${base(id)}/blocks/${blockId}`, body),
@@ -33,7 +35,7 @@ export const studioApi = {
   revisions: (id) => api.get(`${base(id)}/revisions`),
 
   // style 为空用稿件当前风格；带了就是换风格重写
-  draft: (id, style) => api.post(`${base(id)}/draft`, style ? { style } : {}),
+  draft: (id, style, skillIds = []) => api.post(`${base(id)}/draft`, { ...(style ? { style } : {}), skillIds }),
   draftIfEmpty: (id) => api.post(`${base(id)}/draft?emptyOnly=true`, {}),
   setWriterStyle: (id, style) => api.post(`${base(id)}/writer-style`, { style }),
   fixAll: (id) => api.post(`${base(id)}/fix-all`, {}),

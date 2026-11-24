@@ -6,13 +6,19 @@
  */
 
 export const canRecord = (job) =>
-  ['approved', 'queued', 'needs_attention', 'failed', 'publishing'].includes(job.status)
+  job.target !== 'draft' && ['approved', 'queued', 'needs_attention', 'failed', 'publishing'].includes(job.status)
 
-export const canRetry = (job) =>
-  ['failed', 'needs_attention'].includes(job.status) && !job.remoteContentId
+export const canRetry = (job) => {
+  if (job.target !== 'draft' || job.mode === 'manual') return false
+  // 后端已经按 errorCode / remoteContentId 判定过；以前端再写一份只会两边漂移
+  // （例如 draft_result_unknown 必须禁止重试，避免重复进草稿箱）
+  if (typeof job.canRetry === 'boolean') return job.canRetry
+  return ['failed', 'needs_attention'].includes(job.status) && !job.remoteContentId
+}
 
 export const canCancel = (job) =>
   ['pending_review', 'approved', 'queued', 'needs_attention'].includes(job.status)
+  || (job.target === 'draft' && job.status === 'failed')
 
 export const canDelete = (job) =>
   ['succeeded', 'cancelled', 'failed', 'needs_attention'].includes(job.status)

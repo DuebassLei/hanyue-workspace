@@ -19,7 +19,20 @@ export function useNovel() {
   const warnings = ref([])
 
   let timer = null
-  let stopped = false
+  let generation = 0
+  let loadGeneration = 0
+  let saveQueue = Promise.resolve()
+  let saveError = null
+  const saving = ref(0)
+  const starting = ref(false)
+
+  function queueSave(action) {
+    if (!saving.value) saveError = null
+    saving.value++
+    const pending = saveQueue.then(action)
+    saveQueue = pending.catch((err) => { saveError = err })
+    return pending.finally(() => { saving.value-- })
+  }
 
   const chapters = computed(() => project.value?.chapters || [])
   const characters = computed(() => project.value?.characters || [])
@@ -34,7 +47,8 @@ export function useNovel() {
   }
 
   function stopPolling() {
-    stopped = true
+    generation++
+    loadGeneration++
     if (timer) clearTimeout(timer)
     timer = null
   }
@@ -50,17 +64,26 @@ export function useNovel() {
   }
 
   async function loadProject(projectId) {
+    if (project.value?.id !== projectId) {
+      stopPolling()
+      job.value = null
+      warnings.value = []
+      selectedChapterId.value = ''
+    }
+    const request = ++loadGeneration
     loading.value = true
     error.value = ''
     try {
-      project.value = await api.get(`/novels/${projectId}`)
+      const loaded = await api.get(`/novels/${projectId}`)
+      if (request !== loadGeneration) return
+      project.value = loaded
       const stillThere = project.value.chapters?.some((item) => item.id === selectedChapterId.value)
       if (!stillThere) selectedChapterId.value = project.value.chapters?.[0]?.id || ''
     } catch (err) {
-      error.value = err.message
+      if (request === loadGeneration) error.value = err.message
       throw err
     } finally {
-      loading.value = false
+      if (request === loadGeneration) loading.value = false
     }
   }
 
@@ -75,24 +98,31 @@ export function useNovel() {
       rightsConfirmed: true,
     })
     projects.value = [{ id: fresh.id, title: fresh.title, status: fresh.status, chapterCount: 0, updatedAt: fresh.updatedAt }, ...projects.value]
+    stopPolling()
+    job.value = null
     project.value = fresh
     selectedChapterId.value = ''
     warnings.value = []
     return fresh
   }
 
-  async function patchProject(payload) {
-    const next = await api.patch(`/novels/${project.value.id}`, payload)
-    project.value = { ...project.value, ...next, chapters: next.chapters || project.value.chapters }
-    const row = projects.value.find((item) => item.id === next.id)
-    if (row && next.title) row.title = next.title
-    return next
+  function patchProject(payload) {
+    const projectId = project.value.id
+    return queueSave(async () => {
+      const next = await api.patch(`/novels/${projectId}`, payload)
+      if (project.value?.id === projectId) project.value = { ...project.value, ...next, chapters: next.chapters || project.value.chapters }
+      const row = projects.value.find((item) => item.id === next.id)
+      if (row && next.title) row.title = next.title
+      return next
+    })
   }
 
   async function deleteProject(projectId) {
     await api.del(`/novels/${projectId}`)
     projects.value = projects.value.filter((item) => item.id !== projectId)
     if (project.value?.id === projectId) {
+      stopPolling()
+      job.value = null
       project.value = null
       selectedChapterId.value = ''
       warnings.value = []
@@ -114,14 +144,15 @@ export function useNovel() {
 
   function watchJob(jobId) {
     stopPolling()
-    stopped = false
+    const token = generation
+    const projectId = project.value?.id
     job.value = { id: jobId, status: 'queued', kind: '', errorCode: '', errorMessage: '', result: null }
 
     const tick = async () => {
-      if (stopped || !project.value?.id) return
+      if (token !== generation || project.value?.id !== projectId) return
       try {
-        const current = await api.get(`/novels/${project.value.id}/jobs/${jobId}`)
-        if (stopped) return
+        const current = await api.get(`/novels/${projectId}/jobs/${jobId}`)
+        if (token !== generation || project.value?.id !== projectId) return
         job.value = current
         if (current.status === 'succeeded' || current.status === 'failed') {
           timer = null
@@ -131,10 +162,10 @@ export function useNovel() {
           return
         }
       } catch (err) {
-        if (stopped) return
+        if (token !== generation || project.value?.id !== projectId) return
         error.value = err.message
       }
-      if (!stopped) timer = setTimeout(tick, POLL_MS)
+      if (token === generation && project.value?.id === projectId) timer = setTimeout(tick, POLL_MS)
     }
 
     timer = setTimeout(tick, POLL_MS)
@@ -167,26 +198,47 @@ export function useNovel() {
   }
 
   async function continueNext() {
-    warnings.value = []
-    const started = await api.post(`/novels/${project.value.id}/continue`, modelBody())
-    if (started.chapterId) selectedChapterId.value = started.chapterId
-    watchJob(started.jobId)
-    await refresh()
-    return started
+    if (starting.value) return
+    starting.value = true
+    const projectId = project.value.id
+    try {
+      await saveQueue
+      if (saveError) throw saveError
+      if (project.value?.id !== projectId) return
+      warnings.value = []
+      const started = await api.post(`/novels/${projectId}/continue`, modelBody())
+      if (project.value?.id !== projectId) return started
+      watchJob(started.jobId)
+      await refresh()
+      if (project.value?.id === projectId && started.chapterId) selectedChapterId.value = started.chapterId
+      return started
+    } finally {
+      starting.value = false
+    }
   }
 
-  async function patchCharacter(characterId, payload) {
-    const next = await api.patch(`/novels/${project.value.id}/characters/${characterId}`, payload)
-    const index = project.value.characters.findIndex((item) => item.id === characterId)
-    if (index >= 0) project.value.characters[index] = { ...project.value.characters[index], ...next }
-    return next
+  function patchCharacter(characterId, payload) {
+    const projectId = project.value.id
+    return queueSave(async () => {
+      const next = await api.patch(`/novels/${projectId}/characters/${characterId}`, payload)
+      if (project.value?.id === projectId) {
+        const index = project.value.characters.findIndex((item) => item.id === characterId)
+        if (index >= 0) project.value.characters[index] = { ...project.value.characters[index], ...next }
+      }
+      return next
+    })
   }
 
-  async function patchAlias(aliasId, payload) {
-    const next = await api.patch(`/novels/${project.value.id}/aliases/${aliasId}`, payload)
-    const index = project.value.aliases.findIndex((item) => item.id === aliasId)
-    if (index >= 0) project.value.aliases[index] = { ...project.value.aliases[index], ...next }
-    return next
+  function patchAlias(aliasId, payload) {
+    const projectId = project.value.id
+    return queueSave(async () => {
+      const next = await api.patch(`/novels/${projectId}/aliases/${aliasId}`, payload)
+      if (project.value?.id === projectId) {
+        const index = project.value.aliases.findIndex((item) => item.id === aliasId)
+        if (index >= 0) project.value.aliases[index] = { ...project.value.aliases[index], ...next }
+      }
+      return next
+    })
   }
 
   async function exportFile(format) {
@@ -230,6 +282,8 @@ export function useNovel() {
     error,
     job,
     jobBusy,
+    saving,
+    starting,
     warnings,
     selectChapter,
     stopPolling,

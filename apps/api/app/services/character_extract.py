@@ -149,6 +149,25 @@ async def _stream_json(db, user_id: str, model_id: str | None, prompt: str, syst
     return raw, used_model, fallback
 
 
+GENERATE_SYSTEM = (
+    '你是角色设定师。根据用户的角色提示词整理或创作一个角色；没有提示词时自行创作一个原创角色。'
+    '保留用户明确给出的设定，合理补足缺失信息。只输出 JSON 对象，不要 Markdown 或解释。'
+    '格式：{"name":"角色名","aliases":["别名"],"appearance":{"hair":"发型",'
+    '"hairColor":"发色","eyes":"眼睛","face":"面部","outfit":"服装",'
+    '"body":"体型","age":"年龄段","extra":"其他特征"},"notes":"性格、背景等备注"}。'
+    '字段值使用中文，外貌字段简洁可用于绘画。没有别名时返回空数组。'
+)
+
+
+async def generate_character(db, user_id: str, prompt: str, model_id: str | None) -> dict:
+    raw, used_model, fallback = await _stream_json(
+        db, user_id, model_id, prompt.strip() or '请原创设计一个完整角色。', GENERATE_SYSTEM
+    )
+    drafts = _normalize([raw] if isinstance(raw, dict) else raw)
+    notes = str(raw.get('notes') or '').strip()[:2000] if isinstance(raw, dict) else ''
+    return {**drafts[0], 'notes': notes, 'model_code': used_model, 'fallback_used': fallback}
+
+
 async def extract(db, user_id: str, source_text: str, model_id: str | None) -> dict:
     """返回 {drafts, modelCode, fallbackUsed}；候选链与分镜拆解一致。"""
     raw, used_model, fallback = await _stream_json(

@@ -151,6 +151,10 @@ def cancel_job(job_id: str, user: CurrentUser, db: DbSession) -> dict:
     job = db.get(models.BackgroundJob, job_id)
     if not job or job.owner_user_id != user.id:
         raise not_found("任务")
+    if job.kind == 'novel.continue':
+        from ..services import novel_continue
+        novel_continue.lock_project(db, (job.payload or {}).get('novelProjectId'))
+    job = db.scalars(select(models.BackgroundJob).where(models.BackgroundJob.id == job_id).with_for_update().execution_options(populate_existing=True)).first()
     if job.status in TERMINAL:
         raise ApiError("invalid_transition", f"任务已处于终态 {job.status}", status_code=409)
     job.status = "cancelled"

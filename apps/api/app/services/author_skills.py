@@ -43,15 +43,19 @@ _ITEMS_MAX = 20
 # ---------------- 模型网关 ----------------
 
 
-async def generate_text(db, user_id: str, prompt: str, system_prompt: str | None = None) -> str:
+async def generate_text(db, user_id: str, prompt: str, system_prompt: str | None = None, *, model_id: str | None = None, model_metadata: dict | None = None) -> str:
     """走用户自己的模型配置；没有可用连接时明确失败，不返回占位文本。"""
-    result = await ai_gateway.generate_text(
-        db,
-        owner_user_id=user_id,
-        task_type="article",
-        prompt=prompt,
-        system_prompt=system_prompt,
-    )
+    try:
+        result = await ai_gateway.generate_text(
+            db,
+            owner_user_id=user_id,
+            task_type="article",
+            prompt=prompt,
+            system_prompt=system_prompt,
+            **({"model_id": model_id} if model_id else {}),
+        )
+    except ai_gateway.InvalidModelSelection as exc:
+        raise ApiError(exc.code, exc.message, status_code=400) from exc
     if result.get("errorCode") or not (result.get("text") or "").strip():
         raise ApiError(
             result.get("errorCode") or "empty_generation",
@@ -59,6 +63,8 @@ async def generate_text(db, user_id: str, prompt: str, system_prompt: str | None
             status_code=503,
             retryable=True,
         )
+    if model_metadata is not None:
+        model_metadata.update({key: result.get(key) for key in ("modelId", "modelCode", "fallbackUsed")})
     return result["text"].strip()
 
 

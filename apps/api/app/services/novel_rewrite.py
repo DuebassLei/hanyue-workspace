@@ -290,57 +290,52 @@ def parse_facts(raw: str) -> dict:
 
 
 def apply_extract(db, project, characters, aliases) -> None:
-    """覆盖项目的人物和别名。用户已经填过的 new_name 按原名保留。"""
+    """合并抽取结果；既有设定由用户维护，不能被模型覆盖或删除。"""
     project_id = project.id
-    kept_alias_names = {
-        (row.kind, row.original_name): row.new_name
+    existing_aliases = {
+        (row.kind, row.original_name): row
         for row in db.scalars(
             select(models.NovelAlias).where(models.NovelAlias.project_id == project_id)
         ).all()
-        if (row.new_name or "").strip()
     }
-    kept_character_names = {
-        row.original_name: row.new_name
+    existing_characters = {
+        row.original_name: row
         for row in db.scalars(
             select(models.NovelCharacter).where(models.NovelCharacter.project_id == project_id)
         ).all()
-        if (row.new_name or "").strip()
     }
-    for row in db.scalars(select(models.NovelAlias).where(models.NovelAlias.project_id == project_id)).all():
-        db.delete(row)
-    for row in db.scalars(
-        select(models.NovelCharacter).where(models.NovelCharacter.project_id == project_id)
-    ).all():
-        db.delete(row)
-    db.flush()
 
     seen_aliases: set[tuple[str, str]] = set()
     for item in aliases or []:
         if not isinstance(item, dict):
             continue
         kind = str(item.get("kind") or "").strip()
-        original = str(item.get("originalName") or item.get("original_name") or "").strip()
+        original = str(item.get("originalName") or item.get("original_name") or "").strip()[:120]
         if kind not in ALIAS_KINDS or not original:
             continue
         key = (kind, original)
         if key in seen_aliases:
             continue
         seen_aliases.add(key)
+        if key in existing_aliases:
+            continue
         db.add(models.NovelAlias(
             project_id=project_id,
             kind=kind,
             original_name=original[:120],
-            new_name=(kept_alias_names.get(key) or "")[:120],
+            new_name="",
         ))
 
     seen_names: set[str] = set()
     for item in characters or []:
         if not isinstance(item, dict):
             continue
-        original = str(item.get("originalName") or item.get("original_name") or "").strip()
+        original = str(item.get("originalName") or item.get("original_name") or "").strip()[:120]
         if not original or original in seen_names:
             continue
         seen_names.add(original)
+        if original in existing_characters:
+            continue
         state = str(item.get("state") or "present").strip()
         if state not in CHARACTER_STATES:
             state = "present"
@@ -349,7 +344,7 @@ def apply_extract(db, project, characters, aliases) -> None:
         db.add(models.NovelCharacter(
             project_id=project_id,
             original_name=original[:120],
-            new_name=(kept_character_names.get(original) or "")[:120],
+            new_name="",
             relations=relations,
             speech_style=speech,
             state=state,

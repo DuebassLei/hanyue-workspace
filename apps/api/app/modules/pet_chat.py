@@ -9,11 +9,19 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from .. import schemas
-from ..core.deps import CurrentUser, DbSession, not_found
+from ..core.deps import ApiError, CurrentUser, DbSession, not_found
 from ..core.rbac import require_permission
-from ..services import pet_conversation_service
+from ..services import ai_gateway, pet_conversation_service
 
 router = APIRouter(tags=["pet"], dependencies=[require_permission("studio.use")])
+
+
+def _validate_model(db, user_id, model_id):
+    if model_id:
+        try:
+            ai_gateway.resolve_selection(db, user_id, model_id)
+        except ai_gateway.InvalidModelSelection as exc:
+            raise ApiError(exc.code, exc.message, status_code=400) from exc
 
 
 @router.post("/pet/conversations", response_model=schemas.PetConversationOut, status_code=201)
@@ -22,7 +30,8 @@ async def start_pet_conversation(
 ) -> schemas.PetConversationOut:
     service = pet_conversation_service.PetConversationService(db)
     conv = service.get_or_create_conversation(user.id, payload.studio_article_id)
-    await service.process_message(conv, payload.message, payload.active_skill_ids)
+    _validate_model(db, user.id, payload.model_id)
+    await service.process_message(conv, payload.message, payload.active_skill_ids, payload.model_id)
     db.commit()
     return conv
 
@@ -38,8 +47,9 @@ async def send_pet_message(
     conv = repo.get_conversation(conversation_id, user.id)
     if not conv:
         raise not_found("对话")
+    _validate_model(db, user.id, payload.model_id)
     await pet_conversation_service.PetConversationService(db).process_message(
-        conv, payload.message, payload.active_skill_ids
+        conv, payload.message, payload.active_skill_ids, payload.model_id
     )
     db.commit()
     return conv

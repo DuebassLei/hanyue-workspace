@@ -19,6 +19,7 @@ import copy
 import json
 import re
 import threading
+import uuid
 from pathlib import Path
 
 from sqlalchemy import select, text as sql_text
@@ -196,7 +197,7 @@ def extract_json(text: str):
     return None
 
 
-async def _model(owner_user_id: str, system: str, user: str, task: str) -> str:
+async def _model(owner_user_id: str, system: str, user: str, task: str, *, model_id: str | None = None, model_metadata: dict | None = None) -> str:
     with SessionLocal() as db:
         result = await ai_gateway.generate_text(
             db,
@@ -204,6 +205,7 @@ async def _model(owner_user_id: str, system: str, user: str, task: str) -> str:
             task_type=task,
             prompt=user,
             system_prompt=system,
+            **({"model_id": model_id} if model_id else {}),
         )
     text = str(result.get("text") or "").strip()
     if not text:
@@ -211,6 +213,8 @@ async def _model(owner_user_id: str, system: str, user: str, task: str) -> str:
             f"模型没有返回内容（{result.get('errorCode') or 'provider_unavailable'}），先到模型管理检查连接与默认模型。",
             502,
         )
+    if model_metadata is not None:
+        model_metadata.update({key: result.get(key) for key in ("modelId", "modelCode", "fallbackUsed")})
     return text
 
 
@@ -311,21 +315,50 @@ def _session_article(db, article_id: str) -> models.StudioArticle:
 # ---------------- 流水线 ----------------
 
 
+def chat_base(data: dict) -> dict:
+    """模型依赖的稿件版本和内容快照。"""
+    base = {key: copy.deepcopy(data.get(key)) for key in (
+        "updated_at", "topic", "material", "writer_style", "front", "title", "hook", "titles", "summary", "blocks"
+    )}
+    if base["updated_at"]:
+        from datetime import datetime, timezone
+        value = datetime.fromisoformat(base["updated_at"])
+        base["updated_at"] = value.replace(tzinfo=timezone.utc).isoformat() if value.tzinfo is None else value.astimezone(timezone.utc).isoformat()
+    return base
+
+
+def validate_chat_ops(ops, data: dict, target_block_id: str | None):
+    if target_block_id is None:
+        return ops
+    index = next((i for i, b in enumerate(data["blocks"]) if b["id"] == target_block_id), -1)
+    if index < 0:
+        raise PipelineError("目标段落已不存在", 409)
+    # 单段模式原子拒绝任何跨段、插入、删除、标题修改及格式错误。
+    if not isinstance(ops, list) or len(ops) > 1 or any(
+        not isinstance(op, dict) or op.get("op") != "rewrite"
+        or type(op.get("block")) is not int or op["block"] != index + 1
+        or not isinstance(op.get("text"), str) or not op["text"].strip()
+        for op in ops
+    ):
+        raise PipelineError("模型返回了超出目标段落的操作，稿件没有改动。", 409)
+    return ops
+
+
 class StudioPipeline:
     def __init__(self, jobs: StudioJobs | None = None) -> None:
         self.jobs = jobs or JOBS
 
     # ---- 写正文 ----
 
-    def draft(self, article_id: str, *, empty_only: bool = False) -> dict:
+    def draft(self, article_id: str, *, empty_only: bool = False, skill_prompt: str = "") -> dict:
         return self.jobs.start(
-            article_id, "draft", "写正文", lambda job: self._draft(article_id, job, empty_only=empty_only)
+            article_id, "draft", "写正文", lambda job: self._draft(article_id, job, empty_only=empty_only, skill_prompt=skill_prompt)
         )
 
     def draft_now(self, article_id: str) -> None:
         self.jobs.run_now("draft", "写正文", lambda job: self._draft(article_id, job))
 
-    async def _draft(self, article_id: str, job: dict, *, empty_only: bool = False) -> None:
+    async def _draft(self, article_id: str, job: dict, *, empty_only: bool = False, skill_prompt: str = "") -> None:
         with SessionLocal() as db:
             row = _session_article(db, article_id)
             data = studio_repo.row_to_dict(row)
@@ -334,7 +367,7 @@ class StudioPipeline:
             owner = row.owner_user_id
             style = data.get("writer_style") or DEFAULT_WRITER_STYLE
             # 人设（writer）+ 本次风格档 + 输出硬规则，三层各管一件事
-            system = f"{load_skill('writer')}\n\n{load_writer_style(style)}\n\n{DRAFT_RULES}"
+            system = f"{load_skill('writer')}\n\n{load_writer_style(style)}\n\n{skill_prompt}\n\n{DRAFT_RULES}"
         user = f"选题：{data.get('topic') or '（作者没有写选题，请从素材里提炼）'}\n\n素材：\n{data.get('material') or '（没有额外素材）'}"
         text = await _model(owner, system, user, "studio_draft")
         with SessionLocal() as db:
@@ -405,24 +438,38 @@ class StudioPipeline:
 
     # ---- 对话改稿 ----
 
-    def chat(self, article_id: str, message: str) -> dict:
-        return self.jobs.start(article_id, "chat", "改稿", lambda job: self._chat(article_id, job, message))
+    def chat(self, article_id: str, message: str, *, target_block_id=None, preview=False, base=None, model_id=None) -> dict:
+        return self.jobs.start(article_id, "chat", "改稿", lambda job: self._chat(
+            article_id, job, message, target_block_id=target_block_id, preview=preview, base=base, model_id=model_id
+        ), target=target_block_id)
 
-    def chat_now(self, article_id: str, message: str) -> None:
-        self.jobs.run_now("chat", "改稿", lambda job: self._chat(article_id, job, message))
+    def chat_now(self, article_id: str, message: str, *, target_block_id=None, preview=False, base=None, model_id=None) -> None:
+        self.jobs.run_now("chat", "改稿", lambda job: self._chat(
+            article_id, job, message, target_block_id=target_block_id, preview=preview, base=base, model_id=model_id
+        ))
 
-    async def _chat(self, article_id: str, job: dict, message: str) -> None:
+    async def _chat(self, article_id: str, job: dict, message: str, *, target_block_id=None, preview=False, base=None, model_id=None) -> None:
         with SessionLocal() as db:
             row = _session_article(db, article_id)
             data = studio_repo.row_to_dict(row)
             owner = row.owner_user_id
             style = data.get("writer_style") or DEFAULT_WRITER_STYLE
+            if base is not None and chat_base(data) != base:
+                raise PipelineError("稿件在任务开始前发生变化，请重新发起改稿。", 409)
+            base = chat_base(data)
         history = "\n".join(
             f"{'作者' if turn.get('role') == 'user' else '你'}：{turn.get('text', '')}"
             for turn in (data.get("chat") or [])[-6:]
         )
         # 改稿也要带风格档：不带的话模型只按人设改，改两轮结构就跑回默认原型
         system = f"{load_skill('writer')}\n\n{load_writer_style(style)}\n\n{CHAT_RULES}"
+        if preview or target_block_id:
+            system += "\n本次只允许 rewrite 改写已有段落，不允许新增、删除或修改标题。"
+        if target_block_id:
+            target_index = next((i for i, b in enumerate(data['blocks']) if b['id'] == target_block_id), -1)
+            if target_index < 0:
+                raise PipelineError("目标段落已不存在", 409)
+            system += f"\n只允许改写第 {target_index + 1} 段，最多一次 rewrite；不改稿时返回空 ops。"
         user = (
             f"# 当前标题\n{data.get('title') or '（还没有）'}\n\n"
             # 选题与素材：热点「写这篇」带过来的热点信息在这里；没有就明确写空，别让模型瞎编
@@ -433,11 +480,18 @@ class StudioPipeline:
             f"# 之前的对话\n{history or '（无）'}\n\n"
             f"# 作者这次说\n{message}"
         )
-        raw = await _model(owner, system, user, "studio_chat")
+        model_metadata = {}
+        raw = await _model(owner, system, user, "studio_chat", model_metadata=model_metadata, **({"model_id": model_id} if model_id else {}))
         parsed = extract_json(raw)
         with SessionLocal() as db:
-            row = _session_article(db, article_id)
+            if db.get_bind().dialect.name == "sqlite":
+                db.execute(sql_text("BEGIN IMMEDIATE"))
+            row = db.scalar(select(models.StudioArticle).where(models.StudioArticle.id == article_id).with_for_update())
+            if row is None:
+                raise PipelineError("稿件不存在", 404)
             data = studio_repo.row_to_dict(row)
+            if chat_base(data) != base:
+                raise PipelineError("稿件在生成期间发生变化，请重新发起改稿。", 409)
             if not isinstance(parsed, dict):
                 data["chat"] = (data.get("chat") or []) + [{
                     "role": "assistant",
@@ -447,20 +501,33 @@ class StudioPipeline:
                 studio_repo.save(db, row, data)
                 db.commit()
                 return
-            revision = studio_repo.snapshot(db, row, data, message[:30])
-            receipts, _changed = AB.apply_ops(data, parsed.get("ops"))
-            if not receipts:
-                db.delete(revision)
-                db.flush()
+            ops = validate_chat_ops(parsed.get("ops"), data, target_block_id)
+            if preview and (not isinstance(ops, list) or len(ops) > 40 or any(
+                not isinstance(op, dict) or op.get("op") != "rewrite"
+                or type(op.get("block")) is not int or not 1 <= op["block"] <= len(data["blocks"])
+                or not isinstance(op.get("text"), str) or not op["text"].strip()
+                for op in ops
+            )):
+                raise PipelineError("预览只支持改写已有段落，稿件没有改动。", 409)
+            original = copy.deepcopy(data)
+            candidate = copy.deepcopy(data) if preview else data
+            receipts, _changed = AB.apply_ops(candidate, ops)
+            if receipts and not preview:
+                studio_repo.snapshot(db, row, original, message[:30])
             reply = parsed.get("reply")
             reply = reply.strip()[:600] if isinstance(reply, str) else ""
+            turn = {"role": "assistant", "text": reply or ("改好了。" if receipts else "这次没有改动。"),
+                    "receipts": receipts, "undoable": bool(receipts) and not preview, "model": model_metadata}
+            if preview and receipts:
+                # 保存对话本身也会更新版本；建议基于保存后的版本进行确认。
+                AB.touch(data)
+                base = chat_base(data)
+                changes = [{"blockId": old["id"], "before": old["text"], "after": new["text"]}
+                           for old, new in zip(original["blocks"], candidate["blocks"]) if old["text"] != new["text"]]
+                turn["proposal"] = {"id": uuid.uuid4().hex, "status": "pending", "targetBlockId": target_block_id,
+                                    "changes": changes, "receipts": receipts, "base": base, "ops": ops}
             chat = data.get("chat") or []
-            chat.append({
-                "role": "assistant",
-                "text": reply or ("改好了。" if receipts else "这次没有改动。"),
-                "receipts": receipts,
-                "undoable": bool(receipts),
-            })
+            chat.append(turn)
             data["chat"] = chat[-60:]
             studio_repo.save(db, row, data)
             db.commit()

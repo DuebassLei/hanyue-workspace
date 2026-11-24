@@ -266,6 +266,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api, downloadAuthenticated } from '../api/client'
+import { confirm } from '../ui/feedback'
 
 const TYPE_LABELS = { writing: '写作风格', persona: '人物思维', knowledge: '领域知识' }
 const SOURCE_LABELS = { manual: '手动', distilled: '蒸馏', imported: '导入' }
@@ -595,7 +596,7 @@ async function duplicate(skill) {
 }
 
 async function remove(skill) {
-  if (!window.confirm(`删除技能「${skill.name}」？历史版本会一并删除，已启用它的对话不受影响。`)) return
+  if (!(await confirm(`删除技能「${skill.name}」？历史版本会一并删除，已启用它的对话不受影响。`, '删除技能'))) return
   try {
     await api.del(`/skill-center/skills/${skill.id}`)
     flash('技能已删除')

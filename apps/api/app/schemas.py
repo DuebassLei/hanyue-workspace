@@ -321,7 +321,14 @@ class ConnectionOut(CamelModel):
     base_url: str
     key_masked: str
     status: str
+    owner_user_id: str = ""
+    owner_label: str = ""
     models: list["CatalogOut"] = Field(default_factory=list)
+
+
+class PlatformModelDefaults(CamelModel):
+    default_text_model_id: str | None = None
+    default_image_model_id: str | None = None
 
 
 class CatalogOut(CamelModel):
@@ -339,6 +346,7 @@ class CatalogOut(CamelModel):
     is_default: bool = False
     # 空能力的历史模型按文本模型处理，与网关 _is_text_model 保持一致
     is_text_model: bool = False
+    source: Literal["personal", "platform", "other"] = "personal"
 
 
 class ModelStatusOut(CamelModel):
@@ -371,6 +379,7 @@ class ImageGenerationIn(CamelModel):
     prompt: str = Field(min_length=1)
     purpose: str = "cover"
     aspect_ratio: str = "3:4"
+    exact_aspect: bool = False
     count: int = 1
     model_id: str | None = None
     # 参考图（图生图）：最多 4 张已上传素材，走供应商 /images/edits
@@ -519,6 +528,10 @@ class PublishJobOut(CamelModel):
     # 手动回填/草稿推送时记录的落地页链接（如有）
     permalink: str = ""
     updated_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    pushed_at: datetime | None = None
+    can_retry: bool = False
 
 
 class PublishRecordOut(CamelModel):
@@ -1199,6 +1212,20 @@ class CharacterImageGenerateOut(CamelModel):
     job_id: str
     prompt: str
     anchored: bool = False
+
+
+class CharacterGenerateIn(CamelModel):
+    prompt: str = Field(default="", max_length=8000)
+    model_id: str | None = None
+
+
+class CharacterGenerateOut(CamelModel):
+    name: str
+    aliases: list[str]
+    appearance: dict[str, str]
+    notes: str = ""
+    model_code: str | None = None
+    fallback_used: bool = False
 
 
 class CharacterAppearanceCompleteIn(CamelModel):
@@ -1948,6 +1975,7 @@ class StudioNewIn(CamelModel):
     markdown: str = ""
     # 写正文用的风格档；不传按实战教程
     writer_style: str = "tutorial"
+    skill_ids: list[str] = Field(default_factory=list, max_length=5)
     # 建好就写正文；给了 markdown 时按导入处理，不再让模型写
     draft: bool = False
     titles: bool = True
@@ -1961,10 +1989,14 @@ class StudioDraftIn(CamelModel):
     """写正文。带上 style 就是「按这个风格重写一遍」，不带就用稿件当前风格。"""
 
     style: str | None = None
+    skill_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class StudioChatIn(CamelModel):
+    model_id: str | None = None
     message: str = Field(min_length=1, max_length=4000)
+    target_block_id: str | None = Field(default=None, min_length=1, max_length=120)
+    preview: StrictBool = False
 
 
 class StudioBlockPatchIn(CamelModel):
@@ -2058,6 +2090,7 @@ class PetMessage(CamelModel):
 
 
 class PetMessageIn(CamelModel):
+    model_id: str | None = None
     message: str = Field(min_length=1, max_length=12000)
     active_skill_ids: list[str] | None = Field(default=None, max_length=5)
 
@@ -2078,6 +2111,7 @@ class PetConversationIn(CamelModel):
     """发起对话"""
 
     studio_article_id: str
+    model_id: str | None = None
     message: str = Field(min_length=1, max_length=12000)
     active_skill_ids: list[str] = Field(default_factory=list, max_length=5)
 

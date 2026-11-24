@@ -28,8 +28,7 @@ def check_schedule(value: datetime | None) -> None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     if value <= datetime.now(timezone.utc):
-        raise ApiError("scheduled_at_past", "计划发布时间必须晚于当前时间", status_code=400)
-    raise ApiError("schedule_separate", "请用「保存排期」记录计划；草稿箱推送不自动执行排期", status_code=422)
+        raise ApiError("scheduled_at_past", "计划推送时间必须晚于当前时间", status_code=400)
 
 
 def archived_version(db, article: models.StudioArticle) -> models.ContentVersion | None:
@@ -87,7 +86,7 @@ def result(job: models.PublishJob) -> dict:
         "contentItemId": job.content_item_id,
         "versionId": (job.payload_snapshot or {}).get("versionId"),
         "publishJobIds": [job.id],
-        "scheduledFor": None,
+        "scheduledFor": _iso(job.scheduled_at),
         "status": public_status(job),
     }
 
@@ -111,7 +110,10 @@ def _iso(value: datetime | None) -> str | None:
 def public_status(job: models.PublishJob) -> str:
     if job.status == publish_state.SUCCEEDED:
         return "drafted" if job.target == "draft" else "succeeded"
-    if job.status in {publish_state.FAILED, publish_state.NEEDS_ATTENTION, publish_state.CANCELLED}:
+    # 取消要单独可见：前端据此允许同一版本重新创建任务；混进 failed 会让取消后永远建不了新任务
+    if job.status == publish_state.CANCELLED:
+        return "cancelled"
+    if job.status in {publish_state.FAILED, publish_state.NEEDS_ATTENTION}:
         return "failed"
     if (job.payload_snapshot or {}).get("mode") == "manual":
         return "manual"
@@ -176,10 +178,7 @@ def review(db, article: models.StudioArticle, data: dict, *, can_retry) -> dict:
             at = _iso(job.scheduled_at)
         error = None
         if status == "failed":
-            error = (
-                "任务已取消" if job.status == publish_state.CANCELLED
-                else job.error_message or job.error_code or "任务失败，请到发布中心查看详情"
-            )
+            error = job.error_message or job.error_code or "任务失败，请到发布中心查看详情"
         platforms.append({
             "jobId": job.id,
             "platform": job.platform,
@@ -191,6 +190,9 @@ def review(db, article: models.StudioArticle, data: dict, *, can_retry) -> dict:
             "status": status,
             "url": url,
             "at": at,
+            # 未推送也要显示「待推送时间」；已推送用真实 pushedAt，不能用任务更新时间冒充
+            "scheduledAt": _iso(job.scheduled_at),
+            "pushedAt": snapshot.get("pushedAt"),
             "error": error,
             "draftMediaId": draft_media_id,
             "canRetry": snapshot.get("studioArticleId") == article.id and can_retry(job),

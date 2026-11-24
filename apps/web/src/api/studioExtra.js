@@ -51,7 +51,7 @@ export const studioExtraApi = {
 
   // ---- 发布与复盘 ----
   /** 推送已存档版本到指定公众号的草稿箱，不正式发布。 */
-  pushDraft: (id, accountId) => api.post(`${base(id)}/publish`, { accountId }),
+  pushDraft: (id, payload) => api.post(`${base(id)}/publish`, payload),
   retryDraft: (id, jobId) => api.post(`${base(id)}/publish/${jobId}/retry`),
   wechatAccounts: async () => (await api.get('/platform-accounts')).filter(
     (account) => account.platform === 'wechat_official' && account.status === 'connected' && account.authSource === 'app_secret',

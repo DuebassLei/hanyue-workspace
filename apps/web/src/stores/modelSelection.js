@@ -26,10 +26,10 @@ export const useModelSelectionStore = defineStore('modelSelection', {
           ? `自动（默认：${state.defaultModelLabel}）`
           : '自动（首个失败自动降级）'
       const models = state.catalog
-        .filter((item) => item.enabled && item.isTextModel)
+        .filter((item) => item.enabled && item.isTextModel && item.source !== 'other')
         .map((item) => ({
           value: item.id,
-          label: `${item.connectionName || '未命名连接'} · ${item.modelCode}${item.isDefault ? '（默认）' : ''}`,
+          label: `${item.source === 'platform' ? '平台提供' : (item.connectionName || '我的模型')} · ${item.displayName || item.modelCode}${item.isDefault ? '（默认）' : ''}`,
         }))
       return [{ value: '', label: auto }, ...models]
     },

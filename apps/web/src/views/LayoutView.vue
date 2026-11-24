@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { useLayoutStudio } from '../features/layout/useLayoutStudio'
+import { confirm } from '../ui/feedback'
 import { STYLE_PRESETS, COLOR_PRESETS, BANNER_MODES, SVG_CARD_PRESETS } from '../features/layout/studioPresets'
 
 const route = useRoute()
@@ -16,10 +17,10 @@ const currentColor = computed(() => COLOR_PRESETS.find(item => item.id === optio
 const currentCardPreset = computed(() => SVG_CARD_PRESETS.find(item => item.id === cardPanel.kind))
 const wordCount = computed(() => body.value.replace(/\s/g, '').length)
 const saveStatus = computed(() => saving.value ? '正在保存…' : dirty.value ? '有未保存的修改' : savedAt.value ? '已保存到当前版本' : articleId.value ? '当前版本已载入' : '样文体验 · 未关联文章')
-onBeforeRouteLeave(() => !dirty.value || !articleId.value || window.confirm('排版或正文尚未保存，确定离开吗？'))
+onBeforeRouteLeave(() => !dirty.value || !articleId.value || confirm('排版或正文尚未保存，确定离开吗？'))
 onBeforeRouteUpdate((to, from) => {
   if (saving.value || (to.query.articleId === from.query.articleId && to.query.versionId === from.query.versionId)) return true
-  return !dirty.value || !articleId.value || window.confirm('排版或正文尚未保存，确定切换文章版本吗？')
+  return !dirty.value || !articleId.value || confirm('排版或正文尚未保存，确定切换文章版本吗？')
 })
 </script>
 

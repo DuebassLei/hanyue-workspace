@@ -72,7 +72,11 @@ def _env_provider() -> dict | None:
     env_key = os.getenv("IMAGE_PROVIDER_API_KEY", "").strip()
     env_model = os.getenv("IMAGE_PROVIDER_MODEL", "").strip()
     if env_base and env_key and env_model:
-        return {"modelId": None, "baseUrl": env_base.rstrip("/"), "apiKey": env_key, "modelCode": env_model}
+        try:
+            sizes = json.loads(os.getenv("IMAGE_PROVIDER_SUPPORTED_SIZES", "{}"))
+        except (TypeError, ValueError):
+            sizes = {}
+        return {"modelId": None, "baseUrl": env_base.rstrip("/"), "apiKey": env_key, "modelCode": env_model, "supportedImageSizes": sizes}
     return None
 
 
@@ -220,8 +224,9 @@ def list_providers(db, owner_user_id: str) -> list[dict]:
     if env:
         providers.append(
             {
-                "modelId": None,
+                "modelId": "__env__",
                 "modelCode": env["modelCode"],
+                "supportedImageSizes": exact_image_sizes(env),
                 "label": f"环境变量 · {env['modelCode']}",
                 "source": "env",
                 "isDefault": False,
@@ -243,6 +248,7 @@ def list_providers(db, owner_user_id: str) -> list[dict]:
             {
                 "modelId": entry.id,
                 "modelCode": entry.model_code,
+                "supportedImageSizes": exact_image_sizes({"supportedImageSizes": (entry.options or {}).get("supportedImageSizes")}),
                 # None 表示尚未探测；前端据此决定参考图提示文案
                 "supportsEdits": (entry.options or {}).get("supportsEdits"),
                 CAPABILITY_NEGATIVE_PROMPT: _option_is_true(entry, CAPABILITY_NEGATIVE_PROMPT),
@@ -252,10 +258,27 @@ def list_providers(db, owner_user_id: str) -> list[dict]:
                 "isDefault": entry.id == default_id,
             }
         )
-    if default_id:
-        # 稳定排序：默认项提到第一位，其余保持原有顺序（环境变量退到其后）。
-        providers.sort(key=lambda item: 0 if item.get("isDefault") else 1)
+    platform_id = _platform_image_id(db)
+    if platform_id and not any(item.get("modelId") == platform_id for item in providers):
+        entry = db.get(models.ModelCatalogEntry, platform_id)
+        provider = resolve_image_provider(db, owner_user_id, platform_id)
+        if entry and provider:
+            providers.append({
+                "modelId": entry.id, "modelCode": entry.model_code,
+                "label": f"平台提供 · {entry.display_name or entry.model_code}",
+                "source": "platform", "isDefault": False,
+                "supportedImageSizes": exact_image_sizes(provider),
+                "supportsEdits": (entry.options or {}).get("supportsEdits"),
+                CAPABILITY_NEGATIVE_PROMPT: _option_is_true(entry, CAPABILITY_NEGATIVE_PROMPT),
+                CAPABILITY_SEED: _option_is_true(entry, CAPABILITY_SEED),
+            })
+    providers.sort(key=lambda item: (0 if item.get("isDefault") else 1, 1 if item.get("source") == "env" else 0))
     return providers
+
+
+def _platform_image_id(db) -> str | None:
+    settings = db.get(models.PlatformModelSettings, "platform")
+    return (str(settings.default_image_model_id or "").strip() or None) if settings else None
 
 
 def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) -> dict | None:
@@ -263,15 +286,15 @@ def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) 
 
     指定 model_id 时优先使用对应连接（支持多供应商动态切换），否则回退环境变量。
 
-    未指定时的优先级：用户级全局默认生图模型 → 环境变量供应商 → 第一个可用连接。
-    显式默认排最前是为了让「设为默认」真的生效：否则运营环境配了 IMAGE_PROVIDER_*，
-    用户在界面里怎么切都会被环境变量压住。
+    未指定时优先用户默认及个人连接，其次平台兜底，最后兼容环境变量供应商。
     """
+    if model_id == "__env__":
+        return _env_provider()
     if model_id:
         entry = db.get(models.ModelCatalogEntry, model_id)
         if entry and entry.enabled and "image.generate" in (entry.capabilities or []):
             connection = db.get(models.ModelConnection, entry.connection_id)
-            if connection and connection.owner_user_id == owner_user_id and connection.base_url:
+            if connection and (connection.owner_user_id == owner_user_id or model_id == _platform_image_id(db)) and connection.base_url:
                 provider = _provider_from_entry(connection, entry)
                 if provider:
                     return provider
@@ -288,17 +311,6 @@ def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) 
             reason = "no_credential"
         logger.warning("[image] 默认生图模型 %s 配置失效，本次按原顺序选择：%s", default_id, reason)
 
-    env = _env_provider()
-    if env:
-        return {
-            "baseUrl": env["baseUrl"],
-            "apiKey": env["apiKey"],
-            "modelCode": env["modelCode"],
-            "modelId": None,
-            CAPABILITY_NEGATIVE_PROMPT: False,
-            CAPABILITY_SEED: False,
-        }
-
     stmt = select(models.ModelCatalogEntry).where(
         models.ModelCatalogEntry.enabled.is_(True)
     )
@@ -311,6 +323,20 @@ def resolve_image_provider(db, owner_user_id: str, model_id: str | None = None) 
         provider = _provider_from_entry(connection, entry)
         if provider:
             return provider
+    platform_id = _platform_image_id(db)
+    if platform_id:
+        provider = resolve_image_provider(db, owner_user_id, platform_id)
+        if provider:
+            return provider
+    # 旧部署的环境变量供应商保留为最后兼容兜底。
+    env = _env_provider()
+    if env:
+        return {
+            "baseUrl": env["baseUrl"], "apiKey": env["apiKey"],
+            "modelCode": env["modelCode"], "modelId": None,
+            "supportedImageSizes": env.get("supportedImageSizes"),
+            CAPABILITY_NEGATIVE_PROMPT: False, CAPABILITY_SEED: False,
+        }
     return None
 
 
@@ -440,7 +466,7 @@ def _request_batch(
     return response
 
 
-def generate_images(
+def _generate_images_single(
     db,
     owner_user_id: str,
     *,
@@ -476,6 +502,9 @@ def generate_images(
             "image_provider_unavailable",
             "未接入图像生成供应商；请在设置中配置支持 image.generate 能力的模型，或上传素材后指定 assetId",
         )
+    if merge_meta is not None:
+        merge_meta["modelId"] = provider.get("modelId")
+        merge_meta["modelCode"] = provider.get("modelCode")
     if exact_aspect:
         size = exact_image_sizes(provider).get(aspect_ratio)
         if not size:
@@ -486,17 +515,24 @@ def generate_images(
     collected: list[tuple[bytes, str]] = []
     last_error: ImageProviderUnavailable | None = None
     for _ in range(wanted):
-        response = _request_batch(
-            provider,
-            prompt=prompt,
-            size=size,
-            batch=1,
-            reference_images=reference_images,
-            negative_prompt=negative_prompt,
-            seed=seed,
-            merge_meta=merge_meta,
-        )
+        try:
+            response = _request_batch(
+                provider,
+                prompt=prompt,
+                size=size,
+                batch=1,
+                reference_images=reference_images,
+                negative_prompt=negative_prompt,
+                seed=seed,
+                merge_meta=merge_meta,
+            )
+        except ImageProviderUnavailable:
+            if collected:
+                break
+            raise
         if response.status_code in (401, 403):
+            if collected:
+                break
             raise ImageProviderUnavailable("unauthorized", "图像供应商拒绝了凭据")
         if response.status_code >= 400:
             # 带参考图却收到「端点不存在/方法不支持」一类状态码：供应商不支持
@@ -535,6 +571,24 @@ def generate_images(
     if not collected and last_error:
         raise last_error
     return collected
+
+
+def generate_images(db, owner_user_id: str, *, model_id: str | None = None, **kwargs) -> list[tuple[bytes, str]]:
+    """自动模式在个人供应商失败时尝试平台兜底；显式选择绝不切换。"""
+    try:
+        return _generate_images_single(db, owner_user_id, model_id=model_id, **kwargs)
+    except ImageProviderUnavailable as exc:
+        # 参数/能力错误和结果比例不匹配不应切换供应商后悄悄重试。
+        if model_id or exc.code in {"unsupported_aspect_ratio", "unexpected_aspect_ratio", "edits_unsupported"}:
+            raise
+        platform_id = _platform_image_id(db)
+        current = resolve_image_provider(db, owner_user_id)
+        if not platform_id or not current or current.get("modelId") == platform_id:
+            raise
+        result = _generate_images_single(db, owner_user_id, model_id=platform_id, **kwargs)
+        if kwargs.get("merge_meta") is not None:
+            kwargs["merge_meta"]["fallbackUsed"] = True
+        return result
 
 
 INTERROGATE_SYSTEM = (

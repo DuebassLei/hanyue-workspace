@@ -294,6 +294,8 @@ POSTGRES_PASSWORD=强密码
 IMAGE_PROVIDER_BASE_URL=https://api.example.com/v1
 IMAGE_PROVIDER_API_KEY=sk-...
 IMAGE_PROVIDER_MODEL=gpt-image-1
+# 可选：环境变量供应商支持的精确尺寸（JSON），例如 {"1:1":"1024x1024","3:2":"1536x1024"}
+IMAGE_PROVIDER_SUPPORTED_SIZES={"1:1":"1024x1024","3:2":"1536x1024"}
 ```
 
 compose 还会注入 `ENVIRONMENT=production` / `ALLOW_DEV_LOGIN=false`；后端启动门禁会再次校验密钥强度与开发登录开关，配置不合格会拒绝启动。
@@ -316,6 +318,7 @@ shell / compose 注入的环境变量  >  apps/api/.env  >  代码默认值
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 逗号分隔 |
 | `REDIS_URL` | 空 | 配置后由 Worker 消费；留空用线程池 |
 | `IMAGE_PROVIDER_BASE_URL` / `API_KEY` / `MODEL` | 空 | 三者齐全才启用 AI 生图 |
+| `IMAGE_PROVIDER_SUPPORTED_SIZES` | `{}` | 环境变量供应商支持的精确尺寸 JSON，例如 `{"1:1":"1024x1024"}`；非法项被忽略 |
 | `PLATFORM_EVIDENCE_FILE` | 空 | Phase 0 证据 JSON 路径，建议绝对路径 |
 | `PLATFORM_REDIRECT_BASE` | `http://localhost:5173` | OAuth 回调基址 |
 | `PLATFORM_<CODE>_CLIENT_ID/SECRET/AUTH_URL/TOKEN_URL/API_BASE/SCOPES` | 空 | 逐平台 OAuth 配置 |
@@ -338,11 +341,14 @@ shell / compose 注入的环境变量  >  apps/api/.env  >  代码默认值
 IMAGE_PROVIDER_BASE_URL=https://api.example.com/v1
 IMAGE_PROVIDER_API_KEY=sk-...
 IMAGE_PROVIDER_MODEL=gpt-image-1
+# 可选：声明供应商支持的精确尺寸（JSON），用于前端比例选择
+IMAGE_PROVIDER_SUPPORTED_SIZES={"1:1":"1024x1024","3:2":"1536x1024"}
 ```
 
 - 全局生效，优先级高于设置页登记的模型。
-- 本地改完重启 uvicorn；Docker 改完重建 api 与 worker（compose 已把这三个变量同时透传给两个服务）。
+- 本地改完重启 uvicorn；Docker 改完重建 api 与 worker（compose 已把这些变量同时透传给两个服务）。
 - `BASE_URL` 填到 `/v1` 即可：代码会请求 `{BASE_URL}/images/generations`。
+- `SUPPORTED_SIZES` 只填供应商**实际支持**的尺寸；非法 JSON 或宽高与比例不匹配项会被忽略，空配置不会虚构能力。
 
 ### 路径 2：设置页登记模型能力
 

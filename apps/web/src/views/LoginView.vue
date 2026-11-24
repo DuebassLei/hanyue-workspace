@@ -41,7 +41,7 @@ function switchMode() {
 }
 
 function openAuth(nextMode = 'login') {
-  mode.value = nextMode
+  mode.value = nextMode === 'register' && !canRegister.value ? 'login' : nextMode
   error.value = ''
   showAuth.value = true
 }
@@ -139,9 +139,7 @@ async function devEnter() {
       <n-modal v-model:show="showAuth" preset="card" :title="isRegister ? '创建账号' : '登录工作台'" class="auth-modal" :mask-closable="!busy" :close-on-esc="!busy" style="width: min(440px, calc(100vw - 32px))">
         <div class="login-card">
       <header class="login-head">
-        <div class="brand">汉月</div>
-        <h1 class="login-title">{{ isRegister ? '创建账号' : '登录工作台' }}</h1>
-        <p class="page-sub">{{ hint }}</p>
+        <p class="login-hint">{{ hint }}</p>
       </header>
 
       <form class="login-form" @submit.prevent="submit">
@@ -275,48 +273,28 @@ async function devEnter() {
 
 .login-card {
   width: 100%;
-  max-width: 400px;
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
-  background: white;
-  border: 1px solid var(--landing-ink);
-  border-radius: 16px;
-  padding: 28px;
-  color: var(--landing-ink);
+  gap: 20px;
 }
 
-.login-head {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.brand {
-  font-family: 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', Georgia, serif;
-  font-size: var(--font-sm);
-  letter-spacing: 0.32em;
-  color: var(--color-text-secondary);
-  text-transform: uppercase;
-}
-
-.login-title {
-  font-family: 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', Georgia, serif;
-  font-size: var(--font-display);
-  font-weight: 650;
-  line-height: 1.2;
+.login-hint {
+  margin: 0;
+  color: var(--color-text-secondary, #777770);
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .login-form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: 16px;
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 6px;
 }
 
 .field-label {
@@ -333,7 +311,7 @@ async function devEnter() {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-3);
+  gap: 12px;
 }
 
 .link {

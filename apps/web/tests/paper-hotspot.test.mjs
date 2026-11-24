@@ -11,11 +11,11 @@ const flush = async () => { for (let i = 0; i < 4; i++) await new Promise((resol
 const { descriptor } = parse(readFileSync(new URL('../src/views/PaperView.vue', import.meta.url), 'utf8'))
 const code = compileScript(descriptor, { id: 'hotspot-test' }).content
   .replace(/from ['"]vue['"]/g, `from ${JSON.stringify(import.meta.resolve('vue'))}`)
-  .replace(/import \{ onBeforeRouteLeave, useRoute \} from [^\n]+/, 'const onBeforeRouteLeave = () => {}; const useRoute = () => globalThis.paperHotspot.route')
+  .replace(/import \{ onBeforeRouteLeave, useRoute \} from [^\n]+/, 'const onBeforeRouteLeave = (guard) => { globalThis.paperHotspot.guard = guard }; const useRoute = () => globalThis.paperHotspot.route')
   .replace(/import \{ NButton[^\n]+/, '')
   .replace(/^import \w+ from [^\n]+\.vue['"]\s*$/gm, (line) => `const ${line.split(' ')[1]} = {};`)
   .replace(/import \{ studioApi, uploadReport \} from [^\n]+/, 'const { studioApi } = globalThis.paperHotspot; const uploadReport = () => {}')
-  .replace(/import \{ (apiUrl|markdownToHtml|confirm, toast|useParagraphDrafts|usePaperParagraphSelection) \} from [^\n]+/g, 'const { $1 } = globalThis.paperHotspot')
+  .replace(/import \{ (api, apiUrl|apiUrl|markdownToHtml|confirm, toast|useParagraphDrafts|usePaperParagraphSelection|useModelSelectionStore) \} from [^\n]+/g, 'const { $1 } = globalThis.paperHotspot')
 
 async function mount({ material, blocks = [], notice = null, pet = '1', markdown, confirm = async () => true, saveMarkdown } = {}) {
   let calls = 0
@@ -25,13 +25,14 @@ async function mount({ material, blocks = [], notice = null, pet = '1', markdown
   const drafts = vue.ref([])
   const baseline = ['# 来源测试', ...blocks.map((block) => block.text)].join('\n\n') + '\n'
   globalThis.paperHotspot = {
-    route, toast() {}, async confirm(...args) { activity.push(['confirm']); return confirm(...args) }, apiUrl() {}, markdownToHtml() {},
+    route, api: { get: async () => [] }, toast() {}, async confirm(...args) { activity.push(['confirm']); return confirm(...args) }, apiUrl() {}, markdownToHtml() {},
+    useModelSelectionStore: () => ({ selectedModelId: '', options: [], error: '', load() {} }),
     useParagraphDrafts: () => ({ draftVersion: vue.ref(0), storageFailed: vue.ref(false), draftsFor: () => new Map(), listUnsaved: () => drafts.value, lastParagraph: () => '' }),
     usePaperParagraphSelection: () => ({ active: vue.ref(false), ids: vue.ref([]), reset() {}, stop() {} }),
     studioApi: {
       state: async () => ({ articles: [], writerStyles: [] }),
       get: async (id) => id === 'one' ? snapshot : { id, title: '另一稿', blocks: [] },
-      chat: async () => { calls++ },
+      chat: async (...args) => { calls++; activity.push(['chat', ...args]); return snapshot },
       async markdown(id) { activity.push(['get', id]); return { markdown: markdown ?? baseline } },
       async saveMarkdown(...args) {
         activity.push(['patch', ...args])
@@ -52,13 +53,56 @@ async function mount({ material, blocks = [], notice = null, pet = '1', markdown
   return { state: instance.$.setupState, app, route, activity, drafts, baseline, calls: () => calls }
 }
 
+test('取消源码丢弃确认时保留编辑内容、稿件选择和路由', async () => {
+  const { state, app, activity } = await mount({ confirm: async () => false })
+  try {
+    state.sourceOriginal = '原文'
+    state.sourceText = '未保存'
+    state.showArticles = true
+    await state.reloadSource()
+    assert.equal(state.sourceText, '未保存')
+    assert.equal(state.sourceOriginal, '原文')
+    assert.equal(await state.openArticle('other'), false)
+    assert.equal(state.article.id, 'one')
+    assert.equal(state.showArticles, true)
+    await state.createArticle()
+    assert.equal(await globalThis.paperHotspot.guard(), false)
+    assert.equal(state.sourceText, '未保存')
+    assert.equal(activity.filter(([kind]) => kind === 'confirm').length, 4)
+  } finally { app.unmount() }
+})
+
+test('成稿台草稿推送入口在任务执行时禁用，并复用未保存保护', () => {
+  assert.match(descriptor.template.content, /:disabled="!article \|\| editingLocked" @click="canUseSavedDraft\(\) && \(showPublish = true\)">推送草稿/)
+  assert.match(descriptor.template.content, /title="创建草稿推送任务"/)
+  assert.match(descriptor.template.content, /:before-submit="\(\) => !editingLocked && canUseSavedDraft\(\)"/)
+})
+
+test('写作工具独立占用侧栏，返回对话不卸载聊天或清空新稿输入', async () => {
+  const { state, app } = await mount()
+  try {
+    state.createForm.topic = '保留的选题'
+    state.openCreateTools()
+    assert.equal(state.showAssistantTools, true)
+    assert.equal(state.showCreate, true)
+    assert.equal(state.assistantMounted, true)
+    state.openPet()
+    assert.equal(state.showAssistantTools, false)
+    assert.equal(state.createForm.topic, '保留的选题')
+    assert.equal(state.assistantMounted, true)
+    assert.match(descriptor.template.content, /v-if="assistantMounted" v-show="!loading && !showAssistantTools"/)
+    assert.match(descriptor.template.content, /← 返回对话/)
+    assert.doesNotMatch(descriptor.styles[0].content, /max-height:\s*40%/)
+  } finally { app.unmount() }
+})
+
 const material = '【热点选题】来源测试\n出现平台：微博'
 
 test('热点入口把选题和来源交给创作小助手，不在稿纸自动生成', async () => {
   const { state, app, calls } = await mount({ material })
   try {
     assert.equal(state.tab, 'assistant')
-    assert.equal(state.petMode, 'create')
+    assert.equal(state.assistantMounted, true)
     assert.deepEqual(state.assistantHotspot, { title: '来源测试', material })
     assert.equal(calls(), 0)
     assert.equal(state.article.blocks.length, 0)
@@ -72,13 +116,25 @@ test('普通助手入口、已有正文以及载入失败的热点均不自动�
     try {
       assert.equal(calls(), 0)
       assert.equal(state.tab, input.pet === '' ? 'layout' : 'assistant')
-      assert.equal(state.petMode, 'create')
+      assert.equal(state.assistantMounted, input.pet !== '')
     } finally { app.unmount() }
   }
 })
 
 const existing = [{ id: 'kept', text: '已有正文' }]
 const generated = '# 新标题\n\n新正文'
+
+test('助手改稿发送稳定段落 ID 和预览标记，未保存时禁止发送', async () => {
+  const { state, app, activity, drafts } = await mount({ blocks: existing })
+  try {
+    state.selectedBlockId = 'kept'
+    await state.sendPetEdit('调整措辞')
+    assert.deepEqual(activity.find((item) => item[0] === 'chat'), ['chat', 'one', '调整措辞', { targetBlockId: 'kept', preview: true }])
+    drafts.value = [{ blockId: 'kept', text: '未保存' }]
+    await assert.rejects(state.sendPetEdit('再改'), /先保存/)
+    assert.equal(activity.filter((item) => item[0] === 'chat').length, 1)
+  } finally { app.unmount() }
+})
 
 test('整稿写回先读取服务端基线，再确认，最后携带基线保存并刷新源码', async () => {
   const { state, app, activity, baseline } = await mount({ blocks: existing })
@@ -91,7 +147,7 @@ test('整稿写回先读取服务端基线，再确认，最后携带基线保�
   } finally { app.unmount() }
 })
 
-test('取消覆盖时不保存；空结果和改段落模式都不能写回整稿', async () => {
+test('取消覆盖时不保存，空结果不能写回整稿', async () => {
   const { state, app, activity } = await mount({ blocks: existing, confirm: async () => false })
   try {
     assert.equal(await state.applyAssistantMarkdown(generated), false)
@@ -99,8 +155,6 @@ test('取消覆盖时不保存；空结果和改段落模式都不能写回整�
     activity.length = 0
     await assert.rejects(() => state.applyAssistantMarkdown('  '), /正文/)
     await assert.rejects(() => state.applyAssistantMarkdown('# 只有标题\n'), /正文/)
-    state.openPet('edit')
-    await assert.rejects(() => state.applyAssistantMarkdown(generated))
     assert.deepEqual(activity, [])
   } finally { app.unmount() }
 })

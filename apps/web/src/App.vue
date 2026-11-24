@@ -498,7 +498,10 @@ onBeforeUnmount(() => {
 
             <!-- 不加 has-sider 时 n-layout-content 默认 overflow:hidden，会把页面撑破 main
                  （main 同为 hidden）→ 滚轮链截断、整页滚不动。这里让它成为唯一原生滚动器。 -->
-            <n-layout-content class="main-content">
+            <n-layout-content
+              class="main-content"
+              :class="{ 'brand-sensitive': ['paper', 'cards', 'novels', 'storyboards', 'wechat-layout'].includes(route.name) }"
+            >
               <RouterView v-if="session.ready && !session.needsLogin" />
               <LoginView v-else-if="session.needsLogin" />
               <div v-else class="page" aria-busy="true">
@@ -591,6 +594,19 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow: hidden;
 }
+:global(html[data-theme='light']) .sider,
+:global(html[data-theme='light']) .topbar {
+  background: var(--brand-shell);
+}
+
+:global(html[data-theme='light']) .main-content {
+  background: var(--brand-canvas);
+}
+
+:global(html[data-theme='light']) .brand-name {
+  color: var(--brand-ink);
+}
+
 .main-content {
   background: var(--color-bg);
   flex: 1 1 0;

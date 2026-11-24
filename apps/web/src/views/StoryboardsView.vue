@@ -132,5 +132,15 @@ onBeforeUnmount(() => generating.stop())
 </template>
 
 <style scoped>
+/* 中性底色让画面和文字成为视觉重点；仅在分镜页调整，不改变作品或导出。 */
+:global(html[data-theme='light']) .storyboard-page {
+  --paper-bg: #fafafa;
+  --paper-surface: #ffffff;
+  --paper-sunken: #f1f2f3;
+  --paper-header: #f7f8f8;
+  --paper-line: #e1e3e4;
+  --paper-line-strong: #d2d6d8;
+}
+.storyboard-page { min-height: 100%; background: var(--paper-bg); }
 .storyboard-page { padding:var(--space-5) clamp(12px,2vw,26px) var(--space-6); color:var(--paper-ink); }.page-head { display:flex; align-items:center; justify-content:space-between; gap:var(--space-3); margin-bottom:var(--space-4); }.page-head h1 { margin:0; font-size:24px; font-weight:680; }.page-head p { margin:5px 0 0; color:var(--paper-ink-muted); font-size:13px; }.project-list { max-width:940px; border-top:1px solid var(--paper-line-strong); }.list-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:var(--space-2); padding:var(--space-3) 0; }.create-row { display:flex; flex:1 1 300px; gap:var(--space-2); min-width:0; max-width:580px; }.trash-list { border-top:1px solid var(--paper-line); }.trash-list h2 { margin:20px 0 10px; font-size:18px; }.trash-row { display:flex; align-items:center; gap:8px; padding:12px 8px; border-bottom:1px solid var(--paper-line); }.trash-row span { flex:1; min-width:0; }.trash-row strong,.trash-row small { display:block; }.trash-row small { margin-top:3px; color:var(--paper-ink-muted); font-size:11px; }.list-loading { padding:30px 0; color:var(--paper-ink-muted); }.empty-project { text-align:center; padding:50px 16px 65px; border-top:1px solid var(--paper-line); }.empty-board { font-size:50px; line-height:1; color:var(--paper-accent); }.empty-project h2 { margin:14px 0 5px; font-size:19px; }.empty-project p { color:var(--paper-ink-muted); font-size:13px; margin:0 0 18px; }.project-row { display:flex; align-items:center; gap:14px; width:100%; padding:14px 8px; border:0; border-bottom:1px solid var(--paper-line); background:transparent; color:inherit; text-align:left; cursor:pointer; }.project-row:hover { background:var(--paper-hover); }.project-icon { display:grid; place-items:center; width:38px; height:38px; background:var(--paper-accent-soft); color:var(--paper-accent); font-size:20px; }.project-row strong,.project-row small { display:block; }.project-row strong { font-size:14px; }.project-row small { margin-top:4px; color:var(--paper-ink-muted); font-size:11px; }.open-arrow { margin-left:auto; color:var(--paper-ink-muted); font-size:22px; }.storyboard-page :deep(.n-alert) { margin-bottom:12px; }
 </style>

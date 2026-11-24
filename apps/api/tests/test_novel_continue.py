@@ -106,6 +106,250 @@ def test_build_continue_prompt_uses_only_accepted_facts():
     assert "候选稿秘密丁" not in leaked
 
 
+def test_legacy_facts_api_normalizes_scalar_values(client):
+    from app.core.db import SessionLocal
+    from app import models
+    headers = login(client, 'novel-legacy-facts-api')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    with SessionLocal() as db:
+        db.get(models.NovelChapter, chapters[0]['id']).facts = {'events': '灯灭', 'openHooks': 42}
+        db.commit()
+    response = client.get(f"/api/v1/novels/{project['id']}", headers=headers)
+    assert response.status_code == 200
+    facts = response.json()['chapters'][0]['facts']
+    assert facts['events'] == ['灯灭'] and facts['openHooks'] == [42]
+
+
+def test_legacy_facts_are_safely_projected():
+    from types import SimpleNamespace
+    from app.services.novel_continue import build_continue_prompt
+    chapter = SimpleNamespace(id='legacy', sort_order=0, title='旧章', status='accepted', stale=False, accepted_text='正文', facts={'events': '灯灭', 'openHooks': 42, 'itemHoldings': [{'owner': '甲', 'item': '剑'}]})
+    prompt = build_continue_prompt([chapter], '正文', [], [], {})
+    assert '灯灭' in prompt and '42' in prompt and '剑' in prompt
+
+
+def test_continue_dispatch_sees_committed_chapter_and_job(client, monkeypatch):
+    from app.core import queue
+    from app.core.db import SessionLocal
+    from app import models
+    headers = login(client, 'novel-atomic-enqueue')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '历史')
+    seen = []
+    def dispatch(job_id, **kwargs):
+        with SessionLocal() as db:
+            job = db.get(models.BackgroundJob, job_id)
+            seen.append(bool(job and db.get(models.NovelChapter, job.payload['novelChapterId'])))
+        return True
+    monkeypatch.setattr(queue, 'dispatch', dispatch)
+    assert client.post(f"/api/v1/novels/{project['id']}/continue", headers=headers).status_code == 202
+    assert seen == [True]
+
+
+def test_success_commits_before_late_cancel_and_preserves_result(client, monkeypatch):
+    from app.services import job_runner
+    headers = login(client, 'novel-success-atomic')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '历史')
+    queued = client.post(f"/api/v1/novels/{project['id']}/continue", headers=headers).json()
+    _fake_complete(monkeypatch, '成功正文')
+    original = job_runner.queue.chain_next_if_done
+    observed = []
+    def after_commit(*args, **kwargs):
+        observed.append(client.post(f"/api/v1/jobs/{queued['jobId']}/cancel", headers=headers).status_code)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(job_runner.queue, 'chain_next_if_done', after_commit)
+    job_runner.run_job(queued['jobId'])
+    job = client.get(f"/api/v1/jobs/{queued['jobId']}", headers=headers).json()
+    assert observed == [409] and job['status'] == 'succeeded'
+    assert job['result']['outcome'] == 'applied'
+    assert any(c['draftText'] == '成功正文' for c in client.get(f"/api/v1/novels/{project['id']}", headers=headers).json()['chapters'])
+
+
+def test_cancelled_old_worker_cannot_overwrite_retry(client, monkeypatch):
+    from app.core.db import SessionLocal
+    from app.services import job_runner
+    from app import models
+    headers = login(client, 'novel-cancel-retry')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '历史')
+    url = f"/api/v1/novels/{project['id']}/continue"
+    first = client.post(url, headers=headers).json()
+    def complete(db, user_id, prompt, **kwargs):
+        assert client.post(f"/api/v1/jobs/{first['jobId']}/cancel", headers=headers).status_code == 200
+        retry = client.post(url, headers=headers)
+        assert retry.status_code == 202
+        assert retry.json()['chapterId'] == first['chapterId']
+        return '旧工作结果'
+    monkeypatch.setattr(job_runner, '_novel_complete', complete)
+    job_runner.run_job(first['jobId'])
+    with SessionLocal() as db:
+        assert not db.get(models.NovelChapter, first['chapterId']).draft_text
+        assert db.get(models.BackgroundJob, first['jobId']).status == 'cancelled'
+
+
+def test_stale_chapter_never_enters_worker_prompt(client, monkeypatch):
+    from app.core.db import SessionLocal
+    from app.services import job_runner, novel_continue
+    from app import models
+    headers = login(client, 'novel-stale-worker')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '安全正文')
+    _accept_in_db(chapters[1]['id'], '失效秘密')
+    with SessionLocal() as db:
+        db.get(models.NovelChapter, chapters[1]['id']).stale = True
+        db.commit()
+    with SessionLocal() as db:
+        stale = db.get(models.NovelChapter, chapters[1]['id'])
+        assert '失效秘密' not in novel_continue.build_continue_prompt([stale], '', [], [], {})
+    # An old queued job whose snapshot includes stale history must not use its text as previous.
+    with SessionLocal() as db:
+        db.get(models.NovelChapter, chapters[1]['id']).stale = False
+        db.commit()
+    queued = client.post(f"/api/v1/novels/{project['id']}/continue", headers=headers).json()
+    with SessionLocal() as db:
+        db.get(models.NovelChapter, chapters[1]['id']).stale = True
+        job = db.get(models.BackgroundJob, queued['jobId'])
+        db.flush()
+        snapshot = novel_continue.context_snapshot(db, project['id'], 2)
+        job.payload = {**job.payload, 'contextHash': snapshot}
+        db.commit()
+    prompts = []
+    monkeypatch.setattr(job_runner, '_novel_complete', lambda db, user_id, prompt, **kwargs: prompts.append(prompt) or '新文')
+    job_runner.run_job(queued['jobId'])
+    assert prompts and '失效秘密' not in prompts[0] and '安全正文' in prompts[0]
+
+
+def test_memory_budget_fallback_and_speech_style():
+    from types import SimpleNamespace
+    from app.services.novel_continue import build_continue_prompt
+    chapters = [SimpleNamespace(id=str(i), sort_order=i, title=f'章{i}', status='accepted', stale=False, facts={}, accepted_text='旧正文' + str(i) + '甲' * 10000) for i in range(3)]
+    character = SimpleNamespace(original_name='张三', new_name='', state='present', relations='', speech_style='言简意赅')
+    prompt = build_continue_prompt(chapters, chapters[-1].accepted_text, [character], [], {})
+    assert '言简意赅' in prompt and '章0' in prompt and '旧正文0' in prompt
+    assert len(prompt) < 16001
+
+
+def test_continue_rejects_stale_history(client):
+    from app.core.db import SessionLocal
+    from app import models
+    headers = login(client, 'novel-stale-memory')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '已接受')
+    with SessionLocal() as db:
+        db.get(models.NovelChapter, chapters[0]['id']).stale = True
+        db.commit()
+    response = client.post(f"/api/v1/novels/{project['id']}/continue", headers=headers)
+    assert response.status_code == 409
+    assert response.json()['code'] == 'stale_history'
+
+
+def test_continue_detects_context_change_during_generation(client, monkeypatch):
+    from app.core.db import SessionLocal
+    from app.services import job_runner
+    from app import models
+    headers = login(client, 'novel-context-change')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '已接受')
+    queued = client.post(f"/api/v1/novels/{project['id']}/continue", headers=headers).json()
+    def complete(db, user_id, prompt, **kwargs):
+        with SessionLocal() as other:
+            other.get(models.NovelChapter, chapters[0]['id']).accepted_text = '并发修改'
+            other.commit()
+        return '不可写入'
+    monkeypatch.setattr(job_runner, '_novel_complete', complete)
+    job_runner.run_job(queued['jobId'])
+    with SessionLocal() as db:
+        assert db.get(models.BackgroundJob, queued['jobId']).error_code == 'context_changed'
+        assert not db.get(models.NovelChapter, queued['chapterId']).draft_text
+
+
+def test_split_protects_accepted_content_and_running_job(client):
+    headers = login(client, 'novel-split-protection')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '已接受')
+    url = f"/api/v1/novels/{project['id']}"
+    assert client.post(f'{url}/split', headers=headers).json()['code'] == 'split_would_discard'
+    assert client.post(f'{url}/continue', headers=headers).status_code == 202
+    assert client.post(f'{url}/split', headers=headers).status_code == 409
+
+
+def test_legacy_job_without_context_fails_safely(client):
+    from app.core.db import SessionLocal
+    from app.services import job_runner
+    from app import models
+    headers = login(client, 'novel-legacy-job')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '已接受')
+    queued = client.post(f"/api/v1/novels/{project['id']}/continue", headers=headers).json()
+    with SessionLocal() as db:
+        job = db.get(models.BackgroundJob, queued['jobId'])
+        job.payload = {k: v for k, v in job.payload.items() if k != 'contextHash'}
+        db.commit()
+    job_runner.run_job(queued['jobId'])
+    with SessionLocal() as db:
+        assert db.get(models.BackgroundJob, queued['jobId']).error_code == 'context_changed'
+    assert client.post(f"/api/v1/novels/{project['id']}/continue", headers=headers).status_code == 202
+
+
+def test_edit_accepted_source_marks_later_stale(client):
+    headers = login(client, 'novel-source-stale')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '旧章')
+    _accept_in_db(chapters[1]['id'], '后章')
+    url = f"/api/v1/novels/{project['id']}"
+    response = client.patch(f"{url}/chapters/{chapters[0]['id']}", headers=headers, json={'sourceText': '修改'})
+    assert response.status_code == 409 and response.json()['code'] == 'accepted_source_locked'
+    assert client.get(url, headers=headers).json()['chapters'][0]['acceptedText'] == '旧章'
+
+
+def test_reverted_history_blocks_continuation(client):
+    from app.core.db import SessionLocal
+    from app import models
+    headers = login(client, 'novel-reverted-history')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '旧章')
+    _accept_in_db(chapters[1]['id'], '后章')
+    with SessionLocal() as db:
+        db.get(models.NovelChapter, chapters[0]['id']).status = 'drafted'
+        db.commit()
+    response = client.post(f"/api/v1/novels/{project['id']}/continue", headers=headers)
+    assert response.status_code == 409 and response.json()['code'] == 'stale_history'
+
+
+def test_failed_continuation_can_retry_without_overwriting_draft(client, monkeypatch):
+    from app.core.db import SessionLocal
+    from app.services import job_runner
+    from app import models
+    headers = login(client, 'novel-retry')
+    project = _project(client, headers)
+    chapters = _chapters(client, headers, project['id'])
+    _accept_in_db(chapters[0]['id'], '已接受')
+    url = f"/api/v1/novels/{project['id']}/continue"
+    first = client.post(url, headers=headers).json()
+    _fake_complete(monkeypatch, '')
+    job_runner.run_job(first['jobId'])
+    retry = client.post(url, headers=headers)
+    assert retry.status_code == 202
+    assert retry.json()['chapterId'] == first['chapterId']
+    _fake_complete(monkeypatch, '新草稿')
+    job_runner.run_job(retry.json()['jobId'])
+    assert client.post(url, headers=headers).json()['code'] == 'draft_pending'
+    with SessionLocal() as db:
+        assert db.get(models.NovelChapter, first['chapterId']).draft_text == '新草稿'
+
+
 def test_scan_warnings_dead_name_leak_and_short_names():
     from types import SimpleNamespace
 

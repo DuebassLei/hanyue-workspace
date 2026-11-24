@@ -1015,8 +1015,12 @@ def test_model_code_can_be_renamed(client):
 
 
 def test_model_edit_is_isolated_between_users(client):
+    from tests.conftest import login as login_with_role
+
     owner = login(client, "catalog-owner")
     other = login(client, "catalog-other")
+    # 本文件的 login 不指定角色（默认被夹具提权为超管）；这里要显式建一个普通成员
+    member = login_with_role(client, subject="catalog-member", role="member")
     conn = client.post(
         "/api/v1/models/connections", json={"displayName": "私有连接"}, headers=owner
     ).json()
@@ -1025,16 +1029,23 @@ def test_model_edit_is_isolated_between_users(client):
         json={"connectionId": conn["id"], "modelCode": "m1"},
         headers=owner,
     ).json()
+    url = f"/api/v1/models/catalog/{entry['id']}"
 
-    assert (
-        client.patch(
-            f"/api/v1/models/catalog/{entry['id']}", json={"modelCode": "hacked"}, headers=other
-        ).status_code
-        == 404
+    # 普通成员没有 models.manage：连目录写接口都进不去
+    assert client.patch(url, json={"modelCode": "hacked"}, headers=member).status_code == 403
+
+    # 超管能跨用户管理（设计如此），但默认必须被挡下，要求显式确认并留审计
+    denied = client.patch(url, json={"modelCode": "hacked"}, headers=other)
+    assert denied.status_code == 409
+    assert denied.json()["code"] == "cross_user_confirmation_required"
+    assert client.delete(url, headers=other).status_code == 409
+
+    confirmed = client.patch(
+        url, json={"modelCode": "hacked"}, headers=other,
+        params={"confirmCrossUser": "true"},
     )
-    assert (
-        client.delete(f"/api/v1/models/catalog/{entry['id']}", headers=other).status_code == 404
-    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["modelCode"] == "hacked"
 
 
 def test_agent_status_reports_mode_and_real_paths(client):
@@ -1289,11 +1300,15 @@ def test_publish_job_approve_flow(client):
     assert again.json()["code"] == "invalid_transition"
 
 
-def test_publish_retry_reenqueues_real_platform_job(client):
+def test_publish_retry_reenqueues_real_platform_job(client, monkeypatch):
     """草稿箱任务重试必须重新投递后台队列，否则会永久滞留在排队。"""
     from app import models
+    from app.core import queue
     from app.core.db import SessionLocal
     from sqlalchemy import select
+
+    # 这个用例只关心「有没有入队」；让 dispatch 不真正执行，避免线程池拿假账号去调微信
+    monkeypatch.setattr(queue, "dispatch", lambda *a, **kw: None)
 
     def background_job_count():
         with SessionLocal() as db:
@@ -1319,3 +1334,14 @@ def test_publish_retry_reenqueues_real_platform_job(client):
     before_manual = background_job_count()
     assert client.post(f"/api/v1/publishing/jobs/{manual_job['id']}/retry", headers=headers).status_code == 200
     assert background_job_count() == before_manual
+
+    # 清掉这条合成任务留下的执行记录：测试库全库共用，遗留的后台任务会被后续到期扫描重投
+    from sqlalchemy import delete
+
+    with SessionLocal() as db:
+        for ident in db.scalars(
+            select(models.BackgroundJob.id).where(models.BackgroundJob.kind == "wechat_draft")
+        ).all():
+            if (db.get(models.BackgroundJob, ident).payload or {}).get("publishJobId") == draft_job["id"]:
+                db.execute(delete(models.BackgroundJob).where(models.BackgroundJob.id == ident))
+        db.commit()

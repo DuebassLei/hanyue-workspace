@@ -14,8 +14,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { NButton, NInput, NModal, NPopover, NSelect } from 'naive-ui'
 import PetChatPanel from '../components/PetChatPanel.vue'
+import { useModelSelectionStore } from '../stores/modelSelection'
 import { studioApi, uploadReport } from '../api/studio'
-import { apiUrl } from '../api/client'
+import { api, apiUrl } from '../api/client'
 import { markdownToHtml } from '../utils/markdownSerializer'
 import { confirm, toast } from '../ui/feedback'
 import { useParagraphDrafts } from '../composables/useParagraphDrafts'
@@ -29,12 +30,31 @@ import PaperBlockEditor from '../components/paper/PaperBlockEditor.vue'
 import PaperAnnotation from '../components/paper/PaperAnnotation.vue'
 import QualityRadar from '../components/paper/QualityRadar.vue'
 
+const modelSelection = useModelSelectionStore()
+modelSelection.load()
 const articles = ref([])
 const article = ref(null)
 const route = useRoute()
 const settings = ref({})
 // 可选写作风格档由后端扫描 styles 目录下发：加一个 md 就多一档，前端不用改
 const writerStyles = ref([])
+const writingSkills = ref([])
+const selectedSkillIds = ref([])
+const skillsError = ref('')
+const skillsLoading = ref(false)
+async function loadWritingSkills() {
+  skillsLoading.value = true
+  skillsError.value = ''
+  try {
+    const skills = await api.get('/skill-center/skills')
+    writingSkills.value = (skills || []).filter((skill) => skill.skillType === 'writing' && skill.status === 'ready')
+  } catch (err) {
+    skillsError.value = err.message || '加载写作技能失败'
+  } finally {
+    skillsLoading.value = false
+  }
+}
+const writingSkillOptions = computed(() => writingSkills.value.map((skill) => ({ label: skill.name, value: skill.id, disabled: selectedSkillIds.value.length >= 5 && !selectedSkillIds.value.includes(skill.id) })))
 const archived = ref(false)
 const loading = ref(false)
 const listLoading = ref(false)
@@ -48,7 +68,7 @@ watch(mediaSection, (value) => {
   if (value !== 'svg') sourceSelection.stop()
 })
 const showPublish = ref(false)
-const petMode = ref('create')
+const showAssistantTools = ref(false)
 const assistantApplyBusy = ref(false)
 const assistantNarrow = ref(false)
 const assistantMounted = ref(false)
@@ -107,8 +127,12 @@ async function openSource() {
   }
 }
 
-function reloadSource() {
-  if (sourceDirty.value && !window.confirm('确定放弃未保存的源码修改？')) return
+async function reloadSource() {
+  const currentArticle = article.value
+  const currentText = sourceText.value
+  const currentOriginal = sourceOriginal.value
+  if (sourceDirty.value && !(await confirm('确定放弃未保存的源码修改？'))) return
+  if (article.value !== currentArticle || sourceText.value !== currentText || sourceOriginal.value !== currentOriginal) return
   sourceOriginal.value = null
   return openSource()
 }
@@ -291,8 +315,13 @@ async function openArticle(id) {
     showArticles.value = false
     return true
   }
-  if (sourceDirty.value && !window.confirm('Markdown 源码尚未保存，确定要切换稿件并放弃修改？')) return false
-  if (storageFailed.value && unsavedCount.value && !window.confirm('本地暂存失败，切换稿件可能丢失未保存修改。仍要切换吗？')) return false
+  const previousArticle = article.value
+  const previousSource = sourceText.value
+  const previousOriginal = sourceOriginal.value
+  const previousDrafts = draftVersion.value
+  if (sourceDirty.value && !(await confirm('Markdown 源码尚未保存，确定要切换稿件并放弃修改？'))) return false
+  if (storageFailed.value && unsavedCount.value && !(await confirm('本地暂存失败，切换稿件可能丢失未保存修改。仍要切换吗？'))) return false
+  if (article.value !== previousArticle || sourceText.value !== previousSource || sourceOriginal.value !== previousOriginal || draftVersion.value !== previousDrafts || switchingLocked.value || disposed) return false
   loading.value = true
   error.value = ''
   const requestId = ++articleRequest
@@ -315,7 +344,7 @@ async function openArticle(id) {
 
 function activateArticle(next) {
   if (article.value?.id !== next.id) {
-    petMode.value = 'create'
+    showAssistantTools.value = false
     showCreate.value = false
     sourceRequest += 1
     sourceOriginal.value = null
@@ -392,13 +421,13 @@ function stopPolling() {
   timer = null
 }
 
-function openPet(mode = petMode.value, event) {
+function openPet(mode, event) {
   if (!assistantOpen.value) {
     previousSideTab.value = tab.value
     assistantOpener = event?.currentTarget || null
   }
-  petMode.value = mode
-  if (mode !== 'tools') assistantMounted.value = true
+  showAssistantTools.value = mode === 'tools'
+  assistantMounted.value = true
   tab.value = 'assistant'
 }
 
@@ -450,7 +479,7 @@ async function applyAssistantMarkdown(markdown) {
   const body = typeof markdown === 'string'
     ? markdown.replace(/\r\n?/g, '\n').replace(/^---\n[\s\S]*?\n---(?:\n|$)/, '').trim()
     : ''
-  if (petMode.value !== 'create' || !body || /^#\s+[^\n]+$/.test(body)) {
+  if (!body || /^#\s+[^\n]+$/.test(body)) {
     throw new Error('只有包含正文的初稿才能写入当前稿。')
   }
   if (assistantApplyBusy.value) throw new Error('正在核对初稿，请稍候。')
@@ -465,7 +494,6 @@ async function applyAssistantMarkdown(markdown) {
     if (sourceDirty.value || unsavedCount.value) throw new Error('请先处理未保存的 Markdown 源码或段落修改。')
     if (editingBlockId.value) throw new Error('请先完成或关闭当前段落编辑，再写入初稿。')
     if (job.value || switchingLocked.value) throw new Error('当前稿件有任务正在处理，请稍后再试。')
-    if (petMode.value !== 'create') throw new Error('已切换写作任务，不能写入当前稿。')
   }
   assertWritable()
   const viewedMarkdown = snapshotMarkdown(current)
@@ -509,15 +537,21 @@ function openCreateTools() {
   openPet('tools')
 }
 
-const createArticle = () => {
-  if (sourceDirty.value && !window.confirm('Markdown 源码尚未保存，确定要新建稿件并放弃修改？')) return
-  if (storageFailed.value && unsavedCount.value && !window.confirm('本地暂存失败，新建稿件可能丢失未保存修改。仍要继续吗？')) return
+const createArticle = async () => {
+  const previousArticle = article.value
+  const previousSource = sourceText.value
+  const previousOriginal = sourceOriginal.value
+  const previousDrafts = draftVersion.value
+  if (sourceDirty.value && !(await confirm('Markdown 源码尚未保存，确定要新建稿件并放弃修改？'))) return
+  if (storageFailed.value && unsavedCount.value && !(await confirm('本地暂存失败，新建稿件可能丢失未保存修改。仍要继续吗？'))) return
+  if (article.value !== previousArticle || sourceText.value !== previousSource || sourceOriginal.value !== previousOriginal || draftVersion.value !== previousDrafts) return
   return run('create', async () => {
     const snapshot = await studioApi.create({
       topic: createForm.topic,
       material: createForm.material,
       markdown: createForm.markdown,
       writerStyle: createForm.writerStyle,
+      skillIds: createForm.markdown.trim() ? [] : selectedSkillIds.value,
       draft: !createForm.markdown.trim(),
       titles: true,
     })
@@ -535,47 +569,84 @@ const createArticle = () => {
 // ---- 对话改稿 ----
 // 改稿最费劲的往往不是「改什么」，而是「怎么说」。常用说法做成胶囊，
 // 点一下就把话说全；详细指令放 title 里，鼠标停一下能看全。
-/**
- * 对话能不能指定「只改哪一段」：跟着正文当前选中的段落走。
- * 后端拿到的全文本来就带段号，前端把「第 N 段」写进指令，
- * 模型就不用去猜「这段」指的是哪一段。
- */
+/** 使用稳定段落 ID 指定改稿范围，服务端会验证模型返回的操作。 */
 const chatAnchor = computed(() => {
   const blocks = article.value?.blocks || []
   const index = blocks.findIndex((block) => block.id === selectedBlockId.value)
   if (index < 0) return null
-  return { number: index + 1, text: plainText(blocks[index].text) }
+  return { id: blocks[index].id, number: index + 1, text: plainText(blocks[index].text) }
 })
 
-const sendPetEdit = async (value) => {
+const sendPetEdit = async (value, modelId) => {
   const text = String(value || '').trim()
-  if (!text || !article.value || editingLocked.value) return
+  if (!text || !article.value || editingLocked.value) throw new Error('稿件正在处理，请稍后再试。')
+  if (sourceDirty.value || unsavedCount.value || editingBlockId.value) {
+    throw new Error('请先保存 Markdown 源码和段落修改，并关闭段落编辑。')
+  }
   const articleId = article.value.id
   const requestId = articleRequest
   const target = chatAnchor.value
   actionBusy.value = 'chat'
   error.value = ''
   try {
-    const snapshot = await studioApi.chat(articleId, target ? `第 ${target.number} 段：${text}` : text)
-    if (article.value?.id !== articleId || articleRequest !== requestId) return
+    const snapshot = await studioApi.chat(articleId, text, { targetBlockId: target?.id || null, preview: true, ...(modelId ? { modelId } : {}) })
+    if (article.value?.id !== articleId || articleRequest !== requestId) throw new Error('稿件已切换，改稿任务仍在原稿件中。')
     applySnapshot(snapshot)
     if (snapshot?.job) startPolling()
     else await loadState()
   } catch (err) {
-    if (article.value?.id === articleId && articleRequest === requestId) {
-      error.value = err.message
-      toast(err.message, 'error')
-    }
+    if (article.value?.id === articleId && articleRequest === requestId) error.value = err.message
+    throw err
   } finally {
     if (article.value?.id === articleId && articleRequest === requestId) actionBusy.value = ''
+  }
+}
+
+async function resolveChatProposal(proposalId, accept) {
+  if (!article.value || editingLocked.value) throw new Error('稿件正在处理，请稍后再试。')
+  if (sourceDirty.value || unsavedCount.value || editingBlockId.value) {
+    throw new Error('请先保存 Markdown 源码和段落修改，并关闭段落编辑。')
+  }
+  const id = article.value.id
+  const requestId = articleRequest
+  actionBusy.value = 'chat-proposal'
+  try {
+    const snapshot = await (accept ? studioApi.acceptChatProposal(id, proposalId) : studioApi.discardChatProposal(id, proposalId))
+    if (article.value?.id !== id || articleRequest !== requestId) throw new Error('稿件已切换，请返回原稿查看结果。')
+    applySnapshot(snapshot)
+  } finally {
+    if (article.value?.id === id && articleRequest === requestId) actionBusy.value = ''
+  }
+}
+
+const assistantInitialPrompt = ref(null)
+async function ensureAssistantArticle(text) {
+  if (article.value || switchingLocked.value || loading.value) return
+  const prompt = String(text || '')
+  actionBusy.value = 'assistant-create'
+  try {
+    const created = await studioApi.create({ topic: '', material: '', markdown: '', draft: false, titles: false })
+    if (!created?.id) throw new Error('创建稿件失败，请重试。')
+    assistantInitialPrompt.value = { articleId: created.id, text: prompt }
+    activateArticle(created)
+    await loadState()
+    toast('已创建空稿，请确认要求后发送。', 'success')
+  } catch (err) {
+    toast(err.message || '创建稿件失败，请重试。', 'error')
+  } finally {
+    actionBusy.value = ''
   }
 }
 
 // 助手新建成稿后直接打开，避免用户还要去列表里翻
 async function onPetCreated(id) {
   if (!id || disposed) return
-  toast('已新建成稿，正在打开…')
-  if (await openArticle(id)) archived.value = false
+  if (await openArticle(id)) {
+    archived.value = false
+    toast('已新建成稿并打开。', 'success')
+  } else {
+    toast('已新建成稿，但未切换；可稍后从稿件列表打开。', 'warning')
+  }
   await loadState()
 }
 
@@ -719,10 +790,12 @@ const regenTitles = () => run('titles', () => studioApi.titles(article.value.id)
 const pickTitle = (text) => run('title', () => studioApi.pickTitle(article.value.id, text), { poll: false })
 
 // 写正文是整篇覆盖：有正文时先让人确认。后端在覆盖前会存一版快照，撤销能退回来。
-const draftArticle = () => {
+const draftArticle = async () => {
   if (!article.value || job.value || actionBusy.value) return
-  if (article.value.blocks?.length && !window.confirm('重写会整篇覆盖现在的正文（覆盖前会自动存一版，可以撤销）。继续吗？')) return
-  return run('draft', () => studioApi.draft(article.value.id, writerStyle.value))
+  const currentArticle = article.value
+  if (currentArticle.blocks?.length && !(await confirm('重写会整篇覆盖现在的正文（覆盖前会自动存一版，可以撤销）。继续吗？'))) return
+  if (article.value !== currentArticle || job.value || actionBusy.value) return
+  return run('draft', () => studioApi.draft(currentArticle.id, writerStyle.value, selectedSkillIds.value))
 }
 
 // 只换档位不重写：下次写正文、以及之后的对话改稿都按新档位走
@@ -802,7 +875,7 @@ function closeNav(event) {
 
 // 只在本机暂存失败时才拦关闭：草稿正常写进 localStorage 的话，
 // 刷新页面不丢修改，没必要每次都弹一个浏览器确认框。
-onBeforeRouteLeave(() => !sourceDirty.value || window.confirm('Markdown 源码尚未保存，确定要离开并放弃修改？'))
+onBeforeRouteLeave(() => !sourceDirty.value || confirm('Markdown 源码尚未保存，确定要离开并放弃修改？'))
 
 function onBeforeUnload(event) {
   if (!sourceDirty.value && (!storageFailed.value || !unsavedCount.value)) return
@@ -944,6 +1017,7 @@ onMounted(async () => {
   assistantMedia?.addEventListener('change', syncAssistantViewport)
   window.addEventListener('beforeunload', onBeforeUnload)
   document.addEventListener('pointerdown', closeNav)
+  loadWritingSkills()
   await loadState()
   if (disposed) return
   routeReady = true
@@ -980,7 +1054,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="head-actions head-actions-end">
         <NButton size="small" type="primary" :disabled="!article || editingLocked" :loading="actionBusy === 'export'" @click="exportArticle">文章存档</NButton>
-        <NButton size="small" :disabled="!article" @click="canUseSavedDraft() && (showPublish = true)">发布</NButton>
+        <NButton size="small" :disabled="!article || editingLocked" @click="canUseSavedDraft() && (showPublish = true)">推送草稿</NButton>
       </div>
     </header>
 
@@ -1420,32 +1494,49 @@ onBeforeUnmount(() => {
           @keydown="onAssistantKeydown"
         >
           <div class="assistant-toolbar">
-            <div class="assistant-tasks" role="group" aria-label="写作任务">
-              <button type="button" :aria-pressed="petMode === 'create'" @click="openPet('create')">写初稿</button>
-              <button type="button" :aria-pressed="petMode === 'edit'" :disabled="!article || loading" @click="openPet('edit')">改段落</button>
-              <button type="button" :aria-pressed="petMode === 'tools'" @click="petMode = 'tools'">写作工具</button>
-            </div>
+            <strong>{{ showAssistantTools ? '写作工具' : '创作助手' }}</strong>
+            <button type="button" class="assistant-tool-toggle" :aria-expanded="showAssistantTools" aria-controls="assistant-tools" @click="showAssistantTools = !showAssistantTools">{{ showAssistantTools ? '← 返回对话' : '写作工具' }}</button>
             <button ref="assistantClose" type="button" class="assistant-close" aria-label="关闭创作助手" title="关闭创作助手" @click="closeAssistant">×</button>
           </div>
-          <div v-if="assistantMounted" v-show="petMode !== 'tools' && !loading" class="assistant-conversation">
+          <div v-if="assistantMounted" v-show="!loading && !showAssistantTools" class="assistant-conversation">
             <PetChatPanel
               :key="article?.id || 'new'"
               :studio-article-id="article?.id"
+              v-model:model-id="modelSelection.selectedModelId"
+              :model-options="modelSelection.options"
+              :model-error="modelSelection.error"
+              @reload-models="modelSelection.load(true)"
               :article-title="article?.title"
-              :mode="petMode === 'edit' ? 'edit' : 'create'"
+              mode="unified"
               :apply-busy="assistantApplyBusy"
               :apply-markdown="article?.id ? applyAssistantMarkdown : undefined"
               :hotspot="assistantHotspot"
               :chat-turns="article?.chat || []"
               :chat-busy="editingLocked"
               :selected-block="chatAnchor"
-              @chat="sendPetEdit"
+              :initial-prompt="assistantInitialPrompt?.articleId === article?.id ? assistantInitialPrompt.text : ''"
+              :send-edit-request="sendPetEdit"
+              :on-accept-proposal="id => resolveChatProposal(id, true)"
+              :on-discard-proposal="id => resolveChatProposal(id, false)"
+              @ensure-article="ensureAssistantArticle"
               @created="onPetCreated"
               @clear-selection="selectedBlockId = ''"
             />
           </div>
-          <div v-show="petMode === 'tools'" class="pet-tools">
-            <NButton v-if="article && !showCreate" size="small" @click="openCreateTools">新建稿件</NButton>
+          <div id="assistant-tools" v-show="showAssistantTools" class="pet-tools">
+            <div v-if="article && !showCreate" class="tool-new-draft">
+              <div><strong>开始新稿</strong><p class="hint">新建或导入另一篇文章，不影响当前对话。</p></div>
+              <NButton size="small" :disabled="editingLocked" @click="openCreateTools">新建稿件</NButton>
+            </div>
+            <div class="assistant-tool-section">
+              <label class="field">
+                <span>写作技能（最多 5 个）</span>
+                <NSelect v-model:value="selectedSkillIds" multiple clearable size="small" :options="writingSkillOptions" :loading="skillsLoading" :disabled="editingLocked || skillsLoading" placeholder="不选择则使用默认写作规则" />
+              </label>
+              <p class="hint">仅用于本次新建生成或整篇重写；导入 Markdown 和对话改稿不使用这里的选择。</p>
+              <p v-if="skillsError" role="alert" class="pet-error">{{ skillsError }} <button type="button" @click="loadWritingSkills">重试</button></p>
+              <p v-else-if="!skillsLoading && !writingSkillOptions.length" class="hint">暂无可用写作技能，可前往技能中心创建。</p>
+            </div>
             <form v-if="showCreate || !article" class="create-form" @submit.prevent="createArticle">
               <div v-if="createError" role="alert" class="pet-error">{{ createError }}</div>
               <div class="tool-section-heading">
@@ -1468,6 +1559,8 @@ onBeforeUnmount(() => {
             </form>
             <template v-else>
               <section class="assistant-tool-section">
+                <div class="tool-section-heading"><strong>正文创作</strong><span class="tool-section-tag">整篇操作</span></div>
+                <p class="hint">只想调整某一段？返回对话，选中段落后提出修改要求。</p>
                 <label class="field">
                   <span>写作风格</span>
                   <NSelect :value="writerStyle" size="small" :options="styleOptions" :disabled="editingLocked || !styleOptions.length" @update:value="changeWriterStyle" />
@@ -1500,10 +1593,11 @@ onBeforeUnmount(() => {
           </div>
         </section>
       </aside>
-      <NModal v-model:show="showPublish" preset="card" title="发布" class="publish-modal" :style="{ width: 'min(440px, calc(100vw - 32px))' }">
+      <NModal v-model:show="showPublish" preset="card" title="创建草稿推送任务" class="publish-modal" :style="{ width: 'min(520px, calc(100vw - 32px))' }">
         <PaperPublishPanel
           :article="article"
           :busy="actionBusy"
+          :before-submit="() => !editingLocked && canUseSavedDraft()"
           @saved="applyPanelSnapshot"
           @notify="notifyPanel"
         />
@@ -1516,14 +1610,19 @@ onBeforeUnmount(() => {
 .assistant-mobile-entry { display: none; }
 .assistant-toolbar, .tool-section-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .assistant-toolbar { flex: none; padding: 8px 12px; border-bottom: 1px solid var(--color-border); }
-.assistant-tasks { display: flex; flex-wrap: wrap; gap: 4px; }
-.assistant-tasks button, .assistant-close { padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-secondary); cursor: pointer; font-size: 12px; }
-.assistant-tasks button[aria-pressed='true'], .assistant-close:hover { background: var(--color-surface-muted); color: var(--color-text-primary); }
-.assistant-tasks button:disabled { opacity: .5; cursor: not-allowed; }
+.assistant-toolbar strong { margin-right: auto; font-size: 13px; }
+.assistant-tool-toggle, .assistant-close { padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-secondary); cursor: pointer; font-size: 12px; }
+.assistant-tool-toggle:hover, .assistant-close:hover { background: var(--color-surface-muted); color: var(--color-text-primary); }
 .assistant-close { font-size: 18px; line-height: 1; }
-.pet-tools { display: flex; flex-direction: column; align-items: stretch; gap: 12px; padding: 12px; overflow: auto; overscroll-behavior: contain; }
-.pet-tools > .n-button { align-self: flex-start; }
-.assistant-tool-section { border-top: 1px solid var(--color-border); padding-top: 12px; font-size: 13px; }
+.pet-tools { display: flex; flex-direction: column; align-items: stretch; flex: 1; min-height: 0; min-width: 0; gap: 14px; padding: 14px; overflow: auto; overscroll-behavior: contain; }
+.tool-new-draft { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-bottom: 2px; font-size: 13px; }
+.tool-new-draft > div { flex: 1; min-width: 140px; }
+.pet-tools .hint { margin: 0; line-height: 1.65; }
+.tool-new-draft .hint { margin-top: 4px; }
+.assistant-tool-section, .pet-tools > .create-form { border: 1px solid var(--color-border); border-radius: 10px; padding: 14px; background: var(--color-surface); font-size: 13px; }
+.tool-section-tag { font-size: 11px; font-weight: 400; color: var(--color-text-secondary); }
+.pet-tools .create-actions { margin-top: 6px; }
+.assistant-tool-toggle:focus-visible, .assistant-close:focus-visible { outline: 2px solid var(--paper-accent); outline-offset: 2px; }
 .assistant-conversation { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 
 .paper-view {

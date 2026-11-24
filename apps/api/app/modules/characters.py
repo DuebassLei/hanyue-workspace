@@ -149,6 +149,17 @@ def create_character(payload: schemas.CharacterIn, user: CurrentUser, db: DbSess
     return _character_out(db, row)
 
 
+@router.post("/generate", response_model=schemas.CharacterGenerateOut)
+async def generate_character_draft(payload: schemas.CharacterGenerateIn, user: CurrentUser, db: DbSession):
+    """生成角色表单草稿，不自动保存。"""
+    try:
+        result = await character_extract.generate_character(db, user.id, payload.prompt, payload.model_id)
+    except character_extract.ExtractionError as exc:
+        code_status = 503 if exc.code == "provider_unavailable" else (400 if exc.code == "model_not_found" else 502)
+        raise ApiError(exc.code, exc.message, status_code=code_status) from exc
+    return schemas.CharacterGenerateOut(**result)
+
+
 @router.post("/extract", response_model=schemas.CharacterExtractOut)
 async def extract_characters(payload: schemas.CharacterExtractIn, user: CurrentUser, db: DbSession):
     """抽取草稿：不写库、不生成占位角色；失败时把可操作原因原样透传。"""

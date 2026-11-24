@@ -119,6 +119,8 @@ def main() -> int:
         stale,
         recovered,
     )
+    from app.services import draft_dispatcher
+    draft_dispatcher.start()
     # 心跳由独立线程维护：run_job 阻塞期间（视频渲染）也能持续刷新
     threading.Thread(target=_heartbeat_loop, args=(client,), daemon=True, name="worker-heartbeat").start()
     try:

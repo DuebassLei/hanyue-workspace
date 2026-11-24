@@ -15,7 +15,7 @@ import {
   NTag,
 } from 'naive-ui'
 import { api } from '../api/client'
-import { toast } from '../ui/feedback'
+import { toast, confirm } from '../ui/feedback'
 import { usePermission } from '../composables/usePermission'
 
 const CRON_PRESETS = [
@@ -685,10 +685,10 @@ async function loadRuns() {
   }
 }
 
-function applyExample(key) {
+async function applyExample(key) {
   const example = examples.value.find((item) => item.key === key)
   if (!example) return
-  if (form.draftCode.trim() && form.draftCode !== DEFAULT_CODE && !window.confirm(`用「${example.title}」替换当前代码？`)) return
+  if (form.draftCode.trim() && form.draftCode !== DEFAULT_CODE && !(await confirm(`用「${example.title}」替换当前代码？`, '替换脚本代码'))) return
   form.draftCode = example.code
   if (!form.name.trim()) form.name = example.title
   if (!form.description.trim()) form.description = example.description

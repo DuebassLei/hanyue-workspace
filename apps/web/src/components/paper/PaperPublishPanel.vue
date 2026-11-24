@@ -2,16 +2,22 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NDatePicker, NSelect } from 'naive-ui'
 import { studioExtraApi } from '../../api/studioExtra'
+import { draftPlatformOptions, draftSubmission, formatJobTime, actualPushTime } from '../../features/publish/queue/draftQueue'
 
 const props = defineProps({
   article: { type: Object, default: null },
   busy: { type: String, default: '' },
+  // 父级在弹窗打开后仍可能有后台任务或未保存改动；提交前最后校验一次
+  beforeSubmit: { type: Function, default: null },
 })
 const emit = defineEmits(['saved', 'notify'])
 
 const accounts = ref([])
 const accountId = ref(null)
 const scheduleAt = ref(null)
+const deliveryMode = ref('immediate')
+const platform = ref('wechat_official')
+const deliveryOptions = [{ value: 'immediate', label: '立即推送（进入队列）' }, { value: 'scheduled', label: '定时自动推送' }]
 const review = ref(null)
 const loading = ref(false)
 const action = ref('')
@@ -33,7 +39,7 @@ const publishedAt = computed(() => review.value?.publishedAt || props.article?.p
 const currentDraft = computed(() => reviewRows.value.find((row) =>
   row.target === 'draft' && row.accountId === accountId.value && row.versionId === review.value?.versionId,
 ))
-const statusLabel = { queued: '排队中', running: '处理中', drafted: '已推送草稿箱', succeeded: '已发布', manual: '待人工处理', failed: '失败' }
+const statusLabel = { queued: '待推送', approved: '待推送', running: '推送中', publishing: '推送中', drafted: '已推送草稿箱', succeeded: '已完成', manual: '历史人工记录（非自动推送）', failed: '推送失败', needs_attention: '需核实', cancelled: '已取消' }
 const statusClass = { drafted: 'ok', succeeded: 'ok', failed: 'bad' }
 
 const formatTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : ''
@@ -45,7 +51,7 @@ function stopPolling() {
 
 function ensurePolling() {
   stopPolling()
-  if (reviewRows.value.some((row) => ['queued', 'running'].includes(row.status))) {
+  if (reviewRows.value.some((row) => ['queued', 'approved', 'running', 'publishing'].includes(row.status))) {
     timer = setTimeout(loadReview, 5000)
   }
 }
@@ -104,27 +110,20 @@ async function withAction(name, run) {
   }
 }
 
-function saveSchedule(clear = false) {
-  const at = scheduleAt.value
-  if (!clear && (!at || at <= Date.now())) {
-    error.value = '请选择一个晚于当前时间的计划发布时间'
-    return
-  }
-  return withAction(clear ? 'clear' : 'schedule', async (id, isCurrent) => {
-    const snapshot = await studioExtraApi.schedule(id, clear ? null : new Date(at).toISOString())
-    if (!isCurrent()) return
-    emit('saved', snapshot)
-    scheduleAt.value = clear ? null : at
-    emit('notify', clear ? '已取消排期' : `已保存排期：${formatTime(at)}`)
-  })
-}
-
 function pushDraft() {
   return withAction('push', async (id, isCurrent) => {
-    const result = await studioExtraApi.pushDraft(id, accountId.value)
+    if (props.beforeSubmit && !(await props.beforeSubmit())) {
+      error.value = '稿件正在处理或还有未保存的修改，请稍后再推送。'
+      return
+    }
+    const payload = draftSubmission({ platform: platform.value, accountId: accountId.value, mode: deliveryMode.value, scheduleAt: scheduleAt.value })
+    const result = await studioExtraApi.pushDraft(id, payload)
     if (!isCurrent()) return
-    if (result.status === 'queued') emit('notify', '草稿推送已排队，结果以复盘为准')
-    if (result.status === 'drafted') emit('notify', '该版本已推送到所选公众号的草稿箱')
+    if (result.status === 'drafted' && (result.draftMediaId || result.remoteContentId)) {
+      emit('notify', '该版本已推送到所选公众号的草稿箱')
+    } else {
+      emit('notify', deliveryMode.value === 'scheduled' ? '定时草稿推送任务已入队，到点自动执行；结果请查看推送队列' : '草稿推送任务已入队，尚未推送成功；结果请查看推送队列')
+    }
     await loadReview()
   })
 }
@@ -133,6 +132,7 @@ function retryDraft(jobId) {
   return withAction(jobId, async (id, isCurrent) => {
     try {
       await studioExtraApi.retryDraft(id, jobId)
+      if (isCurrent()) emit('notify', '重试任务已入队，结果请查看推送队列')
     } finally {
       if (isCurrent()) await loadReview()
     }
@@ -140,9 +140,10 @@ function retryDraft(jobId) {
 }
 
 watch(() => props.article?.id, load, { immediate: true })
-watch(() => [props.article?.id, props.article?.scheduledFor], ([, time]) => {
-  scheduleAt.value = time ? Date.parse(time) : null
-}, { immediate: true })
+watch(() => props.article?.id, () => {
+  scheduleAt.value = null
+  deliveryMode.value = 'immediate'
+})
 
 onBeforeUnmount(() => {
   ++sequence
@@ -157,29 +158,20 @@ onBeforeUnmount(() => {
     <template v-else>
       <p v-if="error" class="panel-error" role="alert">{{ error }}</p>
       <section class="block-section schedule-section">
-        <div class="section-kicker">01 / SCHEDULE</div>
-        <div class="setting-head">
-          <h3>排期</h3>
-          <span class="state" :class="article.scheduledFor ? 'ok' : ''">{{ article.scheduledFor ? '已排期' : '未排期' }}</span>
-        </div>
-        <NDatePicker v-model:value="scheduleAt" type="datetime" size="small" clearable placeholder="选择计划发布时间" :disabled="busyAction" />
-        <div class="row">
-          <NButton size="small" :disabled="busyAction" :loading="action === 'schedule'" @click="saveSchedule()">保存排期</NButton>
-          <NButton v-if="article.scheduledFor" size="small" quaternary :disabled="busyAction" :loading="action === 'clear'" @click="saveSchedule(true)">取消排期</NButton>
-        </div>
-        <p class="hint">排期同步到内容日历，只记录计划，不会自动推送或发布。</p>
-      </section>
-
-      <section class="block-section">
-        <div class="section-kicker">02 / DELIVERY</div>
-        <div class="setting-head"><h3>微信公众号草稿箱</h3></div>
+        <div class="section-kicker">01 / DELIVERY</div>
+        <div class="setting-head"><h3>创建草稿推送任务</h3></div>
+        <NSelect v-model:value="platform" aria-label="发布平台" :options="draftPlatformOptions" :disabled="busyAction" size="small" />
+        <p class="hint">一次仅推送到一个账号。未接入平台不可选。</p>
         <p class="hint">推送最近一次存档的版本，不改原稿。推送成功后，请到微信公众平台确认正式发布。</p>
         <NSelect v-model:value="accountId" :options="accountOptions" :loading="loading" :disabled="loading || busyAction || !accounts.length" size="small" placeholder="选择已绑定的公众号" />
         <p v-if="accountsError" class="panel-error" role="alert">{{ accountsError }}</p>
         <p v-else-if="!loading && !accounts.length" class="hint">请先在发布中心绑定并验证公众号。</p>
         <p v-if="!loading && review && !review.versionId" class="hint">请选好封面和正文插图，再点顶部「文章存档」。</p>
+        <NSelect v-model:value="deliveryMode" aria-label="推送方式" :options="deliveryOptions" :disabled="busyAction" size="small" />
+        <NDatePicker v-if="deliveryMode === 'scheduled'" v-model:value="scheduleAt" type="datetime" size="small" clearable placeholder="选择计划推送时间" :disabled="busyAction" />
+        <p class="hint">立即和定时都会进入真实推送队列；成功后仅进入公众号草稿箱，不会正式发文。</p>
         <div class="row">
-          <NButton type="primary" size="small" :disabled="loading || busyAction || !accountId || !review?.versionId || Boolean(currentDraft)" :loading="action === 'push'" @click="pushDraft">推送到草稿箱</NButton>
+          <NButton type="primary" size="small" :disabled="loading || busyAction || !accountId || !review?.versionId || Boolean(currentDraft && !['cancelled'].includes(currentDraft.status))" :loading="action === 'push'" @click="pushDraft">{{ deliveryMode === 'scheduled' ? '创建定时推送任务' : '立即加入推送队列' }}</NButton>
           <span v-if="currentDraft" class="hint">该版本：{{ statusLabel[currentDraft.status] }}</span>
         </div>
       </section>
@@ -198,8 +190,10 @@ onBeforeUnmount(() => {
             <div class="row">
               <strong>{{ row.accountLabel || row.platformLabel }}</strong>
               <span class="state" :class="statusClass[row.status]">{{ statusLabel[row.status] || row.status }}</span>
-              <time v-if="row.at" :datetime="row.at" class="hint">{{ formatTime(row.at) }}</time>
             </div>
+            <p class="hint">平台：{{ row.platformLabel }} · 账号：{{ row.accountLabel || '未知账号' }}</p>
+            <p class="hint">计划推送：{{ row.scheduledAt ? formatJobTime(row.scheduledAt) : '立即（入队后执行）' }}</p>
+            <p class="hint">实际推送：{{ row.draftMediaId ? formatJobTime(actualPushTime(row) || row.pushedAt || row.at) : '尚未推送成功' }}</p>
             <p v-if="row.error" class="row-error">{{ row.error }}</p>
             <p v-if="row.draftMediaId" class="hint draft-id">草稿 ID：{{ row.draftMediaId }}</p>
             <a v-if="row.url" :href="row.url" target="_blank" rel="noopener noreferrer">查看已发布文章</a>

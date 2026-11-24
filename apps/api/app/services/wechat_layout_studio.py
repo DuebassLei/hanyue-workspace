@@ -50,9 +50,9 @@ LI_RE = re.compile(r'^(\s*)(?:([-*+])|(\d+)[.)、])\s+(.*)$')
 CAP_END = '。！？!?：:；;，,、…'
 VIDEO_RE = re.compile(r'^\[([^\]]+\.(?:mp4|mov|m4v|webm|avi|gif))\]$', re.IGNORECASE)
 ESC_RE = re.compile(r'\\([\\`*_{}\[\]()#+\-.!>~=|])')
-AUTHOR = '林月半子的AI笔记'
-SLOGAN = '我是林月半子，教你用AI干掉90%的重复劳动'
-CTA = '点个关注，下一篇见 →'
+AUTHOR = 'AI小钥的笔记'
+SLOGAN = '我是AI小钥，教你学会AI,用好AI~'
+CTA = '点个关注，下一篇见'
 CALLOUT_LABELS = {'TIP': '小技巧', 'NOTE': '说明', 'WARN': '注意', 'TLDR': '省流版'}
 
 

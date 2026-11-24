@@ -33,6 +33,12 @@ function defaultTab(chapter) {
 
 const activeTab = ref(defaultTab(props.chapter))
 watch(() => props.chapter?.id, () => { activeTab.value = defaultTab(props.chapter) })
+watch(() => props.chapter?.pendingCandidate, (next, previous) => {
+  if (!String(previous || '').trim() && String(next || '').trim()) activeTab.value = 'pending'
+})
+watch(() => props.chapter?.draftText, (next, previous) => {
+  if (!String(previous || '').trim() && String(next || '').trim()) activeTab.value = 'draft'
+})
 
 const tabs = computed(() =>
   [

@@ -68,6 +68,7 @@ onMounted(load)
 <template>
   <div class="page calendar-page">
     <div class="calendar-actions"><n-button type="primary" size="small" @click="openForm()">＋ 安排一期</n-button></div>
+    <n-alert type="info" :bordered="false">本日历记录人工内容计划，不会自动推送。自动推送请在成稿台创建草稿推送任务，并在发布管理中查看计划和执行结果。</n-alert>
     <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
     <div v-if="loading" class="calendar-loading"><div class="skeleton" style="height: 520px" /><div class="skeleton" style="height: 520px" /></div>
     <template v-else>

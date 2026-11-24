@@ -130,6 +130,36 @@ def test_chat_route_appends_user_message(client, monkeypatch):
     assert response.json()["chat"][-1] == {"role": "user", "text": "把第一段写得更具体"}
 
 
+def test_chat_selected_model_route_and_pipeline(client, monkeypatch):
+    from app.services import ai_gateway, studio_pipeline as SP
+    headers, article = _client_with_article(client, 'studio-chat-selected')
+    scheduled = []
+    def resolve(db, user_id, model_id):
+        if model_id == 'invalid':
+            raise ai_gateway.InvalidModelSelection('model_not_found', '模型不可用')
+        return {}
+    monkeypatch.setattr(ai_gateway, 'resolve_selection', resolve)
+    monkeypatch.setattr(SP.PIPELINE, 'chat', lambda *args, **kwargs: scheduled.append(kwargs))
+    url = f"/api/v1/studio/articles/{article['id']}/chat"
+    response = client.post(url, headers=headers, json={'message': '改', 'modelId': 'platform-model'})
+    assert response.status_code == 200, response.text
+    assert scheduled[-1]['model_id'] == 'platform-model'
+    response = client.post(url, headers=headers, json={'message': '改', 'modelId': 'invalid'})
+    assert response.status_code == 400, response.text
+    assert len(scheduled) == 1
+    calls = []
+    async def generate(db, **kwargs):
+        calls.append(kwargs)
+        return {'text': json.dumps({'reply': '好的', 'ops': []}), 'modelId': 'actual-id', 'modelCode': 'actual-code', 'fallbackUsed': True}
+    monkeypatch.setattr(ai_gateway, 'generate_text', generate)
+    SP.PIPELINE.chat_now(article['id'], '改', model_id='platform-model')
+    assert calls[-1]['model_id'] == 'platform-model'
+    snapshot = client.get(f"/api/v1/studio/articles/{article['id']}", headers=headers).json()
+    assert snapshot['chat'][-1]['model'] == {'modelId': 'actual-id', 'modelCode': 'actual-code', 'fallbackUsed': True}
+    SP.PIPELINE.chat_now(article['id'], '改')
+    assert 'model_id' not in calls[-1]
+
+
 def test_chat_pipeline_applies_ops_and_undo_restores(client, monkeypatch):
     from app.core.db import SessionLocal
     from app import models
@@ -163,6 +193,81 @@ def test_chat_pipeline_applies_ops_and_undo_restores(client, monkeypatch):
     with SessionLocal() as db:
         row = db.get(models.StudioArticle, article["id"])
         assert studio_repo.row_to_dict(row)["blocks"][0]["text"].startswith("首先，随着人工智能")
+
+
+def test_chat_target_rejects_cross_block_and_invalid_target(client, monkeypatch):
+    from app.services import studio_pipeline as SP, ai_gateway
+    from app.core.db import SessionLocal
+    from app import models
+    from app.services import studio_repo
+
+    headers, article = _client_with_article(client, "chat-target-safety")
+    url = f"/api/v1/studio/articles/{article['id']}/chat"
+    assert client.post(url, headers=headers, json={"message": "改", "targetBlockId": "missing"}).status_code == 404
+
+    async def generate(db, **kwargs):
+        return {"text": json.dumps({"reply": "ok", "ops": [
+            {"op": "rewrite", "block": 1, "text": "目标"},
+            {"op": "title", "text": "越权"},
+        ]})}
+    monkeypatch.setattr(ai_gateway, "generate_text", generate)
+    with pytest.raises(SP.PipelineError):
+        SP.PIPELINE.chat_now(article["id"], "改", target_block_id=article["blocks"][0]["id"])
+    with SessionLocal() as db:
+        data = studio_repo.row_to_dict(db.get(models.StudioArticle, article["id"]))
+        assert data["title"] == article["title"]
+        assert data["blocks"][0]["text"] == article["blocks"][0]["text"]
+
+
+def test_chat_preview_accept_and_stale_conflict(client, monkeypatch):
+    from app.services import studio_pipeline as SP, ai_gateway
+    headers, article = _client_with_article(client, "chat-preview")
+    async def generate(db, **kwargs):
+        return {"text": json.dumps({"reply": "建议", "ops": [{"op": "rewrite", "block": 1, "text": "建议正文"}]})}
+    monkeypatch.setattr(ai_gateway, "generate_text", generate)
+    SP.PIPELINE.chat_now(article["id"], "改", target_block_id=article["blocks"][0]["id"], preview=True)
+    url = f"/api/v1/studio/articles/{article['id']}"
+    data = client.get(url, headers=headers).json()
+    proposal = data["chat"][-1]["proposal"]
+    assert data["blocks"][0]["text"] == article["blocks"][0]["text"]
+    assert proposal["changes"] == [{"blockId": article["blocks"][0]["id"], "before": article["blocks"][0]["text"], "after": "建议正文"}]
+    accept = f"{url}/chat/proposals/{proposal['id']}/accept"
+    result = client.post(accept, headers=headers)
+    assert result.status_code == 200, result.text
+    assert result.json()["blocks"][0]["text"] == "建议正文"
+    assert client.post(accept, headers=headers).status_code == 409
+    SP.PIPELINE.chat_now(article["id"], "改", preview=True)
+    # 相同内容无建议；生成不同的建议用于验证过期保护。
+    async def generate2(db, **kwargs):
+        return {"text": json.dumps({"ops": [{"op": "rewrite", "block": 1, "text": "第二版"}]})}
+    monkeypatch.setattr(ai_gateway, "generate_text", generate2)
+    SP.PIPELINE.chat_now(article["id"], "改", preview=True)
+    proposal = client.get(url, headers=headers).json()["chat"][-1]["proposal"]
+    other = article["blocks"][1]
+    assert client.patch(f"{url}/blocks/{other['id']}", headers=headers, json={"text": "人工更新"}).status_code == 200
+    assert client.post(f"{url}/chat/proposals/{proposal['id']}/accept", headers=headers).status_code == 409
+    assert client.post(f"{url}/chat/proposals/{proposal['id']}/discard", headers=headers).status_code == 200
+
+
+def test_chat_generation_rejects_concurrent_content_change(client, monkeypatch):
+    from app.services import studio_pipeline as SP, ai_gateway, studio_repo
+    from app.core.db import SessionLocal
+    from app import models
+    headers, article = _client_with_article(client, "chat-generation-conflict")
+    async def generate(db, **kwargs):
+        with SessionLocal() as edit_db:
+            row = edit_db.get(models.StudioArticle, article["id"])
+            data = studio_repo.row_to_dict(row)
+            data["blocks"][1]["text"] = "并发修改"
+            studio_repo.save(edit_db, row, data)
+            edit_db.commit()
+        return {"text": json.dumps({"ops": [{"op": "rewrite", "block": 1, "text": "过期结果"}]})}
+    monkeypatch.setattr(ai_gateway, "generate_text", generate)
+    with pytest.raises(SP.PipelineError, match="生成期间发生变化"):
+        SP.PIPELINE.chat_now(article["id"], "改", target_block_id=article["blocks"][0]["id"])
+    data = client.get(f"/api/v1/studio/articles/{article['id']}", headers=headers).json()
+    assert data["blocks"][0]["text"] == article["blocks"][0]["text"]
+    assert data["blocks"][1]["text"] == "并发修改"
 
 
 def test_local_detect_marks_blocks_without_key(client):

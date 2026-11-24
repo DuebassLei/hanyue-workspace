@@ -29,16 +29,37 @@ import {
   NTag,
 } from 'naive-ui'
 import { api } from '../api/client'
-import { toast } from '../ui/feedback'
+import { toast, confirm } from '../ui/feedback'
 import { usePermission } from '../composables/usePermission'
 import { useModelSelectionStore } from '../stores/modelSelection'
+import { useSessionStore } from '../stores/session'
 import StatusTag from '../components/StatusTag.vue'
 
 // 页面本身只要求 models.view：能确认「现在挂的是哪个模型、通不通」。
 // 换 Key、删连接、登记模型代号是 models.manage，两者分开——
 // 删错一个连接全站创作停摆，看和改不该是同一个权限。
-const { can } = usePermission()
+const { can, isSuperadmin } = usePermission()
 const canManage = computed(() => can('models.manage'))
+const session = useSessionStore()
+const platformDefaults = reactive({ text: null, image: null })
+const platformSaving = ref('')
+
+function isOwnConnection(conn) {
+  return Boolean(session.user?.id && conn.ownerUserId === session.user.id)
+}
+
+function confirmOtherConnection(conn, action) {
+  if (!conn || !isSuperadmin.value || isOwnConnection(conn)) return true
+  return confirm(`这是 ${conn.ownerLabel || '其他用户'} 的连接。${action}可能影响对方的使用或产生费用，确定继续？`, '跨用户操作确认')
+}
+
+function crossUserQuery(conn) {
+  return conn && isSuperadmin.value && !isOwnConnection(conn) ? '?confirmCrossUser=true' : ''
+}
+
+function editingConnection() {
+  return connections.value.find((conn) => conn.id === editingId.value)
+}
 
 const connections = ref([])
 const statusRows = ref([])
@@ -148,7 +169,7 @@ const statusCards = computed(() =>
 /** 某条链路可选的默认模型：启用且能力匹配；带连接名，避免不同连接里的同名代号分不清 */
 function modelChoices(kind) {
   const rows = []
-  for (const conn of connections.value) {
+  for (const conn of connections.value.filter(isOwnConnection)) {
     for (const model of conn.models || []) {
       if (!model.enabled) continue
       const capable =
@@ -224,6 +245,35 @@ function applyDefaults(pref) {
   defaults.imageIgnored = pref.defaultImageModelIgnored || null
 }
 
+async function loadPlatformDefaults() {
+  if (!isSuperadmin.value) return
+  try {
+    const data = await api.get('/models/platform-defaults')
+    platformDefaults.text = data.defaultTextModelId || null
+    platformDefaults.image = data.defaultImageModelId || null
+  } catch (err) {
+    error.value = err.message
+  }
+}
+
+async function setPlatformDefault(kind, value) {
+  platformSaving.value = kind
+  error.value = ''
+  try {
+    const data = await api.patch('/models/platform-defaults', {
+      [kind === 'text' ? 'defaultTextModelId' : 'defaultImageModelId']: value || null,
+    })
+    platformDefaults.text = data.defaultTextModelId || null
+    platformDefaults.image = data.defaultImageModelId || null
+    notifyModelStatus()
+    toast('平台兜底模型已更新。')
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    platformSaving.value = ''
+  }
+}
+
 async function loadDefaults() {
   try {
     applyDefaults(await api.get('/preferences'))
@@ -294,26 +344,14 @@ const grouped = computed(() => {
 })
 
 /** 分组列表：文本、生图固定有序；「其他」只在真有这类连接时出现 */
-const sections = computed(() => {
-  const list = MODEL_TYPES.map((type) => ({
-    ...type,
-    rows: grouped.value[type.value],
-    addLabel: `添加${type.label}`,
-  }))
-  if (grouped.value.other.length) {
-    list.push({
-      value: 'other',
-      label: '其他连接',
-      short: '其他',
-      desc: '还没登记模型，或一个连接里同时登记了文本与生图模型；调用时按每个模型的实际能力生效。',
-      caps: '',
-      empty: '',
-      addLabel: '',
-      rows: grouped.value.other,
-    })
-  }
-  return list
-})
+const sections = computed(() => MODEL_TYPES.map((type) => ({
+  ...type,
+  rows: connections.value.filter((conn) => {
+    const models = conn.models || []
+    return models.some((model) => modelKind(model) === type.value) || (!models.length && type.value === 'text')
+  }),
+  addLabel: `添加${type.label}`,
+})))
 
 /** 当前弹窗对应的类型 */
 const activeType = computed(
@@ -494,9 +532,11 @@ async function fetchRemoteModels() {
     modelsHint.value = '先填写 Base URL，再拉取模型列表'
     return
   }
+  const conn = editingConnection()
+  if (!(await confirmOtherConnection(conn, '拉取模型列表'))) return
   modelsLoading.value = true
   try {
-    const res = await api.post('/models/probe/models', {
+    const res = await api.post(`/models/probe/models${crossUserQuery(conn)}`, {
       baseUrl: connForm.baseUrl.trim(),
       apiKey: connForm.apiKey.trim(),
       providerType: connForm.providerType,
@@ -536,11 +576,13 @@ async function runProbe() {
     probe.message = '请先填写 Base URL'
     return
   }
+  const conn = editingConnection()
+  if (!(await confirmOtherConnection(conn, '测试配置'))) return
   probe.running = true
   probe.state = 'running'
   probe.message = '正在向供应商发起真实请求…'
   try {
-    const res = await api.post('/models/probe/test', {
+    const res = await api.post(`/models/probe/test${crossUserQuery(conn)}`, {
       baseUrl: connForm.baseUrl.trim(),
       apiKey: connForm.apiKey.trim(),
       providerType: connForm.providerType,
@@ -578,7 +620,7 @@ async function runProbe() {
 function settleStatus(conn) {
   if (!conn?.id) return
   api
-    .post(`/models/connections/${conn.id}/test`)
+    .post(`/models/connections/${conn.id}/test${crossUserQuery(conn)}`)
     .then((result) => {
       conn.status = result.status
     })
@@ -604,7 +646,14 @@ watch(
 
 async function loadConnections() {
   try {
-    connections.value = await api.get('/models/connections')
+    const rows = []
+    let cursor = ''
+    do {
+      const page = await api.getPage(`/models/connections?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)
+      rows.push(...(page.data || []))
+      cursor = page.nextCursor || ''
+    } while (cursor)
+    connections.value = rows
   } catch (err) {
     error.value = err.message
   }
@@ -708,6 +757,8 @@ async function saveConnection() {
       }
     }
   }
+  const editing = editingConnection()
+  if (editingId.value && !(await confirmOtherConnection(editing, '修改连接及模型，并测试连接'))) return
   try {
     if (editingId.value) {
       const payload = {
@@ -718,7 +769,7 @@ async function saveConnection() {
       // 只在用户真的输入了新密钥或勾选清空时才传，避免误清已有凭据
       if (clearKey.value) payload.apiKey = ''
       else if (connForm.apiKey.trim()) payload.apiKey = connForm.apiKey
-      const updated = await api.patch(`/models/connections/${editingId.value}`, payload)
+      const updated = await api.patch(`/models/connections/${editingId.value}${crossUserQuery(editing)}`, payload)
       const idx = connections.value.findIndex((c) => c.id === updated.id)
       if (idx >= 0) connections.value[idx] = updated
       await syncModelCode(updated, connForm.modelCode, false, connForm.capabilities, imageSizes)
@@ -757,7 +808,7 @@ async function syncModelCode(conn, code, isNew = false, capabilities = '', image
   const existing = conn.models?.[0]
   if (!trimmed) {
     if (!isNew && existing?.id) {
-      await api.del(`/models/catalog/${existing.id}`)
+      await api.del(`/models/catalog/${existing.id}${crossUserQuery(conn)}`)
       conn.models = []
     }
     return
@@ -769,7 +820,7 @@ async function syncModelCode(conn, code, isNew = false, capabilities = '', image
     existing && existing.modelCode !== trimmed && existing.displayName === existing.modelCode
   const sizesChanged = capList.includes('image.generate') && JSON.stringify(existing?.supportedImageSizes || {}) !== JSON.stringify(imageSizes)
   if (existing && (existing.modelCode !== trimmed || capsChanged || sizesChanged)) {
-    const model = await api.patch(`/models/catalog/${existing.id}`, {
+    const model = await api.patch(`/models/catalog/${existing.id}${crossUserQuery(conn)}`, {
       modelCode: trimmed,
       capabilities: capList,
       ...(capList.includes('image.generate') ? { supportedImageSizes: imageSizes } : {}),
@@ -777,7 +828,7 @@ async function syncModelCode(conn, code, isNew = false, capabilities = '', image
     })
     conn.models = [model]
   } else if (!existing) {
-    const model = await api.post('/models/catalog', {
+    const model = await api.post(`/models/catalog${crossUserQuery(conn)}`, {
       connectionId: conn.id,
       modelCode: trimmed,
       capabilities: capList,
@@ -788,9 +839,10 @@ async function syncModelCode(conn, code, isNew = false, capabilities = '', image
 }
 
 async function testConnection(conn) {
+  if (!(await confirmOtherConnection(conn, '测试连接'))) return
   error.value = ''
   try {
-    const result = await api.post(`/models/connections/${conn.id}/test`)
+    const result = await api.post(`/models/connections/${conn.id}/test${crossUserQuery(conn)}`)
     conn.status = result.status
     notifyModelStatus()
     const detail = result.httpStatus
@@ -804,9 +856,16 @@ async function testConnection(conn) {
 }
 
 async function removeConnection(conn) {
-  await api.del(`/models/connections/${conn.id}`)
-  connections.value = connections.value.filter((c) => c.id !== conn.id)
-  notifyModelStatus()
+  if (isOwnConnection(conn)) {
+    if (!(await confirm(`删除连接「${conn.displayName}」及其所有模型？此操作无法撤销。`, '删除模型连接'))) return
+  } else if (!(await confirmOtherConnection(conn, '删除连接及其模型'))) return
+  try {
+    await api.del(`/models/connections/${conn.id}${crossUserQuery(conn)}`)
+    connections.value = connections.value.filter((c) => c.id !== conn.id)
+    notifyModelStatus()
+  } catch (err) {
+    error.value = err.message
+  }
 }
 
 const providerOptions = [
@@ -814,10 +873,15 @@ const providerOptions = [
   { value: 'vendor_native', label: '供应商原生（适配器未接入）' },
 ]
 
+watch(isSuperadmin, (allowed) => {
+  if (allowed) loadPlatformDefaults()
+})
+
 onMounted(() => {
   loadConnections()
   loadStatus()
   loadDefaults()
+  loadPlatformDefaults()
 })
 </script>
 
@@ -827,7 +891,7 @@ onMounted(() => {
       <div>
         <h1 class="page-title">模型管理</h1>
         <p class="page-sub">
-          文本模型与生图模型分开登记，各自的连接、代号与能力互不影响；顶栏状态条读的是同一份数据，改完立即生效。
+          文本和生图模型分别管理；可在列表中设置个人默认。超级管理员可将自己的模型设为平台兜底，供其他用户使用并产生费用。
         </p>
       </div>
     </div>
@@ -838,60 +902,6 @@ onMounted(() => {
       你当前只有「模型查看」权限：能看到正在使用的模型、连接状态与密钥掩码；
       新增连接、修改密钥、删除连接需要「模型管理」权限，请联系超级管理员。
     </n-alert>
-
-    <!-- 一块管两件事：左边是「现在实际会用哪个」，右边是「不指定时先用哪个」。
-         原先拆成「全局默认模型」「当前生效」两块，同一批模型名各说一遍，容易看着对不上。 -->
-    <section class="card">
-      <div class="row">
-        <h2 class="card-title" style="margin: 0">模型</h2>
-        <div class="spacer" />
-        <span class="field-hint" style="margin: 0">保存即生效 · 跨设备同步</span>
-        <n-button quaternary size="small" :loading="statusLoading" @click="loadStatus">刷新</n-button>
-      </div>
-      <p class="page-sub">
-        每类一行：左边是现在生效的模型，「可用」只代表连接已配置且测过连通性，不代表在付费额度内；
-        右边选「不指定模型时先用哪个」——创作页、小说、分镜、生图里的模型下拉都是会话级临时选择，
-        刷新后回到这里的默认值，文本与生图各存一份互不覆盖。
-      </p>
-      <div class="model-merge">
-        <div v-for="row in mergedModelRows" :key="row.kind" class="model-merge-row">
-          <div class="model-merge-now">
-            <div class="model-merge-head">
-              <span class="model-dot" :class="`is-${row.state}`" aria-hidden="true" />
-              <span class="model-merge-kind">{{ row.kindLabel }}</span>
-              <n-tag
-                size="small"
-                round
-                :type="row.state === 'ok' ? 'success' : row.state === 'blocked' ? 'error' : 'default'"
-              >
-                {{ row.hint }}
-              </n-tag>
-            </div>
-            <div
-              class="model-merge-name"
-              :title="row.modelCode
-                ? `底层 ${row.modelCode}${row.connectionName ? ` · 连接 ${row.connectionName}` : ''}`
-                : undefined"
-            >
-              {{ row.name }}
-            </div>
-            <p class="field-hint model-merge-note">{{ row.message }}</p>
-          </div>
-          <div class="model-merge-pick">
-            <span class="model-merge-pick-label">{{ row.pickLabel }}</span>
-            <n-select
-              :value="row.pickValue"
-              :options="row.pickOptions"
-              :disabled="savingKind === row.kind"
-              :loading="savingKind === row.kind"
-              size="small"
-              @update:value="(value) => setDefault(row.kind, value)"
-            />
-            <p class="field-hint model-merge-note">{{ row.pickHint }}</p>
-          </div>
-        </div>
-      </div>
-    </section>
 
     <section v-for="section in sections" :key="section.value" class="card">
       <div class="row">
@@ -927,12 +937,13 @@ onMounted(() => {
         <div v-for="conn in section.rows" :key="conn.id" class="list-row">
           <div class="list-main">
             <div class="list-title">{{ conn.displayName }}</div>
+            <div v-if="isSuperadmin" class="list-meta">所有者：{{ conn.ownerLabel || conn.ownerUserId || '未知' }}{{ isOwnConnection(conn) ? '（本人）' : '' }}</div>
             <div class="list-meta">
               {{ conn.providerType }} · {{ conn.baseUrl || '未设置 Base URL' }} ·
               密钥 {{ conn.keyMasked || '未配置' }}
             </div>
             <div v-if="conn.models.length" class="row row-tight" style="margin-top: 6px">
-              <template v-for="model in conn.models" :key="model.id">
+              <template v-for="model in conn.models.filter((item) => modelKind(item) === section.value)" :key="model.id">
                 <n-tag
                   size="small"
                   :type="isOtherKind(conn) ? (modelKind(model) === 'image' ? 'info' : 'warning') : 'default'"
@@ -940,12 +951,29 @@ onMounted(() => {
                 >
                   {{ modelTagText(conn, model) }}
                 </n-tag>
-                <n-tag v-if="isDefaultModel(model)" size="small" type="success" round>默认</n-tag>
+                <n-tag v-if="isDefaultModel(model) && isOwnConnection(conn)" size="small" type="success" round>个人默认</n-tag>
+                <n-tag v-if="isSuperadmin && platformDefaults[section.value] === model.id" size="small" type="info" round>平台兜底</n-tag>
+                <n-button v-if="isSuperadmin && isOwnConnection(conn)" size="tiny" quaternary :disabled="!model.enabled || Boolean(platformSaving)" @click="setPlatformDefault(section.value, platformDefaults[section.value] === model.id ? '' : model.id)">
+                  {{ platformDefaults[section.value] === model.id ? '取消平台兜底' : '设为平台兜底' }}
+                </n-button>
               </template>
             </div>
             <div v-else class="list-meta" style="margin-top: 4px">未登记模型 · 编辑后填写模型代号</div>
           </div>
           <StatusTag :status="conn.status" />
+          <template v-if="isOwnConnection(conn)">
+            <n-button
+              v-for="model in conn.models.filter((item) => modelKind(item) === section.value)"
+              :key="`default-${model.id}`"
+              size="small"
+              secondary
+              :disabled="!model.enabled || Boolean(savingKind)"
+              :title="!model.enabled ? '模型已停用，无法设为默认' : `默认模型：${model.displayName || model.modelCode}`"
+              @click="setDefault(section.value, (section.value === 'text' ? defaults.textId : defaults.imageId) === model.id ? '' : model.id)"
+            >
+              {{ (section.value === 'text' ? defaults.textId : defaults.imageId) === model.id ? '取消默认' : '设为默认' }}{{ conn.models.filter((item) => modelKind(item) === section.value).length > 1 ? ` · ${model.displayName || model.modelCode}` : '' }}
+            </n-button>
+          </template>
           <n-button
             quaternary
             size="small"
@@ -978,8 +1006,7 @@ onMounted(() => {
       </div>
 
       <p v-if="section.value === 'image'" class="field-hint">
-        生图模型的 Key 与 Base URL 也可由环境变量 IMAGE_PROVIDER_* 提供；但上方「默认生图模型」
-        一旦指定，就优先于环境变量，避免界面里切了却不生效。
+        个人模型和平台兜底不可用时，还可能使用环境变量 IMAGE_PROVIDER_* 配置的生图服务。
       </p>
     </section>
 

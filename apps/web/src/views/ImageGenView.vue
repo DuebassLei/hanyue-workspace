@@ -6,12 +6,6 @@ import { api, fetchBlobUrl } from '../api/client'
 
 const REFERENCE_LIMIT = 4
 const referenceInput = ref(null)
-const ASPECT_OPTIONS = [
-  { label: '3:4', value: '3:4' },
-  { label: '1:1', value: '1:1' },
-  { label: '16:9', value: '16:9' },
-  { label: '9:16', value: '9:16' },
-]
 const COUNT_OPTIONS = [
   { label: '1', value: 1 },
   { label: '2', value: 2 },
@@ -76,6 +70,13 @@ const promptCategoryOptions = computed(() => [
 const selectedProvider = computed(
   () => providers.value.find((item) => (item.modelId || '') === selectedModelId.value) || null,
 )
+const ASPECT_OPTIONS = computed(() => Object.keys(selectedProvider.value?.supportedImageSizes || {})
+  .map((ratio) => ({ label: ratio, value: ratio })))
+watch(ASPECT_OPTIONS, (options) => {
+  if (!options.some((option) => option.value === form.aspectRatio)) {
+    form.aspectRatio = options[0]?.value || ''
+  }
+}, { immediate: true })
 // null 表示尚未探测过：按「可能不支持」提示，避免承诺做不到的事
 const providerEditsUnsupported = computed(
   () => selectedProvider.value?.supportsEdits === false,
@@ -496,6 +497,10 @@ function resetForm() {
 
 async function generate() {
   if (!form.prompt.trim()) return
+  if (!ASPECT_OPTIONS.value.some((option) => option.value === form.aspectRatio)) {
+    error.value = '当前模型未配置支持的精确尺寸，请在模型管理中配置后重试'
+    return
+  }
   busy.value = true
   error.value = ''
   try {
@@ -521,6 +526,7 @@ async function generate() {
       negativePrompt: form.negativePrompt.trim() || null,
       seed: form.seed === null || form.seed === '' ? null : Number(form.seed),
       aspectRatio: form.aspectRatio,
+      exactAspect: true,
       count: Number(form.count),
       modelId: selectedModelId.value || null,
       referenceAssetIds,
@@ -721,18 +727,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page">
-    <div class="gen-head">
-      <div class="gen-head-main">
-        <h1 class="page-title">图片生成</h1>
-        <p class="gen-head-note">文生图与参考图生图。结果自动存入素材库，可用于封面、正文配图或画布节点。</p>
-      </div>
-      <div class="gen-head-actions">
-        <span class="tag" :class="provider.available ? 'tag-success' : 'tag-warning'">
-          {{ provider.available ? `${providers.length} 个供应商可用` : '供应商未接入' }}
-        </span>
-        <n-button secondary size="small" @click="load">刷新状态</n-button>
-      </div>
-    </div>
 
     <n-alert v-if="error" type="error" closable @close="error = ''">{{ error }}</n-alert>
 
@@ -740,12 +734,14 @@ onBeforeUnmount(() => {
       <!-- 创建任务 -->
       <section class="card gen-form">
         <header class="gen-section-head">
-          <h2 class="section-title">创建生图任务</h2>
-          <p class="field-hint">最多 {{ REFERENCE_LIMIT }} 张参考图。生成成功后自动存入素材库。</p>
+          <div class="gen-block-head">
+            <h2 class="section-title">创建生图任务</h2>
+            <n-button secondary size="small" @click="load">刷新模型</n-button>
+          </div>
         </header>
 
         <label v-if="providers.length" class="field">
-          <span class="field-label">供应商</span>
+          <span class="field-label">生图模型</span>
           <n-select v-model:value="selectedModelId" :options="providerOptions" />
           <span class="field-hint">
             当前使用 {{ selectedProvider?.label || '默认供应商' }}
@@ -890,7 +886,8 @@ onBeforeUnmount(() => {
           <div class="gen-submit-options">
             <label class="field">
               <span class="field-label">比例</span>
-              <n-select v-model:value="form.aspectRatio" :options="ASPECT_OPTIONS" />
+              <n-select v-model:value="form.aspectRatio" :options="ASPECT_OPTIONS" placeholder="暂无可用比例" />
+              <span v-if="!ASPECT_OPTIONS.length" class="field-hint">当前模型未配置支持的精确尺寸，请在模型管理中配置。</span>
             </label>
             <label class="field">
               <span class="field-label">数量</span>
@@ -902,7 +899,7 @@ onBeforeUnmount(() => {
             <n-button
               type="primary"
               block
-              :disabled="!provider.available || !form.prompt.trim() || busy"
+              :disabled="!provider.available || !ASPECT_OPTIONS.length || !form.prompt.trim() || busy"
               @click="generate"
             >
               {{ busy ? '提交中…' : '生成图片' }}
@@ -1027,7 +1024,7 @@ onBeforeUnmount(() => {
           @click="openPreview(asset)"
         >
           <img :src="asset.url" :alt="asset.originalName" />
-          <span v-if="asset.prompt" class="recent-prompt">{{ asset.prompt }}</span>
+          <span class="recent-prompt">{{ asset.prompt || '' }}</span>
         </button>
       </div>
     </section>
@@ -1286,25 +1283,6 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 页头压成一行：标题与说明同基线，操作靠右，避免和顶栏标题重复占两行 */
-.gen-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-.gen-head-main {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-  min-width: 0;
-}
-.gen-head-note {
-  font-size: var(--font-sm);
-  color: var(--color-text-secondary);
-}
 .section-title {
   margin: 0;
   font-size: var(--font-section);
@@ -1321,6 +1299,27 @@ onBeforeUnmount(() => {
 .gen-form {
   display: flex;
   flex-direction: column;
+  gap: var(--space-3);
+  background: var(--color-surface-raised);
+}
+.gen-block-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }
+.gen-form .gen-block {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+.gen-form :deep(.n-input),
+.gen-form :deep(.n-base-selection) {
+  --n-color: var(--color-surface-raised);
+}
+.gen-form :deep(.n-button:not(.n-button--primary-type)) {
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+.gen-form :deep(.n-button:not(.n-button--primary-type):hover) {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-hover);
 }
 .gen-result {
   display: flex;
@@ -1735,6 +1734,9 @@ onBeforeUnmount(() => {
   -webkit-box-orient: vertical;
   overflow: hidden;
   padding: var(--space-2);
+  height: calc(3em + 2 * var(--space-2));
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
   font-size: var(--font-xs);
   line-height: 1.5;
   color: var(--color-text-secondary);

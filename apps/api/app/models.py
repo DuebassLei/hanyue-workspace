@@ -263,6 +263,16 @@ class ModelConnection(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(24), default="untested")
 
 
+class PlatformModelSettings(Base, TimestampMixin):
+    """Explicit platform-wide fallback model IDs; absent row means unconfigured."""
+
+    __tablename__ = "platform_model_settings"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="platform")
+    default_text_model_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    default_image_model_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
 class ModelCatalogEntry(Base, TimestampMixin):
     __tablename__ = "model_catalog_entries"
 

@@ -1,7 +1,8 @@
 <script setup>
 import { NButton } from 'naive-ui'
 import StatusTag from '../../../components/StatusTag.vue'
-import { canRecord, canRetry, canCancel, canDelete, jobTargetLabel } from './jobActions'
+import { canRetry, canCancel, canDelete, jobTargetLabel } from './jobActions'
+import { formatJobTime, actualPushTime, isManualRecord } from './draftQueue'
 
 // 单条发布任务：展示 + 上下文操作按钮。
 // 操作可用性判定来自 jobActions（与页面 deleteJob 守卫共用）；
@@ -10,12 +11,14 @@ defineProps({
   job: { type: Object, required: true },
   accountLabel: { type: String, default: '未知账号' },
   deleting: { type: Boolean, default: false },
+  readonly: { type: Boolean, default: false },
+  busy: { type: Boolean, default: false },
 })
-defineEmits(['record', 'retry', 'cancel', 'delete', 'open'])
+defineEmits(['retry', 'cancel', 'delete'])
 </script>
 
 <template>
-  <div class="list-row" tabindex="0" role="group" :aria-label="`${job.contentTitle || '发布任务'}，${job.status}`" @click="$emit('open')" @keydown.enter="$emit('open')">
+  <div class="list-row" role="group" :aria-label="`${job.contentTitle || '发布任务'}，${job.status}`">
     <div class="list-main">
       <div class="list-title">
         <router-link v-if="job.contentItemId" class="job-article-link" :to="{ name: 'articles', query: { id: job.contentItemId } }" @click.stop>
@@ -26,22 +29,22 @@ defineEmits(['record', 'retry', 'cancel', 'delete', 'open'])
         {{ job.platformLabel }} · {{ jobTargetLabel(job) }}
       </div>
       <div class="list-meta">
-        账号 {{ accountLabel }} · 请求号 {{ job.requestId.slice(0, 8) }} · 尝试 {{ job.attemptCount }} 次
-        <span v-if="job.scheduledAt"> · 计划 {{ job.scheduledAt.slice(0, 16).replace('T', ' ') }}</span>
+        账号 {{ accountLabel }} · 请求号 {{ (job.requestId || job.id).slice(0, 8) }} · 尝试 {{ job.attemptCount || 0 }} 次
+        <span> · 计划推送 {{ job.scheduledAt ? formatJobTime(job.scheduledAt) : '立即（入队后执行）' }}</span>
+        <span> · 实际推送 {{ !isManualRecord(job) && job.remoteContentId ? formatJobTime(actualPushTime(job)) : '—' }}</span>
         <span v-if="job.remoteContentId"> · 远端 ID {{ job.remoteContentId }}</span>
       </div>
       <div v-if="job.errorMessage" class="list-meta" style="color: var(--color-danger)">
         {{ job.errorCode }}：{{ job.errorMessage }}
       </div>
     </div>
-    <StatusTag :status="job.status" />
-    <n-button v-if="canRecord(job)" size="small" quaternary @click.stop="$emit('record')">
-      回填手发结果
-    </n-button>
-    <n-button v-if="canRetry(job)" size="small" quaternary @click.stop="$emit('retry')">重试</n-button>
-    <n-button v-if="canCancel(job)" size="small" quaternary @click.stop="$emit('cancel')">取消</n-button>
+    <span v-if="isManualRecord(job)" class="list-meta">历史人工记录 · 非真实推送</span>
+    <span v-else-if="job.status === 'succeeded' && !job.remoteContentId" class="list-meta">未确认推送结果（缺少远端 ID）</span>
+    <StatusTag v-else :status="job.status" />
+    <n-button v-if="!readonly && canRetry(job)" size="small" quaternary :disabled="busy" @click.stop="$emit('retry')">重试推送</n-button>
+    <n-button v-if="!readonly && canCancel(job)" size="small" quaternary :disabled="busy" @click.stop="$emit('cancel')">取消</n-button>
     <n-button
-      v-if="canDelete(job)"
+      v-if="!readonly && canDelete(job)"
       size="small"
       type="error"
       quaternary

@@ -36,9 +36,11 @@ export function confirm(content, title = '确认') {
       content,
       positiveText: '确定',
       negativeText: '取消',
+      maskClosable: false,
       onPositiveClick: () => resolve(true),
       onNegativeClick: () => resolve(false),
       onClose: () => resolve(false),
+      onEsc: () => resolve(false),
     })
   })
 }

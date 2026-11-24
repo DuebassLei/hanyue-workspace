@@ -595,6 +595,54 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
   border-radius: 50%;
   background: var(--color-success);
 }
+/* 首页品牌语言的日间试点：只作用于概览，不覆盖全局或暗色主题。 */
+:global(html[data-theme='light']) .overview-page {
+  --overview-lime: #eaff70;
+  --overview-ink: #161616;
+  --overview-line: #dfdfd7;
+}
+:global(html[data-theme='light']) .overview-page .metric,
+:global(html[data-theme='light']) .overview-page .card {
+  border-color: var(--overview-line);
+  border-radius: 15px;
+  box-shadow: 0 3px 0 rgba(22, 22, 22, 0.04);
+}
+:global(html[data-theme='light']) .metric-featured {
+  border-color: var(--overview-ink);
+  box-shadow: inset 0 4px 0 var(--overview-lime), 3px 4px 0 #e0e0d8;
+}
+:global(html[data-theme='light']) .overview-page .metric-link:hover {
+  border-color: var(--overview-ink);
+  box-shadow: 3px 4px 0 #e0e0d8;
+}
+:global(html[data-theme='light']) .overview-page .metric-track {
+  background: #eeeee7;
+}
+:global(html[data-theme='light']) .overview-page .metric-track span {
+  background: #839c18;
+}
+:global(html[data-theme='light']) .overview-page .eyebrow {
+  color: #62665a;
+}
+:global(html[data-theme='light']) .overview-page .card-title {
+  color: var(--overview-ink);
+  font-weight: 700;
+}
+:global(html[data-theme='light']) .overview-page .empty-icon {
+  background: var(--overview-lime);
+  color: var(--overview-ink);
+}
+:global(html[data-theme='light']) .overview-page .platform-mark {
+  background: #f3f3ef;
+  color: var(--overview-ink);
+}
+:global(html[data-theme='light']) .overview-page .metric-link:focus-visible,
+:global(html[data-theme='light']) .overview-page .hot-row:focus-visible,
+:global(html[data-theme='light']) .overview-page .recent-row:focus-visible,
+:global(html[data-theme='light']) .overview-page .text-link:focus-visible {
+  outline: 2px solid var(--overview-ink);
+  outline-offset: 3px;
+}
 @media (max-width: 1023px) {
   .overview-metrics,
   .overview-skeleton {

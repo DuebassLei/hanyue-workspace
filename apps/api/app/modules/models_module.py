@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
@@ -17,7 +17,7 @@ from ..services import ai_article, ai_gateway, image_provider, prompt_rules, pro
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
 from ..core.security import decrypt_secret, encrypt_secret, mask_secret
 
-from ..core.rbac import require_permission
+from ..core.rbac import require_permission, resolve_access
 
 # 这个模块混了三类东西，**不能整模块挂管理权限**：
 #   - 连接写操作 / 探针 / catalog 写操作 → models.manage（会碰密钥，误删代价极高）
@@ -29,6 +29,24 @@ _ADMIN_ONLY = [require_permission("models.manage")]
 # 老的自定义角色可能只被授过 models.manage，这里一并放行，避免升级后突然进不去。
 _MODEL_READ = [require_permission("models.view", "models.manage", mode="any")]
 router = APIRouter(tags=["models"])
+
+
+def _authorize_connection(conn, user, db, request: Request, action: str):
+    if not conn:
+        raise not_found("模型连接")
+    if conn.owner_user_id != user.id:
+        if not resolve_access(db, user).is_superadmin:
+            raise not_found("模型连接")
+        if request.query_params.get("confirmCrossUser", "").lower() != "true":
+            raise ApiError("cross_user_confirmation_required", "操作其他用户的模型需要确认", status_code=409)
+        db.add(models.RbacAuditLog(actor_user_id=user.id, action=action,
+                 target_type="model_connection", target_id=conn.id,
+                 detail={"ownerUserId": conn.owner_user_id}))
+    return conn
+
+
+def _is_superadmin(user, db):
+    return resolve_access(db, user).is_superadmin
 
 
 def _model_out(
@@ -59,7 +77,10 @@ def _connection_out(
     models_rows = db.scalars(
         select(models.ModelCatalogEntry).where(models.ModelCatalogEntry.connection_id == conn.id)
     ).all()
+    owner = db.get(models.User, conn.owner_user_id)
     return schemas.ConnectionOut(
+        owner_user_id=conn.owner_user_id,
+        owner_label=owner.display_name if owner else "",
         id=conn.id,
         display_name=conn.display_name,
         provider_type=conn.provider_type,
@@ -78,9 +99,9 @@ def list_connections(
     limit: int = Query(default=100, le=200),
     cursor: str | None = Query(default=None),
 ) -> list[schemas.ConnectionOut]:
-    stmt = select(models.ModelConnection).where(
-        models.ModelConnection.owner_user_id == user.id
-    )
+    stmt = select(models.ModelConnection)
+    if not _is_superadmin(user, db):
+        stmt = stmt.where(models.ModelConnection.owner_user_id == user.id)
     rows, next_cursor = pagination.paginate(
         db, stmt, models.ModelConnection,
         sort_column=models.ModelConnection.created_at,
@@ -114,11 +135,9 @@ def create_connection(
 
 @router.patch("/models/connections/{connection_id}", response_model=schemas.ConnectionOut, dependencies=_ADMIN_ONLY)
 def update_connection(
-    connection_id: str, payload: schemas.ConnectionPatch, user: CurrentUser, db: DbSession
+    connection_id: str, payload: schemas.ConnectionPatch, user: CurrentUser, db: DbSession, request: Request
 ) -> schemas.ConnectionOut:
-    conn = db.get(models.ModelConnection, connection_id)
-    if not conn or conn.owner_user_id != user.id:
-        raise not_found("模型连接")
+    conn = _authorize_connection(db.get(models.ModelConnection, connection_id), user, db, request, "model.connection.update")
     data = payload.model_dump(exclude_unset=True)
     if "api_key" in data:
         new_key = (data.pop("api_key") or "").strip()
@@ -139,10 +158,8 @@ def update_connection(
 
 
 @router.delete("/models/connections/{connection_id}", status_code=204, dependencies=_ADMIN_ONLY)
-def delete_connection(connection_id: str, user: CurrentUser, db: DbSession) -> None:
-    conn = db.get(models.ModelConnection, connection_id)
-    if not conn or conn.owner_user_id != user.id:
-        raise not_found("模型连接")
+def delete_connection(connection_id: str, user: CurrentUser, db: DbSession, request: Request) -> None:
+    conn = _authorize_connection(db.get(models.ModelConnection, connection_id), user, db, request, "model.connection.delete")
     db.query(models.ModelCatalogEntry).filter(
         models.ModelCatalogEntry.connection_id == conn.id
     ).delete()
@@ -151,10 +168,8 @@ def delete_connection(connection_id: str, user: CurrentUser, db: DbSession) -> N
 
 
 @router.post("/models/connections/{connection_id}/test", dependencies=_ADMIN_ONLY)
-def test_connection(connection_id: str, user: CurrentUser, db: DbSession) -> dict:
-    conn = db.get(models.ModelConnection, connection_id)
-    if not conn or conn.owner_user_id != user.id:
-        raise not_found("模型连接")
+def test_connection(connection_id: str, user: CurrentUser, db: DbSession, request: Request) -> dict:
+    conn = _authorize_connection(db.get(models.ModelConnection, connection_id), user, db, request, "model.connection.test")
     # 真实连通性探测：只有供应商返回 2xx 才允许标记为 connected。
     result = provider_probe.probe_connection(
         base_url=conn.base_url,
@@ -174,7 +189,7 @@ def test_connection(connection_id: str, user: CurrentUser, db: DbSession) -> dic
 
 
 def _probe_credentials(
-    payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession
+    payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession, request: Request
 ) -> tuple[str, str]:
     """取「这次探测用哪个地址、哪把钥匙」。
 
@@ -184,11 +199,12 @@ def _probe_credentials(
     base_url = (payload.base_url or "").strip()
     api_key = (payload.api_key or "").strip()
     if payload.connection_id:
-        conn = db.get(models.ModelConnection, payload.connection_id)
-        if not conn or conn.owner_user_id != user.id:
-            raise not_found("模型连接")
+        conn = _authorize_connection(db.get(models.ModelConnection, payload.connection_id), user, db, request, "model.connection.probe")
+        if not api_key and base_url and base_url.rstrip("/") != conn.base_url.rstrip("/"):
+            raise ApiError("credential_url_mismatch", "使用已保存密钥时不能更换 Base URL")
         base_url = base_url or conn.base_url
         api_key = api_key or decrypt_secret(conn.credential_ciphertext)
+        db.commit()
     try:
         validated = ssrf.validate_base_url(base_url)
     except ssrf.UnsafeUrl as exc:
@@ -200,13 +216,13 @@ def _probe_credentials(
 
 @router.post("/models/probe/models", dependencies=_ADMIN_ONLY)
 def probe_models(
-    payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession
+    payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession, request: Request
 ) -> dict:
     """按当前填写的地址与密钥拉一次供应商模型列表，供「模型代号」下拉选择。
 
     只读：不落库、不改连接状态，拉不到就是拉不到，不返回占位列表。
     """
-    base_url, api_key = _probe_credentials(payload, user, db)
+    base_url, api_key = _probe_credentials(payload, user, db, request)
     result = provider_probe.fetch_models(base_url, api_key, payload.provider_type)
     return {
         "status": result["status"],
@@ -221,14 +237,14 @@ def probe_models(
 
 @router.post("/models/probe/test", dependencies=_ADMIN_ONLY)
 def probe_model(
-    payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession
+    payload: schemas.ModelProbeIn, user: CurrentUser, db: DbSession, request: Request
 ) -> dict:
     """测试当前表单这套配置：连接是否通、这个模型代号到底能不能用。
 
     文本模型会真发一次 1 token 的请求；生图模型只核对模型列表，不替用户花钱出图。
     同样只读：结果不写入连接状态，保存后的状态以列表页「测试」为准。
     """
-    base_url, api_key = _probe_credentials(payload, user, db)
+    base_url, api_key = _probe_credentials(payload, user, db, request)
     return provider_probe.probe_model(
         base_url=base_url,
         api_key=api_key,
@@ -240,21 +256,64 @@ def probe_model(
 
 @router.get("/models/catalog", response_model=list[schemas.CatalogOut])
 def list_catalog(user: CurrentUser, db: DbSession) -> list[schemas.CatalogOut]:
-    connection_ids = [
-        row.id
-        for row in db.scalars(
-            select(models.ModelConnection).where(models.ModelConnection.owner_user_id == user.id)
-        ).all()
-    ]
-    if not connection_ids:
-        return []
-    rows = db.scalars(
-        select(models.ModelCatalogEntry).where(
-            models.ModelCatalogEntry.connection_id.in_(connection_ids)
-        )
-    ).all()
+    settings = db.get(models.PlatformModelSettings, "platform")
+    platform_ids = {x for x in (settings.default_text_model_id, settings.default_image_model_id) if x} if settings else set()
+    superadmin = _is_superadmin(user, db)
+    stmt = select(models.ModelCatalogEntry, models.ModelConnection).join(
+        models.ModelConnection, models.ModelCatalogEntry.connection_id == models.ModelConnection.id
+    )
+    if not superadmin:
+        stmt = stmt.where((models.ModelConnection.owner_user_id == user.id) | (models.ModelCatalogEntry.id.in_(platform_ids)))
     default_id = ai_gateway.describe_default_model(db, user.id)["id"]
-    return [_model_out(row, db, default_id) for row in rows]
+    result = []
+    for entry, conn in db.execute(stmt).all():
+        if conn.owner_user_id != user.id and not superadmin and not entry.enabled:
+            continue
+        out = _model_out(entry, db, default_id)
+        if conn.owner_user_id == user.id:
+            out.source = "personal"
+        elif entry.id in platform_ids:
+            out.source = "platform"
+            out.connection_id = out.connection_name = out.connection_status = None
+        else:
+            out.source = "other"
+        result.append(out)
+    return result
+
+
+@router.get("/models/platform-defaults", response_model=schemas.PlatformModelDefaults)
+def get_platform_defaults(user: CurrentUser, db: DbSession):
+    if not _is_superadmin(user, db):
+        raise ApiError("permission_denied", "仅超级管理员可管理平台默认模型", status_code=403)
+    settings = db.get(models.PlatformModelSettings, "platform")
+    return schemas.PlatformModelDefaults(
+        default_text_model_id=settings.default_text_model_id if settings else None,
+        default_image_model_id=settings.default_image_model_id if settings else None,
+    )
+
+
+@router.patch("/models/platform-defaults", response_model=schemas.PlatformModelDefaults)
+def patch_platform_defaults(payload: schemas.PlatformModelDefaults, user: CurrentUser, db: DbSession):
+    if not _is_superadmin(user, db):
+        raise ApiError("permission_denied", "仅超级管理员可管理平台默认模型", status_code=403)
+    data = payload.model_dump(exclude_unset=True)
+    for key, model_id in data.items():
+        if model_id is None:
+            continue
+        entry = db.get(models.ModelCatalogEntry, model_id)
+        conn = db.get(models.ModelConnection, entry.connection_id) if entry else None
+        matches = entry and (ai_gateway.is_text_model(entry) if key == "default_text_model_id" else "image.generate" in (entry.capabilities or []))
+        if not entry or not entry.enabled or not conn or conn.owner_user_id != user.id or not matches:
+            raise ApiError("invalid_platform_model", "平台默认模型必须是本人启用且类型匹配的模型")
+    settings = db.get(models.PlatformModelSettings, "platform")
+    if not settings:
+        settings = models.PlatformModelSettings(id="platform")
+        db.add(settings)
+    for key, value in data.items():
+        setattr(settings, key, value)
+    db.add(models.RbacAuditLog(actor_user_id=user.id, action="model.platform.defaults", target_type="platform_models", target_id="platform", detail=data))
+    db.commit()
+    return schemas.PlatformModelDefaults(default_text_model_id=settings.default_text_model_id, default_image_model_id=settings.default_image_model_id)
 
 
 def _validate_image_sizes(sizes: dict[str, str], capabilities: list[str]) -> dict[str, str]:
@@ -273,11 +332,9 @@ def _validate_image_sizes(sizes: dict[str, str], capabilities: list[str]) -> dic
 
 @router.post("/models/catalog", response_model=schemas.CatalogOut, status_code=201, dependencies=_ADMIN_ONLY)
 def add_catalog(
-    payload: schemas.CatalogIn, user: CurrentUser, db: DbSession
+    payload: schemas.CatalogIn, user: CurrentUser, db: DbSession, request: Request
 ) -> schemas.CatalogOut:
-    conn = db.get(models.ModelConnection, payload.connection_id)
-    if not conn or conn.owner_user_id != user.id:
-        raise not_found("模型连接")
+    conn = _authorize_connection(db.get(models.ModelConnection, payload.connection_id), user, db, request, "model.catalog.create")
     entry = models.ModelCatalogEntry(
         connection_id=conn.id,
         model_code=payload.model_code,
@@ -293,14 +350,12 @@ def add_catalog(
 
 @router.patch("/models/catalog/{model_id}", response_model=schemas.CatalogOut, dependencies=_ADMIN_ONLY)
 def update_catalog(
-    model_id: str, payload: schemas.CatalogPatch, user: CurrentUser, db: DbSession
+    model_id: str, payload: schemas.CatalogPatch, user: CurrentUser, db: DbSession, request: Request
 ) -> schemas.CatalogOut:
     entry = db.get(models.ModelCatalogEntry, model_id)
     if not entry:
         raise not_found("模型")
-    conn = db.get(models.ModelConnection, entry.connection_id)
-    if not conn or conn.owner_user_id != user.id:
-        raise not_found("模型")
+    conn = _authorize_connection(db.get(models.ModelConnection, entry.connection_id), user, db, request, "model.catalog.modify")
     data = payload.model_dump(exclude_unset=True)
     if "model_code" in data and not str(data["model_code"] or "").strip():
         raise ApiError("invalid_model_code", "模型代号不能为空")
@@ -316,13 +371,11 @@ def update_catalog(
 
 
 @router.delete("/models/catalog/{model_id}", status_code=204, dependencies=_ADMIN_ONLY)
-def delete_catalog(model_id: str, user: CurrentUser, db: DbSession) -> None:
+def delete_catalog(model_id: str, user: CurrentUser, db: DbSession, request: Request) -> None:
     entry = db.get(models.ModelCatalogEntry, model_id)
     if not entry:
         raise not_found("模型")
-    conn = db.get(models.ModelConnection, entry.connection_id)
-    if not conn or conn.owner_user_id != user.id:
-        raise not_found("模型")
+    conn = _authorize_connection(db.get(models.ModelConnection, entry.connection_id), user, db, request, "model.catalog.modify")
     db.delete(entry)
     db.commit()
 

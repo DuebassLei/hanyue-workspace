@@ -38,6 +38,10 @@ const editingId = ref('')
 const saving = ref(false)
 const confirmingId = ref('')
 const form = reactive({ name: '', aliases: '', notes: '', images: [], appearance: {} })
+const characterPrompt = ref('')
+const generatingCharacter = ref(false)
+const characterGenerateError = ref('')
+let editorVersion = 0
 
 const showExtract = ref(false)
 const extractText = ref('')
@@ -187,12 +191,23 @@ async function load() {
 }
 
 function openCreate() {
+  editorVersion += 1
+  characterPrompt.value = ''
+  characterGenerateError.value = ''
+  completeHint.value = ''
+  completeSource.value = ''
+  completeSuggestions.value = null
   editingId.value = ''
   resetForm()
   showEditor.value = true
 }
 
 function openEdit(item) {
+  editorVersion += 1
+  characterGenerateError.value = ''
+  completeHint.value = ''
+  completeSource.value = ''
+  completeSuggestions.value = null
   editingId.value = item.id
   form.name = item.name
   form.aliases = (item.aliases || []).join('，')
@@ -204,6 +219,28 @@ function openEdit(item) {
   form.appearance = {}
   for (const field of APPEARANCE_FIELDS) form.appearance[field.key] = item.appearance?.[field.key] || ''
   showEditor.value = true
+}
+
+async function generateCharacter() {
+  if (generatingCharacter.value) return
+  const version = editorVersion
+  generatingCharacter.value = true
+  characterGenerateError.value = ''
+  try {
+    const result = await api.post('/characters/generate', { prompt: characterPrompt.value.trim() })
+    if (version !== editorVersion || !showEditor.value) return
+    if (!form.name.trim()) form.name = result.name || ''
+    if (!form.aliases.trim()) form.aliases = (result.aliases || []).join('，')
+    if (!form.notes.trim()) form.notes = result.notes || ''
+    for (const field of APPEARANCE_FIELDS) {
+      if (!String(form.appearance[field.key] || '').trim()) form.appearance[field.key] = result.appearance?.[field.key] || ''
+    }
+    toast(result.fallbackUsed ? '已生成角色草稿（使用了备用模型），请检查后保存' : '已填入空白字段，请检查后保存')
+  } catch (err) {
+    if (version === editorVersion && showEditor.value) characterGenerateError.value = err.message
+  } finally {
+    generatingCharacter.value = false
+  }
 }
 
 function addImage() {
@@ -510,6 +547,13 @@ onMounted(load)
     </section>
 
     <n-modal v-model:show="showEditor" preset="card" :title="editingId ? '编辑角色' : '新建角色'" class="role-editor">
+      <div v-if="!editingId" class="character-ai-box">
+        <strong>AI 创建角色</strong>
+        <p class="field-hint">粘贴角色提示词，一键整理并补全；留空则由 AI 自由创作。只填空白字段，生成后可修改，保存后才会入库。</p>
+        <n-input v-model:value="characterPrompt" type="textarea" :rows="3" :maxlength="8000" show-count placeholder="例如：银色短发的年轻女剑客，性格冷静，穿深蓝色长袍……" aria-label="角色提示词" />
+        <n-alert v-if="characterGenerateError" type="error" :bordered="false">{{ characterGenerateError }}</n-alert>
+        <n-button type="primary" secondary :loading="generatingCharacter" @click="generateCharacter">{{ characterPrompt.trim() ? '根据提示词补全' : 'AI 自由生成' }}</n-button>
+      </div>
       <div class="editor-grid">
         <label class="field"><span>角色名 *</span><n-input v-model:value="form.name" placeholder="如：林夏" /></label>
         <label class="field"><span>别名（逗号分隔）</span><n-input v-model:value="form.aliases" placeholder="如：夏子，小林" /></label>
@@ -573,7 +617,7 @@ onMounted(load)
           class="image-clear"
           @click="clearImageAsset(index)"
         >清除</n-button>
-        <n-select v-model:value="image.angle" :options="ANGLES" class="angle-select" />
+        <n-select v-model:value="image.angle" :options="ANGLES" class="angle-select" aria-label="参考图视角" />
         <n-input v-model:value="image.label" placeholder="备注" class="image-label" />
         <n-button
           size="tiny"
@@ -730,7 +774,13 @@ onMounted(load)
 .section-title { margin: 16px 0 8px; font-size: 13px; font-weight: 600; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .appearance-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-.image-row { display: grid; grid-template-columns: minmax(200px, 2fr) auto 92px minmax(80px, 1fr) auto auto; gap: 6px; align-items: center; margin-bottom: 8px; }
+.image-row { display: grid; grid-template-columns: minmax(200px, 2fr) auto minmax(104px, 110px) minmax(80px, 1fr) auto auto; gap: 6px; align-items: center; margin-bottom: 8px; }
+.image-asset { grid-column: 1; }
+.image-clear { grid-column: 2; }
+.angle-select { grid-column: 3; min-width: 0; }
+.image-label { grid-column: 4; min-width: 0; }
+.image-row > :nth-last-child(2) { grid-column: 5; }
+.image-remove { grid-column: 6; }
 .image-asset { display: flex; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 4px 8px 4px 4px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-surface); font: inherit; text-align: left; cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease; }
 .image-asset:hover { border-color: var(--color-border-strong); background: var(--color-surface-raised); }
 .image-asset:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
@@ -751,6 +801,9 @@ onMounted(load)
 .draft-main :deep(.n-input) { width: 140px; }
 .draft-action { width: 130px; flex-shrink: 0; }
 .role-editor { width: min(820px, 94vw); }
+.character-ai-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 14px; margin-bottom: 16px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-bg); }
+.character-ai-box .field-hint { margin: 0; }
+.character-ai-box :deep(.n-input), .character-ai-box :deep(.n-alert) { width: 100%; }
 .extract-modal { width: min(720px, 94vw); }
 .gen-modal { width: min(680px, 94vw); }
 .complete-box { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
@@ -802,7 +855,8 @@ onMounted(load)
   .page-head { flex-direction: column; align-items: flex-start; }
   .editor-grid, .appearance-grid, .gen-controls { grid-template-columns: 1fr 1fr; }
   /* 窄屏：参考图占满整行，其余控件两列排布 */
-  .image-row { grid-template-columns: 1fr 1fr; }
+  .image-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .image-asset { grid-column: 1 / -1; }
+  .image-clear, .angle-select, .image-label, .image-row > :nth-last-child(2), .image-remove { grid-column: auto; }
 }
 </style>
