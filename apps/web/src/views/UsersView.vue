@@ -216,11 +216,11 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="users-page">
+  <section class="page users-page">
     <header class="page-head">
       <div>
-        <h1>用户管理</h1>
-        <p>多个角色取权限并集。停用后对方的下一次请求会被拒绝；重置密码会让已登录的会话立即失效。不能停用自己，也不能停用最后一个启用中的超管。</p>
+        <h1 class="page-title">用户管理</h1>
+        <p class="page-sub">多个角色取权限并集。停用后对方的下一次请求会被拒绝；重置密码会让已登录的会话立即失效。不能停用自己，也不能停用最后一个启用中的超管。</p>
       </div>
       <n-button type="primary" @click="openCreate">新建用户</n-button>
     </header>
@@ -361,17 +361,14 @@ onMounted(load)
 </template>
 
 <style scoped>
-.users-page { padding: 24px 28px 40px; }
-.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-.page-head h1 { margin: 0 0 6px; font-size: 20px; font-weight: 500; color: var(--color-text-primary); }
-.page-head p { margin: 0; max-width: 640px; font-size: 13px; line-height: 1.5; color: var(--color-text-muted); }
-.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.page-head p { max-width: 640px; line-height: 1.5; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
 .filters { display: flex; gap: 4px; }
 .filter { border: 1px solid var(--color-border); background: transparent; color: var(--color-text-muted); border-radius: 8px; padding: 4px 12px; font-size: 13px; cursor: pointer; }
 .filter.on { color: var(--color-text-primary); border-color: var(--color-text-tertiary); }
 .search { display: flex; gap: 8px; width: 360px; }
-.list { border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); overflow: hidden; }
-.row { display: grid; grid-template-columns: 240px minmax(0, 1fr) 230px; gap: 16px; align-items: center; padding: 14px; border-top: 1px solid var(--color-border); }
+.list { border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); overflow: hidden; }
+.row { display: grid; grid-template-columns: 220px minmax(0, 1fr) 230px; gap: var(--space-3); align-items: center; padding: var(--space-3); border-top: 1px solid var(--color-border); }
 .row:first-child { border-top: none; }
 .row.off { opacity: 0.72; }
 .name { display: flex; align-items: center; gap: 6px; }
@@ -384,7 +381,7 @@ onMounted(load)
 .form label, .field-label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--color-text-muted); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .note { margin: 0; font-size: 13px; line-height: 1.5; color: var(--color-text-muted); }
-.secret { padding: 12px; border-radius: 8px; background: var(--color-surface-muted, rgba(127, 127, 127, 0.08)); }
+.secret { padding: 12px; border-radius: 8px; background: var(--color-surface-muted); }
 .secret code { display: block; margin-top: 6px; font-size: 18px; letter-spacing: 0.04em; color: var(--color-text-primary); }
 @media (max-width: 900px) {
   .toolbar, .page-head { flex-direction: column; align-items: stretch; }

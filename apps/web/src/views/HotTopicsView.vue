@@ -14,6 +14,7 @@ import {
 import { api } from '../api/client'
 import { toast } from '../ui/feedback'
 import HotClusterCard from '../features/hot/HotClusterCard.vue'
+import HotInspirationCard from '../features/hot/HotInspirationCard.vue'
 import HotOverviewDialog from '../features/hot/HotOverviewDialog.vue'
 import HotPlatformTabs from '../features/hot/HotPlatformTabs.vue'
 import { usePermission } from '../composables/usePermission'
@@ -25,6 +26,7 @@ const route = useRoute()
 // 这两条是真实会 403 的路径，所以按按钮逐个判定，而不是让用户跳到 403 页再回来。
 const { disabledReason } = usePermission()
 
+const viewMode = ref('inspiration')
 const clusters = ref([])
 const summary = ref({})
 const degraded = ref([])
@@ -221,17 +223,16 @@ async function toggleDetail(cluster) {
 }
 
 async function writeFromCluster(cluster) {
+  if (busyId.value) return
   busyId.value = cluster.id
   error.value = ''
   try {
-    // 先建稿件，再开成稿台稿（from-content 幂等），最后带 pet=1 跳过去自动打开创作小助手。
-    // 带上 hotClusterId：后端把热点标题/赛道/平台/各平台原文写进成稿台稿的素材，
-    // 创作小助手才有东西可写。
+    // 先导入素材，再打开关联稿件的创作小助手。
     const item = await api.post(`/hot-topics/clusters/${cluster.id}/draft`, {})
     const paper = await api.post(
       `/studio/articles/from-content/${encodeURIComponent(item.id)}?hotClusterId=${encodeURIComponent(cluster.id)}`,
     )
-    toast(`已新建稿件「${item.title}」，正在跳转到成稿台`)
+    toast(`正在成稿台打开「${item.title}」`)
     await router.push({
       name: 'paper',
       query: { id: paper.id, pet: '1' },
@@ -287,17 +288,8 @@ onMounted(loadAll)
 
 <template>
   <div class="page">
-    <div class="page-head">
-      <div>
-        <h1 class="page-title">热点选题</h1>
-        <!-- 定位说明只说一遍：topbar 和标题重复，会白占一屏里最贵的两行 -->
-        <p class="page-sub">
-          今天大家搜什么 → 我该写哪一个。分数由服务端算好，悬停分数条看证据。
-        </p>
-        <p class="page-sub page-sub--muted">
-          数据来自「定时任务」里按平台配置的采集任务；这里不抓外网，右上角按钮只按已入库条目重算。
-        </p>
-      </div>
+    <div class="hot-actions">
+      <span class="hot-actions-hint">数据由定时任务采集；重算仅处理已入库条目，悬停分数条可查看证据。</span>
       <n-space :size="8">
         <n-button secondary :disabled="loading" @click="overviewOpen = true">
           今日概览
@@ -363,6 +355,17 @@ onMounted(loadAll)
       />
     </section>
 
+    <div class="hot-view-bar">
+      <div>
+        <strong>{{ viewMode === 'inspiration' ? '发现灵感' : '事件列表' }}</strong>
+        <span class="hot-view-caption">{{ viewMode === 'inspiration' ? '从热点中找到下一个创作方向' : '紧凑查看热点与评分证据' }}</span>
+      </div>
+      <div class="hot-view-switch" role="group" aria-label="切换热点视图">
+        <button type="button" :aria-pressed="viewMode === 'inspiration'" @click="viewMode = 'inspiration'">灵感视图</button>
+        <button type="button" :aria-pressed="viewMode === 'list'" @click="viewMode = 'list'">列表视图</button>
+      </div>
+    </div>
+
     <div v-if="loading" class="stack">
       <div v-for="i in 3" :key="i" class="skeleton" style="height: 150px" />
     </div>
@@ -396,10 +399,12 @@ onMounted(loadAll)
       </template>
     </n-empty>
 
-    <div v-else class="hot-list">
-      <HotClusterCard
-        v-for="cluster in visible"
+    <div v-else :class="viewMode === 'inspiration' ? 'hot-inspiration-grid' : 'hot-list'">
+      <component
+        :is="viewMode === 'inspiration' ? HotInspirationCard : HotClusterCard"
+        v-for="(cluster, index) in visible"
         :key="cluster.id"
+        v-bind="viewMode === 'inspiration' ? { index } : {}"
         :cluster="cluster"
         :detail="detailCache[cluster.id] || null"
         :degraded="degraded"
@@ -422,6 +427,8 @@ onMounted(loadAll)
 </template>
 
 <style scoped>
+.hot-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+.hot-actions-hint { color: var(--color-text-secondary); font-size: var(--font-xs); }
 .hot-filters {
   display: flex;
   flex-wrap: wrap;
@@ -464,6 +471,14 @@ onMounted(loadAll)
   white-space: nowrap;
   cursor: pointer;
 }
+.hot-view-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.hot-view-caption { margin-left: 10px; color: var(--color-text-secondary); font-size: 12px; }
+.hot-view-switch { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--color-border); border-radius: 9px; background: var(--color-surface); }
+.hot-view-switch button { border: 0; border-radius: 6px; padding: 6px 11px; background: transparent; color: var(--color-text-secondary); cursor: pointer; }
+.hot-view-switch button[aria-pressed='true'] { background: var(--color-text); color: var(--color-surface); }
+.hot-view-switch button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.hot-inspiration-grid { columns: 300px; column-gap: 14px; }
+@media (max-width: 560px) { .hot-inspiration-grid { columns: 1; } }
 .hot-list {
   display: flex;
   flex-direction: column;

@@ -13,7 +13,8 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from .. import models, schemas
 from ..connectors import registry
@@ -642,6 +643,11 @@ def push_draft(
     payload: schemas.WeChatDraftIn, user: CurrentUser, db: DbSession
 ) -> schemas.PublishJobOut:
     """创建草稿推送任务；真正的平台调用在任务队列里执行，失败会带真实微信错误码。"""
+    return _job_out(enqueue_draft(db, user, payload))
+
+
+def enqueue_draft(db, user, payload: schemas.WeChatDraftIn, *, studio_article_id: str | None = None):
+    """供发布中心和成稿台共用的校验与持久化入队。"""
     existing = db.scalar(
         select(models.PublishJob).where(
             models.PublishJob.owner_user_id == user.id,
@@ -649,9 +655,11 @@ def push_draft(
         )
     )
     if existing:
-        return _job_out(existing)
+        return existing
 
     account = _target_account(db, user, payload.account_id)
+    if account.auth_source != "app_secret" or account.status != "connected":
+        raise ApiError("authorization_required", "请先绑定并验证公众号账号", status_code=409)
     connector = _account_connector(account, db)
     if not payload.asset_ids:
         raise ApiError(
@@ -711,6 +719,7 @@ def push_draft(
             # 排版快照：版本配置后续被改也能复现当时的排版
             "studioOptions": dict(studio_options),
             "versionId": version_id,
+            **({"studioArticleId": studio_article_id, "contentItemId": content_item_id} if studio_article_id else {}),
         },
         status_history=publish_state.initial_history(
             publish_state.QUEUED, actor="user", note="创建草稿推送任务"
@@ -718,8 +727,10 @@ def push_draft(
     )
     db.add(job)
     try:
+        db.flush()
+        background_id = _create_draft_background_job(db, job)
         db.commit()
-    except Exception as exc:  # 并发同键：回查已存在任务
+    except IntegrityError:  # 并发同键：任务和后台队列一起回滚
         db.rollback()
         raced = db.scalar(
             select(models.PublishJob).where(
@@ -728,17 +739,59 @@ def push_draft(
             )
         )
         if raced:
-            return _job_out(raced)
-        raise exc
+            return raced
+        raise
 
-    queue.enqueue(
+    queue.dispatch(background_id)
+    return job
+
+
+def _create_draft_background_job(db, job: models.PublishJob) -> str:
+    return queue.create_job(
         db,
-        owner_user_id=user.id,
+        owner_user_id=job.owner_user_id,
         queue="platform-publish",
         kind="wechat_draft",
-        payload={"publishJobId": job.id, "accountId": account.id, "target": "draft"},
+        payload={"publishJobId": job.id, "accountId": job.connected_account_id, "target": "draft"},
+    ).id
+
+
+def retry_studio_draft(db, job: models.PublishJob) -> models.PublishJob:
+    """用条件更新领取重试，避免并发重复入队。"""
+    if not can_retry_draft(job):
+        raise ApiError("retry_not_allowed", "当前任务不能重试，请先核实草稿箱结果", status_code=409)
+    previous_status, previous_attempt = job.status, job.attempt_count
+    job.attempt_count += 1
+    publish_state.apply_transition(job, publish_state.QUEUED, actor="user", note="重新推送公众号草稿箱")
+    with db.no_autoflush:
+        changed = db.execute(
+            update(models.PublishJob)
+            .where(
+                models.PublishJob.id == job.id,
+                models.PublishJob.status == previous_status,
+                models.PublishJob.attempt_count == previous_attempt,
+                models.PublishJob.remote_content_id.is_(None),
+            )
+            .values(status=job.status, attempt_count=job.attempt_count, status_history=job.status_history,
+                    error_message=None, error_code=None)
+            .execution_options(synchronize_session=False)
+        ).rowcount
+    if changed != 1:
+        db.rollback()
+        raise ApiError("retry_not_allowed", "任务状态已经变化，请刷新查看", status_code=409)
+    db.expire(job)
+    background_id = _create_draft_background_job(db, job)
+    db.commit()
+    queue.dispatch(background_id)
+    return job
+
+
+def can_retry_draft(job: models.PublishJob) -> bool:
+    return (
+        job.target == "draft"
+        and job.status in {publish_state.FAILED, publish_state.NEEDS_ATTENTION}
+        and publish_state.retry_allowed(job.status, job.error_code, job.remote_content_id)
     )
-    return _job_out(job)
 
 
 @router.get("/wechat-mp/drafts", dependencies=_CHANNEL_READ)

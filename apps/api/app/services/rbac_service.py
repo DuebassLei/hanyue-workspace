@@ -40,10 +40,11 @@ class MenuSeed:
     permission: str | None = None
     kind: str = "page"
     children: tuple["MenuSeed", ...] = field(default_factory=tuple)
+    visible: bool = True
 
 
-def _page(key: str, label: str, short: str, icon: str, permission: str | None) -> MenuSeed:
-    return MenuSeed(key, label, short, icon, permission, "page")
+def _page(key: str, label: str, short: str, icon: str, permission: str | None, *, visible: bool = True) -> MenuSeed:
+    return MenuSeed(key, label, short, icon, permission, "page", visible=visible)
 
 
 def _group(key: str, label: str, icon: str, children: tuple[MenuSeed, ...]) -> MenuSeed:
@@ -112,7 +113,7 @@ MENU_SEED: tuple[MenuSeed, ...] = (
         "ops",
         (
             _page("publishing", "发布管理", "发布", "publishing", "publishing.view"),
-            _page("wechat-layout", "微信排版", "排版", "wechat-layout", "wechat_layout.use"),
+            _page("wechat-layout", "微信排版", "排版", "wechat-layout", "wechat_layout.use", visible=False),
             _page("schedules", "定时任务", "定时", "schedules", "schedules.use"),
         ),
     ),
@@ -212,6 +213,7 @@ def _seed_menu_node(db, node: MenuSeed, parent: models.Menu | None, sort: int, c
             kind=node.kind,
             permission_code=node.permission,
             sort=sort,
+            visible=node.visible,
         )
         db.add(menu)
         db.flush()
@@ -469,6 +471,7 @@ def _migrate_storyboards_to_images(db) -> None:
 # 2026-11：视频创作功能整体下线。菜单播种只增不减，老库里的视频菜单与权限点
 # 需要一次性迁移清理。必须在漫画分镜迁移之后执行（分镜可能还挂在视频分组下）。
 MIGRATION_REMOVE_VIDEOS = "2026-11.remove-videos"
+MIGRATION_HIDE_WECHAT_LAYOUT_MENU = "2026-11.hide-wechat-layout-menu"
 
 
 def _migrate_remove_videos(db) -> None:
@@ -543,6 +546,14 @@ def _run_migrations(db) -> None:
     if MIGRATION_REMOVE_VIDEOS not in done:
         _migrate_remove_videos(db)
         done.add(MIGRATION_REMOVE_VIDEOS)
+        changed = True
+
+    # 迁移 6：排版入口收进成稿台；仅隐藏独立菜单，保留路由权限及角色绑定。
+    if MIGRATION_HIDE_WECHAT_LAYOUT_MENU not in done:
+        layout = db.scalar(select(models.Menu).where(models.Menu.menu_key == "wechat-layout"))
+        if layout is not None:
+            layout.visible = False
+        done.add(MIGRATION_HIDE_WECHAT_LAYOUT_MENU)
         changed = True
 
     if changed:

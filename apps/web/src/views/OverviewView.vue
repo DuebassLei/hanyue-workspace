@@ -107,12 +107,7 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
 
 <template>
   <div class="page overview-page">
-    <div class="overview-head">
-      <div>
-        <span class="eyebrow">WORKSPACE OVERVIEW</span>
-        <h1 class="page-title">创作总览</h1>
-        <p class="page-sub">本周内容运营状态，先看重点，再继续行动。</p>
-      </div>
+    <div class="overview-head" role="toolbar" aria-label="创作总览操作">
       <n-space class="overview-actions" :size="8">
         <n-button secondary size="small" :loading="loading" @click="load">刷新数据</n-button>
         <RouterLink v-slot="{ navigate }" custom :to="{ name: 'articles' }">
@@ -330,30 +325,19 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
 
 <style scoped>
 .overview-page {
-  gap: var(--space-6);
+  gap: var(--space-4);
 }
 .overview-head {
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--space-5);
-  padding-bottom: var(--space-2);
+  justify-content: flex-end;
 }
 .eyebrow {
   display: block;
   margin-bottom: var(--space-2);
-  color: var(--color-accent);
+  color: var(--editorial-accent);
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.12em;
-}
-.overview-head .page-title {
-  font-size: clamp(26px, 3vw, 34px);
-  letter-spacing: -0.8px;
-}
-.overview-head .page-sub {
-  margin-top: var(--space-2);
-  font-size: var(--font-body);
+  letter-spacing: 0.16em;
 }
 .overview-actions {
   display: flex;
@@ -383,7 +367,12 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
   transform: translateY(-1px);
 }
 .metric-featured {
-  border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-border));
+  border-color: color-mix(in srgb, var(--editorial-accent) 45%, var(--color-border));
+  box-shadow: inset 0 3px 0 var(--editorial-accent);
+}
+.metric-value {
+  font-size: clamp(24px, 2vw, 30px);
+  letter-spacing: -0.04em;
 }
 .metric-alert .metric-value,
 .metric-alert .metric-arrow {
@@ -420,7 +409,7 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
   opacity: 1;
 }
 .heat-card {
-  padding: var(--space-6);
+  padding: var(--space-4);
 }
 .heat-chart {
   display: block;
@@ -489,8 +478,8 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
   gap: var(--space-4);
 }
 .overview-card {
-  min-height: 300px;
-  padding: var(--space-6);
+  min-height: 240px;
+  padding: var(--space-4);
 }
 .section-heading {
   display: flex;
@@ -628,7 +617,7 @@ const fmt = (value) => (value === null || value === undefined ? '—' : value)
   }
   .overview-metrics,
   .overview-skeleton {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .overview-card,
   .ai-card {

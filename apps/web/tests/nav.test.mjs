@@ -11,6 +11,10 @@ test('workspace fallback pages are flat and retain every feature', () => {
   assert.ok(workspace.items.every((item) => !item.children))
 })
 
+test('fallback sidebar hides the standalone WeChat layout entry', () => {
+  assert.ok(!navEntries(NAV_GROUPS).some((item) => item.name === 'wechat-layout'))
+})
+
 test('server workspace categories flatten recursively without changing other groups or source data', () => {
   const page = { name: 'articles', label: '文章管理', permission: 'studio.use' }
   const groups = [

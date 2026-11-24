@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import re
 import uuid
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 
 # 标题钩子类型，来自 skills/headline.md 的四大钩子库。成稿选标题时记下，复盘按它比较。
@@ -167,6 +168,38 @@ def _new_block(text: str, *, block_id: str | None = None, check: dict | None = N
     }
 
 
+def edit_markdown(article: dict, markdown: str) -> None:
+    parsed = split_markdown(markdown)
+    by_text = defaultdict(deque)
+    by_image = defaultdict(deque)
+    for block in article["blocks"]:
+        by_text[block["text"]].append(block)
+        image = parse_markdown_image(block["text"])
+        if image:
+            by_image[image["src"]].append(block)
+
+    # Reserve exact matches first, so changing a caption cannot steal a later image's id.
+    matches = [by_text[text].popleft() if by_text[text] else None for text in parsed["blocks"]]
+    used = {block["id"] for block in matches if block is not None}
+    blocks = []
+    for text, old in zip(parsed["blocks"], matches):
+        if old is not None:
+            blocks.append(old)
+            continue
+        image = parse_markdown_image(text)
+        if image:
+            candidates = by_image[image["src"]]
+            while candidates and candidates[0]["id"] in used:
+                candidates.popleft()
+            if candidates:
+                old = candidates.popleft()
+        blocks.append(_new_block(text, block_id=old["id"] if old else None,
+                                 inserted_diagram_id=old.get("inserted_diagram_id") if old else None))
+    if parsed["title"] != article.get("title"):
+        article["hook"] = None
+    article.update(front=parsed["front"], title=parsed["title"], blocks=blocks)
+
+
 def build_article(topic: str = "", material: str = "", markdown: str = "") -> dict:
     """新建一篇可编辑稿件（内存结构，落库由仓储层负责）。"""
     parsed = split_markdown(markdown)
@@ -204,6 +237,7 @@ def touch(article: dict) -> None:
 def snapshot_payload(article: dict) -> dict:
     """改动前存一份快照，供撤销与版本对比。"""
     return {
+        "front": article.get("front", ""),
         "title": article.get("title", ""),
         "hook": article.get("hook"),
         "titles": copy.deepcopy(article.get("titles", [])),
@@ -222,6 +256,8 @@ def snapshot_payload(article: dict) -> dict:
 
 
 def restore_payload(article: dict, payload: dict) -> None:
+    if "front" in payload:
+        article["front"] = payload["front"]
     article["title"] = payload.get("title", "")
     article["hook"] = payload.get("hook")
     article["titles"] = copy.deepcopy(payload.get("titles", []))

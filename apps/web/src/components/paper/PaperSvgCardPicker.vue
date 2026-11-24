@@ -42,7 +42,7 @@ watch(cards, (list) => {
 })
 
 function previewDocument(html) {
-  return `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#fff;overflow:hidden}body{padding:4px;box-sizing:border-box}svg{max-width:100%;height:auto}</style></head><body>${html}</body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#fff}body{padding:4px;box-sizing:border-box}svg{max-width:100%;height:auto}</style></head><body>${html}</body></html>`
 }
 </script>
 
@@ -52,10 +52,10 @@ function previewDocument(html) {
     <p v-else class="hint">卡片目录暂不可用。</p>
     <div v-if="cards.length" class="detail">
       <p v-if="current" class="hint">{{ requirements[selected] || current.lead }}</p>
-      <details v-if="current?.previewHtml" :key="selected" class="sample-preview">
-        <summary>查看卡型样例</summary>
-        <iframe loading="lazy" class="large-preview" sandbox="" :srcdoc="previewDocument(current.previewHtml)" :title="`${current.name}样例预览`" />
-      </details>
+      <figure v-if="current?.previewHtml" class="sample-preview">
+        <figcaption>卡型样例</figcaption>
+        <iframe :key="selected" class="large-preview" sandbox="" :srcdoc="previewDocument(current.previewHtml)" :title="`${current.name}样例预览`" />
+      </figure>
 
       <div class="source">
         <b class="source-head">素材段落</b>
@@ -92,10 +92,8 @@ function previewDocument(html) {
 .svg-picker, .detail { display:flex; flex-direction:column; gap:8px; }
 .hint { margin:0; line-height:1.6; font-size:11px; color:var(--color-text-tertiary); }
 .hint.strong { color:var(--color-text-secondary); }
-.sample-preview { font-size:12px; }
-.sample-preview summary { cursor:pointer; color:var(--color-text-secondary); }
-.sample-preview[open] summary { margin-bottom:6px; }
-.large-preview { width:100%; height:220px; border:0; border-radius:6px; background:#fff; }
+.sample-preview { display:grid; gap:6px; margin:0; font-size:12px; color:var(--color-text-secondary); }
+.large-preview { display:block; width:100%; height:220px; border:0; border-radius:6px; background:#fff; }
 .source { display:flex; flex-direction:column; gap:6px; }
 .source-head { font-size:12px; }
 .chips { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:3px; max-height:132px; overflow:auto; }

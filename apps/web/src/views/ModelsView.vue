@@ -694,16 +694,15 @@ async function saveConnection() {
       error.value = '精确尺寸必须是 JSON 对象，例如 {"1:1":"1024x1024"}'
       return
     }
-    const allowed = new Set(['2.35:1', '16:9', '4:3', '1:1', '3:4', '9:16'])
     for (const [ratio, size] of Object.entries(imageSizes)) {
       const match = typeof size === 'string' && /^([1-9][0-9]{0,3})x([1-9][0-9]{0,3})$/.exec(size)
-      if (!allowed.has(ratio) || !match) {
+      if (!/^[0-9]{1,4}(?:\.[0-9]{1,4})?:[0-9]{1,4}(?:\.[0-9]{1,4})?$/.test(ratio) || !match) {
         error.value = `图片比例或尺寸格式不合法：${ratio}=${size}`
         return
       }
       const [rw, rh] = ratio.split(':').map(Number)
       const width = Number(match[1]), height = Number(match[2])
-      if (width * height > 16000000 || Math.abs(width / height - rw / rh) >= 0.001) {
+      if (!rw || !rh || width * height > 16000000 || Math.abs(width / height - rw / rh) >= 0.001) {
         error.value = `尺寸 ${size} 与比例 ${ratio} 不符或超过像素限制`
         return
       }

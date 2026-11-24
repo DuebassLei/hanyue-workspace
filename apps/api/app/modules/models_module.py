@@ -258,16 +258,15 @@ def list_catalog(user: CurrentUser, db: DbSession) -> list[schemas.CatalogOut]:
 
 
 def _validate_image_sizes(sizes: dict[str, str], capabilities: list[str]) -> dict[str, str]:
-    allowed = {"2.35:1", "16:9", "4:3", "1:1", "3:4", "9:16"}
     if sizes and "image.generate" not in capabilities:
         raise ApiError("invalid_image_sizes", "只有生图模型可以登记图片尺寸")
     for ratio, size in sizes.items():
         match = re.fullmatch(r"([1-9][0-9]{0,3})x([1-9][0-9]{0,3})", size)
-        if ratio not in allowed or not match:
+        if not re.fullmatch(r"[0-9]{1,4}(?:\.[0-9]{1,4})?:[0-9]{1,4}(?:\.[0-9]{1,4})?", ratio) or not match:
             raise ApiError("invalid_image_sizes", f"图片比例或尺寸格式不合法：{ratio}={size}")
         width, height = map(int, match.groups())
         rw, rh = map(float, ratio.split(":"))
-        if width * height > image_provider.MAX_PIXELS or abs(width / height - rw / rh) >= 0.001:
+        if not rw or not rh or width * height > image_provider.MAX_PIXELS or abs(width / height - rw / rh) >= 0.001:
             raise ApiError("invalid_image_sizes", f"尺寸 {size} 与比例 {ratio} 不符或超过像素限制")
     return sizes
 

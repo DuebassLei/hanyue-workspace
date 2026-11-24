@@ -206,11 +206,11 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="rbac-page">
+  <section class="page rbac-page">
     <header class="page-head">
       <div>
-        <h1>角色管理</h1>
-        <p>角色决定「能看到哪些菜单、能调哪些接口」。权限改动对已登录用户立即生效。</p>
+        <h1 class="page-title">角色管理</h1>
+        <p class="page-sub">角色决定「能看到哪些菜单、能调哪些接口」。权限改动对已登录用户立即生效。</p>
       </div>
       <n-button type="primary" @click="showCreate = true">新建角色</n-button>
     </header>
@@ -340,18 +340,14 @@ onMounted(load)
 </template>
 
 <style scoped>
-.rbac-page { padding: 24px 28px 40px; }
-.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-.page-head h1 { margin: 0 0 6px; font-size: 20px; font-weight: 500; color: var(--color-text-primary); }
-.page-head p { margin: 0; font-size: 13px; color: var(--color-text-muted); }
-.layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
+.layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: var(--space-3); align-items: start; }
 .role-list { display: flex; flex-direction: column; gap: 6px; }
 .role-item { text-align: left; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--color-border); background: var(--color-surface); cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
 .role-item:hover { border-color: var(--color-border-strong); }
 .role-item.active { border-color: var(--color-accent); background: var(--color-accent-soft); }
 .role-name { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--color-text-primary); }
 .role-meta { font-size: 12px; color: var(--color-text-muted); }
-.detail { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 20px; }
+.detail { min-width: 0; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-4); }
 .detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .detail-head h2 { margin: 0 0 4px; font-size: 16px; font-weight: 500; color: var(--color-text-primary); }
 .block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
@@ -359,9 +355,9 @@ onMounted(load)
 .muted { margin: 0; font-size: 12px; color: var(--color-text-muted); line-height: 1.6; }
 .perm-groups { display: flex; flex-direction: column; gap: 14px; margin-top: 10px; }
 .perm-group-title { font-size: 12px; color: var(--color-text-muted); margin-bottom: 6px; }
-.perm-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px 16px; }
+.perm-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 6px 16px; }
 .perm-items code { margin-left: 4px; font-size: 11px; color: var(--color-text-tertiary); }
-.menu-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; margin-top: 12px; }
+.menu-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 14px; margin-top: 12px; }
 .menu-items { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; padding-left: 22px; }
 .form { display: flex; flex-direction: column; gap: 6px; }
 .form label { font-size: 12px; color: var(--color-text-muted); margin-top: 8px; }

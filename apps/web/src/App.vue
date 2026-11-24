@@ -333,6 +333,15 @@ watch(
   },
 )
 
+// 未登录时统一使用根路径展示公开首页；登录后仍由根路径进入创作总览。
+watch(
+  () => [session.needsLogin, route.path],
+  ([needsLogin, path]) => {
+    if (needsLogin && path !== '/') router.replace({ path: '/' })
+  },
+  { immediate: true },
+)
+
 // 首屏直达一个没权限的页面时（旧书签/群里的链接），落到明确的 403 页。
 // 守卫在登录前无法判断，只能等权限加载完在这里补一次。
 watch(
@@ -361,7 +370,8 @@ onBeforeUnmount(() => {
     <n-global-style />
     <n-message-provider>
       <n-dialog-provider>
-        <n-layout has-sider class="shell" position="absolute">
+        <LoginView v-if="session.needsLogin" />
+        <n-layout v-else has-sider class="shell" position="absolute">
           <n-layout-sider
             class="sider"
             bordered
@@ -374,9 +384,9 @@ onBeforeUnmount(() => {
             @collapse="collapsed = true"
             @expand="collapsed = false"
           >
-            <button class="brand" type="button" @click="go('overview')">
-              <span class="brand-mark" aria-hidden="true">文</span>
-              <span v-show="!collapsed" class="brand-name">文案台</span>
+            <button class="brand" type="button" aria-label="AI工作台首页" @click="go('overview')">
+              <img class="brand-mark" src="/mascot-plane.png" alt="" />
+              <span v-show="!collapsed" class="brand-name">AI工作台</span>
             </button>
             <n-menu
               :value="activeKey"
@@ -523,6 +533,10 @@ onBeforeUnmount(() => {
   min-height: 100vh;
 }
 
+.sider {
+  background: var(--color-surface);
+}
+
 .sider :deep(.n-layout-sider-scroll-container) {
   display: flex;
   flex-direction: column;
@@ -544,13 +558,9 @@ onBeforeUnmount(() => {
 .brand-mark {
   width: 28px;
   height: 28px;
-  display: grid;
-  place-items: center;
+  display: block;
+  object-fit: cover;
   border-radius: 6px;
-  background: var(--color-text-primary);
-  color: var(--color-bg);
-  font-family: 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', Georgia, serif;
-  font-weight: 700;
   flex: 0 0 auto;
 }
 
@@ -582,6 +592,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 .main-content {
+  background: var(--color-bg);
   flex: 1 1 0;
   min-height: 0;
   height: auto;
@@ -599,6 +610,7 @@ onBeforeUnmount(() => {
 }
 
 .topbar {
+  background: var(--color-surface);
   height: 52px;
   display: flex;
   align-items: center;

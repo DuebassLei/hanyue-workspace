@@ -97,51 +97,102 @@ def test_dry_run_only_exports_and_enqueues_nothing(client):
     assert _jobs(body["contentItemId"]) == []
 
 
-def test_publish_creates_job_and_links_content_item(client):
-    headers, article = _article(client, "studio-publish-ok")
-    _bind_account(client, headers)
+def _archive(client, headers, article):
+    response = client.post(f"/api/v1/studio/articles/{article['id']}/export", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
 
-    response = client.post(
-        f"/api/v1/studio/articles/{article['id']}/publish",
-        json={"platforms": ["wechat_official"]},
-        headers=headers,
-    )
+
+def test_push_uses_archived_version_and_queues_one_real_draft(client, monkeypatch):
+    from app import models
+    from app.connectors import registry, wechat_mp
+    from app.core import queue
+    from app.core.db import SessionLocal
+    from app.services import job_runner
+    from tests.test_wechat_mp import _upload_asset
+
+    headers, article = _article(client, "studio-publish-ok")
+    account_id = _bind_account(client, headers)
+    cover = _upload_asset(client, headers, "cover.png")
+    inline = _upload_asset(client, headers, "inline.png")
+    base = f"/api/v1/studio/articles/{article['id']}"
+    assert client.post(f"{base}/cover/pick", json={"assetId": cover}, headers=headers).status_code == 200
+    assert client.post(
+        f"{base}/inline/pick", json={"assetId": inline, "blockId": article['blocks'][0]['id']}, headers=headers
+    ).status_code == 200
+    archive = _archive(client, headers, article)
+    assert client.post(f"{base}/cover/pick", json={"assetId": None}, headers=headers).status_code == 200
+    edited = client.get(f"{base}/markdown", headers=headers).json()["markdown"]
+    assert client.patch(f"{base}/markdown", json={"expectedMarkdown": edited, "markdown": edited + "\n存档后新写的段落\n"}, headers=headers).status_code == 200
+    before = client.get(base, headers=headers).json()
+
+    monkeypatch.setenv("WECHAT_MP_APPID", "wxTESTSTUDIO0001")
+    monkeypatch.setenv("WECHAT_MP_APPSECRET", "test-studio-secret")
+    registry._CACHE.clear()
+    dispatched = []
+    monkeypatch.setattr(queue, "dispatch", lambda job_id: dispatched.append(job_id))
+    payload = {"platforms": ["wechat-mp"], "accountId": account_id}
+    response = client.post(f"{base}/publish", json=payload, headers=headers)
     assert response.status_code == 200, response.text
     body = response.json()
-    assert len(body["publishJobIds"]) == 1
-
-    jobs = _jobs(body["contentItemId"])
-    assert len(jobs) == 1
-    job = jobs[0]
+    assert body["contentItemId"] == archive["contentId"]
+    assert body["versionId"] == archive["versionId"]
+    job, = _jobs(body["contentItemId"])
     assert job.id == body["publishJobIds"][0]
-    assert job.platform == "wechat_official"
-    assert job.status == "approved"
-    assert (job.payload_snapshot or {}).get("mode") == "manual"
-
-    detail = client.get(f"/api/v1/studio/articles/{article['id']}", headers=headers).json()
-    assert detail["publishMarkedAt"] is not None
-
-    # 同一份版本在防抖窗口内重复点「立即发布」不重复建任务
-    again = client.post(
-        f"/api/v1/studio/articles/{article['id']}/publish",
-        json={"platforms": ["wechat_official"]},
-        headers=headers,
-    )
-    assert again.status_code == 200, again.text
+    assert (job.platform, job.target, job.status) == ("wechat_official", "draft", "queued")
+    assert job.payload_snapshot["assetIds"] == [cover, inline]
+    assert "{{image1}}" in job.payload_snapshot["body"]
+    assert "存档后新写的段落" not in job.payload_snapshot["body"]
+    again = client.post(f"{base}/publish", json=payload, headers=headers)
     assert again.json()["publishJobIds"] == body["publishJobIds"]
+    background_id, = dispatched
+    with SessionLocal() as db:
+        background = db.get(models.BackgroundJob, background_id)
+        assert background.kind == "wechat_draft"
+        assert background.payload == {"publishJobId": job.id, "accountId": account_id, "target": "draft"}
+
+    monkeypatch.setattr(wechat_mp.WeChatMPConnector, "upload_thumb", lambda *a, **kw: {"mediaId": "cover-media"})
+    name = "https://mmbiz.qpic.cn/demo.png"
+    monkeypatch.setattr(wechat_mp.WeChatMPConnector, "upload_inline_image", lambda *a, **kw: name)
+
+    def fail_draft(_connector, _db, *, article):
+        raise wechat_mp.WeChatMPError("wechat_45009", "微信请求超过限额")
+
+    monkeypatch.setattr(wechat_mp.WeChatMPConnector, "add_draft", fail_draft)
+    job_runner.run_job(background_id)
+    failed = client.get(f"{base}/review", headers=headers).json()["platforms"][0]
+    assert failed["status"] == "failed"
+    assert failed["error"] == "微信请求超过限额"
+    assert failed["canRetry"] is True
+
+    retry = f"{base}/publish/{job.id}/retry"
+    assert client.post(retry, headers=headers).status_code == 200
+    assert client.post(retry, headers=headers).status_code == 409
+    assert len(dispatched) == 2
+
+    def save_draft(_connector, _db, *, article):
+        assert article["thumb_media_id"] == "cover-media"
+        assert article["content"].count(name) == 1
+        assert "存档后新写的段落" not in article["content"]
+        return "remote-draft"
+
+    monkeypatch.setattr(wechat_mp.WeChatMPConnector, "add_draft", save_draft)
+    job_runner.run_job(dispatched[-1])
+    result = client.get(f"{base}/review", headers=headers).json()
+    row, = result["platforms"]
+    assert (row["status"], row["draftMediaId"], row["error"]) == ("drafted", "remote-draft", None)
+    assert row["url"] is None
+    assert result["publishedAt"] is None
+    assert client.get(base, headers=headers).json() == before
+    registry._CACHE.clear()
 
 
-def test_publish_accepts_contract_platform_alias(client):
-    headers, article = _article(client, "studio-publish-alias")
+def test_push_requires_an_archived_version(client):
+    headers, article = _article(client, "studio-publish-unarchived")
     _bind_account(client, headers)
-
-    response = client.post(
-        f"/api/v1/studio/articles/{article['id']}/publish",
-        json={"platforms": ["wechat-mp"]},
-        headers=headers,
-    )
-    assert response.status_code == 200, response.text
-    assert len(response.json()["publishJobIds"]) == 1
+    response = client.post(f"/api/v1/studio/articles/{article['id']}/publish", json={}, headers=headers)
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "archive_required"
 
 
 def test_publish_rejects_unknown_platform(client):
@@ -201,50 +252,49 @@ def test_review_without_records_is_empty(client):
     assert body["stats"]["checked"] is False
 
 
-def test_review_reflects_queued_scheduled_job(client):
+def test_schedule_is_calendar_only(client):
     headers, article = _article(client, "studio-review-scheduled")
-    _bind_account(client, headers)
-    at = datetime.now(timezone.utc) + timedelta(days=2)
-    scheduled = at.isoformat(timespec="seconds")
-
-    published = client.post(
-        f"/api/v1/studio/articles/{article['id']}/publish",
-        json={"platforms": ["wechat_official"], "scheduledAt": scheduled},
-        headers=headers,
-    )
-    assert published.status_code == 200, published.text
-    body = published.json()
-    assert body["scheduledFor"] is not None
-    jobs = _jobs(body["contentItemId"])
-    assert len(jobs) == 1
-    assert jobs[0].status == "queued"
-    assert jobs[0].scheduled_at is not None
-
-    review = client.get(f"/api/v1/studio/articles/{article['id']}/review", headers=headers)
-    assert review.status_code == 200, review.text
-    data = review.json()
-    assert data["contentItemId"] == body["contentItemId"]
-    assert len(data["platforms"]) == 1
-    platform = data["platforms"][0]
-    assert platform["platform"] == "wechat_official"
-    assert platform["status"] == "queued"
-    assert platform["error"] is None
-    assert platform["at"].startswith(scheduled[:10])
+    base = f"/api/v1/studio/articles/{article['id']}"
+    scheduled = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat(timespec="seconds")
+    response = client.post(f"{base}/schedule", json={"at": scheduled}, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["scheduledFor"].startswith(scheduled[:19])
+    assert client.get(f"{base}/review", headers=headers).json()["platforms"] == []
+    assert client.post(f"{base}/schedule", json={"at": None}, headers=headers).json()["scheduledFor"] is None
+    rejected = client.post(f"{base}/publish", json={"scheduledAt": scheduled}, headers=headers)
+    assert rejected.status_code == 422
+    assert rejected.json()["code"] == "schedule_separate"
 
 
-def test_review_reports_succeeded_job_with_permalink(client):
-    headers, article = _article(client, "studio-review-succeeded")
-    _bind_account(client, headers)
-    published = client.post(
-        f"/api/v1/studio/articles/{article['id']}/publish",
-        json={"platforms": ["wechat_official"]},
-        headers=headers,
-    )
-    assert published.status_code == 200, published.text
-    job_id = published.json()["publishJobIds"][0]
-
+def test_review_reports_legacy_manual_jobs_and_real_published_links(client):
     from app import models
     from app.core.db import SessionLocal
+
+    headers, article = _article(client, "studio-review-legacy")
+    account_id = _bind_account(client, headers)
+    archive = _archive(client, headers, article)
+    with SessionLocal() as db:
+        account = db.get(models.ConnectedAccount, account_id)
+        job = models.PublishJob(
+            owner_user_id=account.owner_user_id,
+            workspace_id=account.workspace_id,
+            content_item_id=archive["contentId"],
+            connected_account_id=account_id,
+            platform="wechat_official",
+            status="approved",
+            target="publish",
+            idempotency_key="legacy-studio-publish-test",
+            payload_snapshot={"studioArticleId": article["id"], "mode": "manual"},
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    base = f"/api/v1/studio/articles/{article['id']}"
+    row, = client.get(f"{base}/review", headers=headers).json()["platforms"]
+    assert row["status"] == "manual"
+    assert row["canRetry"] is False
+    assert client.post(f"{base}/publish/{job_id}/retry", headers=headers).status_code == 404
 
     with SessionLocal() as db:
         job = db.get(models.PublishJob, job_id)

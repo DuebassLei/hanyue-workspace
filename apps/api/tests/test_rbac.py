@@ -94,7 +94,7 @@ def test_member_cannot_reach_admin_endpoints(client):
     assert client.get(f"{PREFIX}/rbac/permissions", headers=headers).status_code == 403
 
 
-def test_superadmin_sees_every_menu(client):
+def test_superadmin_sees_visible_menus_but_not_standalone_layout(client):
     headers, _ = _superadmin(client)
     body = client.get(f"{PREFIX}/rbac/me", headers=headers).json()
     assert body["isSuperadmin"] is True
@@ -102,7 +102,39 @@ def test_superadmin_sees_every_menu(client):
     assert {"create", "workspace", "ops", "rbac", "system"} <= groups
 
     names = _nav_names(body["menus"])
-    assert {"roles", "menus", "users", "models", "logs"} <= names
+    assert {"roles", "menus", "users", "models", "logs", "paper"} <= names
+    assert "wechat-layout" not in names
+
+
+def test_wechat_layout_menu_upgrade_hides_once_without_revoking_access(client):
+    from app import models
+    from app.core.db import SessionLocal
+    from app.services import rbac_service
+
+    headers, user_id = _login(client, "layout")
+    _set_roles(user_id, ["operator"])
+    with SessionLocal() as db:
+        menu = db.scalar(select(models.Menu).where(models.Menu.menu_key == "wechat-layout"))
+        assert menu.visible is False  # 新库同样默认隐藏
+        menu.visible = True
+        setting = db.get(models.AppSetting, rbac_service._MIGRATION_SETTING_KEY)
+        migration = "2026-11.hide-wechat-layout-menu"
+        setting.value = {"done": [item for item in setting.value["done"] if item != migration]}
+        db.commit()
+        assert "wechat-layout" in _nav_names(client.get(f"{PREFIX}/rbac/me", headers=headers).json()["menus"])
+
+        rbac_service.seed(db)
+        db.refresh(menu)
+        assert menu.visible is False
+        me = client.get(f"{PREFIX}/rbac/me", headers=headers).json()
+        assert "wechat-layout" not in _nav_names(me["menus"])
+        assert "wechat_layout.use" in me["permissions"]
+
+        menu.visible = True  # 后续管理员主动恢复可见，重启不覆盖
+        db.commit()
+        rbac_service.seed(db)
+        db.refresh(menu)
+        assert menu.visible is True
 
 
 # ---------------- 改动即时生效 ----------------

@@ -69,6 +69,25 @@ def test_committed_schema_is_in_sync_with_models():
     )
 
 
+def test_existing_schema_is_left_to_application_migrations():
+    out = _generate()
+    assert "\\gset" in out
+    assert "\\if :hanyue_existing_schema" in out
+    assert out.index("\\if :hanyue_existing_schema") < out.index("BEGIN;")
+    assert out.index("\\else") < out.index("BEGIN;")
+    assert out.index("COMMIT;") < out.index("\\endif")
+    assert not any(line.startswith("ALTER TABLE ") for line in out.splitlines())
+    from app.core.db import Base
+    for table in Base.metadata.tables:
+        assert f"'{table}'" in out.split("\\gset", 1)[0]
+
+
+def test_development_compose_has_one_init_executor():
+    compose = (REPO_ROOT / "infra" / "docker-compose.dev.yml").read_text(encoding="utf-8")
+    assert "/docker-entrypoint-initdb.d" not in compose
+    assert 'entrypoint: ["/bin/sh", "/scripts/auto-init.sh"]' in compose
+
+
 def test_schema_does_not_seed_bootstrap_credentials():
     """结构导出不得写入可登录的固定口令账号或绑定。"""
     out = _generate()

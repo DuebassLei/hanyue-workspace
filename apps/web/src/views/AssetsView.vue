@@ -1012,7 +1012,7 @@ onBeforeUnmount(() => {
 .gallery-shell {
   display: grid;
   grid-template-columns: 196px minmax(0, 1fr);
-  gap: var(--space-5);
+  gap: var(--space-3);
   align-items: start;
 }
 
@@ -1021,10 +1021,10 @@ onBeforeUnmount(() => {
   top: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
-  padding: var(--space-4);
+  gap: var(--space-3);
+  padding: var(--space-3);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: var(--color-surface);
 }
 .filter-head {

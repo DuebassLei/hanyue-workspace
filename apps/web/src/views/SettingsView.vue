@@ -232,13 +232,13 @@ onMounted(() => {
 <style scoped>
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
   gap: var(--space-3);
   margin-top: var(--space-3);
 }
 
 .status-value {
-  font-size: 14px;
+  font-size: var(--font-body);
   font-weight: 600;
   color: var(--color-text-primary);
   margin: 2px 0;
@@ -253,7 +253,7 @@ onMounted(() => {
 }
 
 .path-label {
-  font-size: 13px;
+  font-size: var(--font-sm);
   font-weight: 600;
   color: var(--color-text-secondary);
 }

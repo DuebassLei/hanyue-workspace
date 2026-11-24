@@ -1246,12 +1246,12 @@ async function bindWechat() {
 .queue-overview-card {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: var(--space-4);
+  gap: var(--space-1);
+  padding: var(--space-3);
 }
 
 .queue-overview-card strong {
-  font-size: 26px;
+  font-size: var(--font-display);
   line-height: 1;
   color: var(--color-text-primary);
 }

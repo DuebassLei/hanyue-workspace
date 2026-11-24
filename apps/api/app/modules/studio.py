@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi import Query
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from .. import models, schemas
 from ..core.deps import ApiError, CurrentUser, DbSession, default_workspace, not_found
@@ -191,6 +191,20 @@ def create_article(payload: schemas.StudioNewIn, db: DbSession, user: CurrentUse
     return _out(studio_repo.row_to_dict(row))
 
 
+def _begin_sqlite_write(db) -> None:
+    # SQLite 忽略 FOR UPDATE；在读关联与最新版本之前先取得写锁。
+    if db.get_bind().dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+
+
+def _owned_content_for_update(db, content_id, owner_id):
+    return db.scalar(
+        select(models.ContentItem)
+        .where(models.ContentItem.id == content_id, models.ContentItem.owner_user_id == owner_id)
+        .with_for_update()
+    )
+
+
 @router.post("/studio/articles/from-content/{content_id}", response_model=schemas.StudioArticleOut)
 def article_from_content(
     content_id: str,
@@ -208,8 +222,9 @@ def article_from_content(
     material 写进成稿台稿，创作小助手才有素材可写。已存在的稿若素材仍为空也会补写，
     已有素材不覆盖。
     """
-    item = db.get(models.ContentItem, content_id)
-    if item is None or item.owner_user_id != user.id:
+    _begin_sqlite_write(db)
+    item = _owned_content_for_update(db, content_id, user.id)
+    if item is None:
         raise not_found("稿件")
     hot_material = (
         hot_topics_service.build_material(db, hot_cluster_id) if hot_cluster_id else ""
@@ -224,9 +239,19 @@ def article_from_content(
     ).first()
     if existing is not None:
         if hot_material and not (existing.material or "").strip():
-            existing.material = hot_material
+            # 先释放来源锁；存档按 StudioArticle → ContentItem 的顺序加锁。
+            existing_id = existing.id
             db.commit()
-            db.refresh(existing)
+            _begin_sqlite_write(db)
+            existing = db.scalar(
+                select(models.StudioArticle).where(models.StudioArticle.id == existing_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )
+            if existing is None:
+                raise not_found("稿件")
+            if not (existing.material or "").strip():
+                existing.material = hot_material
+            db.commit()
         return _out(studio_repo.row_to_dict(existing))
 
     # 正文以最新版本为准；只有自动草稿、还没存过版本时才退回 draft_body
@@ -235,11 +260,10 @@ def article_from_content(
         version = db.get(models.ContentVersion, item.current_version_id)
         if version is not None and version.body:
             body = version.body
-    workspace = default_workspace(db, user)
     row = studio_repo.create(
         db,
         owner_user_id=user.id,
-        workspace_id=workspace.id if workspace else None,
+        workspace_id=item.workspace_id,
         topic=item.title or "",
         material=hot_material,
         markdown=body,
@@ -301,42 +325,96 @@ def article_markdown(article_id: str, db: DbSession, user: CurrentUser):
     return {"markdown": AB.to_markdown(data)}
 
 
+@router.patch("/studio/articles/{article_id}/markdown", response_model=schemas.StudioArticleOut)
+def save_markdown(article_id: str, payload: schemas.StudioMarkdownPatchIn, db: DbSession, user: CurrentUser):
+    _busy(article_id)
+    row, data = _data(db, user, article_id)
+    current = AB.to_markdown(data)
+    if current != payload.expected_markdown:
+        raise _fail("稿件已有新版本，未保存的源码已保留。请复制修改后重新载入最新正文。", 409)
+    if current == payload.markdown:
+        return _out(data)
+    edited = dict(data)
+    AB.edit_markdown(edited, payload.markdown)
+    if len(edited["title"]) > 200 or any(len(block["text"]) > AB.BLOCK_TEXT_MAX for block in edited["blocks"]):
+        raise _fail("标题不能超过 200 字，单段不能超过 20000 字。")
+    studio_repo.snapshot(db, row, data, "编辑 Markdown 源码")
+    AB.touch(edited)
+    _commit_article(db, row, edited)
+    return _out(edited)
+
+
 @router.post("/studio/articles/{article_id}/export", response_model=dict)
 def export_to_content(article_id: str, db: DbSession, user: CurrentUser):
-    """把成稿台的段落正文落成一条正式稿件版本，接上文章管理与发布链路。"""
-    row, data = _data(db, user, article_id)
-    workspace_id = row.workspace_id
-    if not workspace_id:
-        workspace = default_workspace(db, user)
-        workspace_id = workspace.id if workspace else None
-    if not workspace_id:
-        raise _fail("当前账号还没有工作区，无法导出稿件。", 400)
-    markdown = AB.to_markdown(data)
-    title = data.get("title") or data.get("topic") or "未命名稿件"
-    item = models.ContentItem(
-        workspace_id=workspace_id,
-        owner_user_id=user.id,
-        title=title[:200],
-        type="article",
-        status="draft",
-        draft_title=title[:200],
-        draft_body=markdown,
+    """存回关联文章；最新快照相同则复用，否则追加一个版本。"""
+    # default_workspace 在需要建工作区时会提交，必须在拿存档锁之前调用。
+    workspace_id = default_workspace(db, user).id
+    _begin_sqlite_write(db)
+    row = db.scalar(
+        select(models.StudioArticle)
+        .where(models.StudioArticle.id == article_id, models.StudioArticle.owner_user_id == user.id)
+        .with_for_update()
     )
-    db.add(item)
-    db.flush()
+    if row is None:
+        raise not_found("稿件")
+    data = studio_repo.row_to_dict(row)
+    title = (data.get("title") or data.get("topic") or "未命名稿件")[:200]
+    snapshot = {
+        "title": title,
+        "body": AB.to_markdown(data),
+        "summary": data.get("summary") or "",
+        "layout_options": data.get("layout_options") or {},
+    }
+    item = _owned_content_for_update(db, row.content_item_id, user.id) if row.content_item_id else None
+    if item is None:
+        item = models.ContentItem(
+            workspace_id=row.workspace_id or workspace_id,
+            owner_user_id=user.id,
+            title=title,
+            type="article",
+            status="draft",
+        )
+        db.add(item)
+        db.flush()
+        row.content_item_id = item.id
+
+    latest = db.scalar(
+        select(models.ContentVersion)
+        .where(models.ContentVersion.content_item_id == item.id)
+        .order_by(models.ContentVersion.version_no.desc())
+        .limit(1)
+    )
+    current = latest
+    if item.current_version_id and (latest is None or latest.id != item.current_version_id):
+        current = db.get(models.ContentVersion, item.current_version_id)
+    cover_id = (data.get("cover") or {}).get("assetId") or None
+    if current and current.source_type == "studio" and current.content_item_id == item.id and all(
+        getattr(current, key) == value for key, value in snapshot.items()
+    ):
+        saved_cover = db.scalar(
+            select(models.ContentAsset.asset_id)
+            .where(models.ContentAsset.content_version_id == current.id, models.ContentAsset.usage_role == "cover")
+            .limit(1)
+        )
+        if saved_cover == cover_id:
+            db.commit()
+            return {"contentId": item.id, "versionId": current.id, "title": title}
+
     version = models.ContentVersion(
         content_item_id=item.id,
-        version_no=1,
+        version_no=latest.version_no + 1 if latest else 1,
+        parent_version_id=item.current_version_id,
         source_type="studio",
-        title=title[:200],
-        body=markdown,
-        summary=data.get("summary", "") or "",
-        layout_options=data.get("layout_options") or {},
+        **snapshot,
     )
     db.add(version)
     db.flush()
+    if cover_id:
+        db.add(models.ContentAsset(content_version_id=version.id, asset_id=cover_id, usage_role="cover"))
+    item.title = title
+    item.draft_title = title
+    item.draft_body = snapshot["body"]
     item.current_version_id = version.id
-    row.content_item_id = item.id
     db.commit()
     return {"contentId": item.id, "versionId": version.id, "title": title}
 
@@ -474,8 +552,29 @@ def revisions(article_id: str, db: DbSession, user: CurrentUser):
 
 
 @router.post("/studio/articles/{article_id}/draft", response_model=schemas.StudioArticleOut)
-def draft(article_id: str, db: DbSession, user: CurrentUser, payload: schemas.StudioDraftIn | None = None):
+def draft(
+    article_id: str,
+    db: DbSession,
+    user: CurrentUser,
+    payload: schemas.StudioDraftIn | None = None,
+    empty_only: bool = Query(default=False, alias="emptyOnly"),
+):
     row, data = _data(db, user, article_id)
+    if empty_only:
+        if data["blocks"]:
+            return _out(data)
+        job = _job_out(article_id)
+        if not job:
+            try:
+                job = SP.PIPELINE.draft(article_id, empty_only=True)
+            except SP.PipelineError as exc:
+                if exc.status != 409:
+                    raise
+                job = _job_out(article_id)
+        if not job:  # 快速结束的任务可能已落库，不返回启动前的空稿。
+            db.rollback()
+            _, data = _data(db, user, article_id)
+        return {**_out(data), "job": job or _job_out(article_id)}
     _busy(article_id)
     # 带 style 就是「换风格重写」：先落风格再排队，任务读的是落库后的值
     if payload and payload.style:

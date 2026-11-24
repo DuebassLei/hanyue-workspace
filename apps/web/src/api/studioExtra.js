@@ -50,22 +50,14 @@ export const studioExtraApi = {
     }),
 
   // ---- 发布与复盘 ----
-  /** 发布：dryRun=true 只导出成稿件版本（存入文章管理），false 才真正入发布队列。 */
-  publish: (id, body) => api.post(`${base(id)}/publish`, body || {}),
+  /** 推送已存档版本到指定公众号的草稿箱，不正式发布。 */
+  pushDraft: (id, accountId) => api.post(`${base(id)}/publish`, { accountId }),
+  retryDraft: (id, jobId) => api.post(`${base(id)}/publish/${jobId}/retry`),
+  wechatAccounts: async () => (await api.get('/platform-accounts')).filter(
+    (account) => account.platform === 'wechat_official' && account.status === 'connected' && account.authSource === 'app_secret',
+  ),
   /** 复盘：按 contentItemId 反查各平台任务状态，用于发布结果表格。 */
   review: (id) => api.get(`${base(id)}/review`),
   /** 排期：只记「计划什么时候发」，与 studio.js 的 schedule 同一接口，这里复用于发布面板。 */
   schedule: (id, at) => api.post(`${base(id)}/schedule`, { at: at || null }),
-  /** 平台能力矩阵：发布面板的平台勾选项必须来自真实目录，不能在前端写死平台名。 */
-  platformCapabilities: () => api.get('/platforms/capabilities'),
 }
-
-/**
- * 能力接口不可用时的兜底平台。
- *
- * 后端 `connectors/base.py` 目前只接入了 `wechat_official`（草稿箱推送），
- * 平台标识必须用这个真实 id，不能用路由前缀式的 `wechat-mp`。
- */
-export const FALLBACK_PLATFORMS = [
-  { platform: 'wechat_official', label: '微信公众号', available: true, draftUpload: true },
-]

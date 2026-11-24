@@ -1,16 +1,7 @@
 <script setup>
-/**
- * 成稿台右栏「发布 · 复盘」。
- *
- * 受控组件：排期、存入文章管理、立即发布都回整篇快照（emit('saved')），复盘是只读派生数据。
- *
- * 平台勾选项来自 `GET /platforms/capabilities` 的真实目录——后端目前只接入了
- * `wechat_official`（草稿箱推送），所以不能在前端写死平台名；接口拿不到时退化为
- * 微信公众号一项（FALLBACK_PLATFORMS），并在提示里说明。
- */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { NButton, NCheckbox, NDatePicker } from 'naive-ui'
-import { FALLBACK_PLATFORMS, studioExtraApi } from '../../api/studioExtra'
+import { NButton, NDatePicker, NSelect } from 'naive-ui'
+import { studioExtraApi } from '../../api/studioExtra'
 
 const props = defineProps({
   article: { type: Object, default: null },
@@ -18,363 +9,236 @@ const props = defineProps({
 })
 const emit = defineEmits(['saved', 'notify'])
 
-const platforms = ref([])
-const selected = ref([])
+const accounts = ref([])
+const accountId = ref(null)
 const scheduleAt = ref(null)
 const review = ref(null)
 const loading = ref(false)
 const action = ref('')
 const error = ref('')
-const platformFallback = ref(false)
-
+const accountsError = ref('')
+const reviewError = ref('')
 let timer = null
-let disposed = false
 let sequence = 0
+let reviewRequest = 0
 
-const busyAction = computed(() => Boolean(action.value) || Boolean(props.busy))
-const isAction = (label) => action.value === label
-const platformLabel = computed(() => Object.fromEntries(platforms.value.map((item) => [item.platform, item.label || item.platform])))
-const availablePlatforms = computed(() => platforms.value.filter((item) => item.available !== false))
+const busyAction = computed(() => Boolean(action.value || props.busy))
+const accountOptions = computed(() => accounts.value.map((account) => ({
+  value: account.id,
+  label: account.appIdMasked ? `${account.displayName}（${account.appIdMasked}）` : account.displayName,
+})))
 const reviewRows = computed(() => review.value?.platforms || [])
-const reviewStats = computed(() => review.value?.stats || null)
-const publishedAt = computed(() => props.article?.publishedAt || review.value?.publishedAt || '')
-const reviewed = computed(() => Boolean(reviewRows.value.length || publishedAt.value))
-const scheduleText = computed(() => (props.article?.scheduledFor ? formatTime(props.article.scheduledFor) : '未排期'))
+const reviewStats = computed(() => review.value?.stats)
+const publishedAt = computed(() => review.value?.publishedAt || props.article?.publishedAt)
+const currentDraft = computed(() => reviewRows.value.find((row) =>
+  row.target === 'draft' && row.accountId === accountId.value && row.versionId === review.value?.versionId,
+))
+const statusLabel = { queued: '排队中', running: '处理中', drafted: '已推送草稿箱', succeeded: '已发布', manual: '待人工处理', failed: '失败' }
+const statusClass = { drafted: 'ok', succeeded: 'ok', failed: 'bad' }
 
-const statusLabel = { queued: '排队中', running: '发布中', succeeded: '成功', failed: '失败' }
-const statusClass = { queued: 'idle', running: 'idle', succeeded: 'ok', failed: 'bad' }
-
-function formatTime(value) {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return String(value)
-  const pad = (num) => String(num).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
+const formatTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : ''
 
 function stopPolling() {
-  if (timer) clearInterval(timer)
+  if (timer) clearTimeout(timer)
   timer = null
 }
 
-function hasActiveReview() {
-  return reviewRows.value.some((row) => ['queued', 'running'].includes(row.status))
-}
-
 function ensurePolling() {
-  if (disposed || !hasActiveReview()) return stopPolling()
-  if (timer) return
-  timer = setInterval(loadReview, 5000)
+  stopPolling()
+  if (reviewRows.value.some((row) => ['queued', 'running'].includes(row.status))) {
+    timer = setTimeout(loadReview, 5000)
+  }
 }
 
 async function loadReview() {
-  const articleId = props.article?.id
-  if (!articleId) return
+  const id = props.article?.id
+  if (!id) return
+  const request = ++reviewRequest
   try {
-    const data = await studioExtraApi.review(articleId)
-    if (disposed) return
-    review.value = data || null
-    ensurePolling()
-  } catch {
-    // 复盘是只读附加信息，失败不打断发布流程
+    const result = await studioExtraApi.review(id)
+    if (request !== reviewRequest) return
+    review.value = result
+    reviewError.value = ''
+  } catch (err) {
+    if (request !== reviewRequest) return
+    reviewError.value = err.message || '读取推送结果失败'
   }
-}
-
-async function load() {
-  const articleId = props.article?.id
-  if (!articleId) return
-  const seq = ++sequence
-  stopPolling()
-  loading.value = true
-  error.value = ''
-  review.value = null
-  const parsed = props.article?.scheduledFor ? Date.parse(props.article.scheduledFor) : NaN
-  scheduleAt.value = Number.isNaN(parsed) ? null : parsed
-  const [caps, rev] = await Promise.allSettled([studioExtraApi.platformCapabilities(), studioExtraApi.review(articleId)])
-  if (seq !== sequence || disposed) return
-  if (caps.status === 'fulfilled') {
-    const list = caps.value?.platforms || []
-    platforms.value = list.length ? list : FALLBACK_PLATFORMS
-    platformFallback.value = !list.length
-  } else {
-    platforms.value = FALLBACK_PLATFORMS
-    platformFallback.value = true
-  }
-  // 只保留还可用且在目录里的勾选，默认选第一个可用平台
-  const usable = availablePlatforms.value.map((item) => item.platform)
-  const kept = selected.value.filter((platform) => usable.includes(platform))
-  selected.value = kept.length ? kept : usable.slice(0, 1)
-  if (rev.status === 'fulfilled') review.value = rev.value || null
-  loading.value = false
   ensurePolling()
 }
 
-async function saveSchedule() {
-  const articleId = props.article?.id
-  if (!articleId || busyAction.value) return
-  if (!scheduleAt.value) {
-    emit('notify', '先选一个发布时间')
-    return
+async function load(id) {
+  const seq = ++sequence
+  ++reviewRequest
+  stopPolling()
+  review.value = null
+  reviewError.value = ''
+  error.value = ''
+  accountsError.value = ''
+  accounts.value = []
+  accountId.value = null
+  loading.value = Boolean(id)
+  if (!id) return
+  const [result] = await Promise.allSettled([studioExtraApi.wechatAccounts(), loadReview()])
+  if (seq !== sequence) return
+  if (result.status === 'fulfilled') {
+    accounts.value = result.value
+    accountId.value = accounts.value[0]?.id || null
+  } else {
+    accountsError.value = result.reason?.message || '读取已绑定公众号失败'
   }
-  if (scheduleAt.value < Date.now()) {
-    emit('notify', '计划发布时间不能早于现在')
-    return
-  }
-  action.value = 'schedule'
+  loading.value = false
+}
+
+async function withAction(name, run) {
+  if (busyAction.value || !props.article?.id) return
+  const seq = sequence
+  const isCurrent = () => seq === sequence
+  action.value = name
   error.value = ''
   try {
-    const snapshot = await studioExtraApi.schedule(articleId, new Date(scheduleAt.value).toISOString())
-    if (snapshot) emit('saved', snapshot)
-    emit('notify', `已排期到 ${formatTime(scheduleAt.value)}`)
+    await run(props.article.id, isCurrent)
   } catch (err) {
-    error.value = err.message || '排期保存失败'
-    emit('notify', error.value)
+    if (isCurrent()) error.value = err.message || '操作失败，请重试'
   } finally {
     action.value = ''
   }
 }
 
-async function clearSchedule() {
-  const articleId = props.article?.id
-  if (!articleId || busyAction.value) return
-  action.value = 'schedule-clear'
-  error.value = ''
-  try {
-    const snapshot = await studioExtraApi.schedule(articleId, null)
-    if (snapshot) emit('saved', snapshot)
-    scheduleAt.value = null
-    emit('notify', '已取消排期')
-  } catch (err) {
-    error.value = err.message || '取消失败'
-    emit('notify', error.value)
-  } finally {
-    action.value = ''
-  }
-}
-
-async function publish(dryRun) {
-  const articleId = props.article?.id
-  if (!articleId || busyAction.value) return
-  if (!selected.value.length) {
-    emit('notify', '先勾选至少一个发布平台')
+function saveSchedule(clear = false) {
+  const at = scheduleAt.value
+  if (!clear && (!at || at <= Date.now())) {
+    error.value = '请选择一个晚于当前时间的计划发布时间'
     return
   }
-  action.value = dryRun ? 'store' : 'publish'
-  error.value = ''
-  try {
-    const result = await studioExtraApi.publish(articleId, {
-      platforms: [...selected.value],
-      scheduledAt: null,
-      dryRun,
-    })
-    // publish 路由回的是任务结果，不是稿件快照；稿件状态（published_at 等）靠复盘与父级刷新兜住
-    if (dryRun) {
-      emit('notify', `已存入文章管理${result?.versionId ? `（版本 ${result.versionId}）` : ''}`)
-    } else {
-      const count = result?.publishJobIds?.length || 0
-      emit('notify', count ? `已创建 ${count} 个发布任务` : '已提交发布')
-    }
+  return withAction(clear ? 'clear' : 'schedule', async (id, isCurrent) => {
+    const snapshot = await studioExtraApi.schedule(id, clear ? null : new Date(at).toISOString())
+    if (!isCurrent()) return
+    emit('saved', snapshot)
+    scheduleAt.value = clear ? null : at
+    emit('notify', clear ? '已取消排期' : `已保存排期：${formatTime(at)}`)
+  })
+}
+
+function pushDraft() {
+  return withAction('push', async (id, isCurrent) => {
+    const result = await studioExtraApi.pushDraft(id, accountId.value)
+    if (!isCurrent()) return
+    if (result.status === 'queued') emit('notify', '草稿推送已排队，结果以复盘为准')
+    if (result.status === 'drafted') emit('notify', '该版本已推送到所选公众号的草稿箱')
     await loadReview()
-  } catch (err) {
-    error.value = err.message || '发布失败'
-    emit('notify', error.value)
-  } finally {
-    action.value = ''
-  }
+  })
 }
 
-function togglePlatform(platform, checked) {
-  const next = new Set(selected.value)
-  if (checked) next.add(platform)
-  else next.delete(platform)
-  selected.value = [...next]
+function retryDraft(jobId) {
+  return withAction(jobId, async (id, isCurrent) => {
+    try {
+      await studioExtraApi.retryDraft(id, jobId)
+    } finally {
+      if (isCurrent()) await loadReview()
+    }
+  })
 }
 
 watch(() => props.article?.id, load, { immediate: true })
+watch(() => [props.article?.id, props.article?.scheduledFor], ([, time]) => {
+  scheduleAt.value = time ? Date.parse(time) : null
+}, { immediate: true })
 
 onBeforeUnmount(() => {
-  disposed = true
-  sequence += 1
+  ++sequence
+  ++reviewRequest
   stopPolling()
 })
 </script>
 
 <template>
   <section class="publish-panel" aria-label="发布与复盘">
-    <header class="panel-head">
-      <span>发布 · 复盘</span>
-      <span class="panel-note">{{ loading ? '载入中…' : scheduleText }}</span>
-    </header>
-
-    <p v-if="error" class="panel-error" role="alert">{{ error }}</p>
-    <p v-if="!article" class="panel-empty">左侧选一篇稿件。</p>
-
+    <p v-if="!article" class="hint">左侧选一篇稿件。</p>
     <template v-else>
-      <section class="block-section">
+      <p v-if="error" class="panel-error" role="alert">{{ error }}</p>
+      <section class="block-section schedule-section">
+        <div class="section-kicker">01 / SCHEDULE</div>
         <div class="setting-head">
           <h3>排期</h3>
-          <span class="state" :class="article.scheduledFor ? 'ok' : 'idle'">{{ article.scheduledFor ? '已排期' : '未排期' }}</span>
+          <span class="state" :class="article.scheduledFor ? 'ok' : ''">{{ article.scheduledFor ? '已排期' : '未排期' }}</span>
         </div>
-        <NDatePicker
-          :value="scheduleAt"
-          type="datetime"
-          size="small"
-          clearable
-          placeholder="选一个计划发布的时间"
-          :disabled="busyAction"
-          class="date-picker"
-          @update:value="(value) => (scheduleAt = value)"
-        />
+        <NDatePicker v-model:value="scheduleAt" type="datetime" size="small" clearable placeholder="选择计划发布时间" :disabled="busyAction" />
         <div class="row">
-          <NButton size="small" :disabled="busyAction" :loading="isAction('schedule')" @click="saveSchedule">保存排期</NButton>
-          <NButton
-            v-if="article.scheduledFor"
-            size="small"
-            quaternary
-            :disabled="busyAction"
-            :loading="isAction('schedule-clear')"
-            @click="clearSchedule"
-          >取消排期</NButton>
-          <span class="hint">排期只记录计划时间，真正的队列在发布模块里。</span>
+          <NButton size="small" :disabled="busyAction" :loading="action === 'schedule'" @click="saveSchedule()">保存排期</NButton>
+          <NButton v-if="article.scheduledFor" size="small" quaternary :disabled="busyAction" :loading="action === 'clear'" @click="saveSchedule(true)">取消排期</NButton>
         </div>
+        <p class="hint">排期同步到内容日历，只记录计划，不会自动推送或发布。</p>
       </section>
 
       <section class="block-section">
-        <div class="setting-head">
-          <h3>发布平台</h3>
-          <span v-if="platformFallback" class="state idle">默认微信</span>
+        <div class="section-kicker">02 / DELIVERY</div>
+        <div class="setting-head"><h3>微信公众号草稿箱</h3></div>
+        <p class="hint">推送最近一次存档的版本，不改原稿。推送成功后，请到微信公众平台确认正式发布。</p>
+        <NSelect v-model:value="accountId" :options="accountOptions" :loading="loading" :disabled="loading || busyAction || !accounts.length" size="small" placeholder="选择已绑定的公众号" />
+        <p v-if="accountsError" class="panel-error" role="alert">{{ accountsError }}</p>
+        <p v-else-if="!loading && !accounts.length" class="hint">请先在发布中心绑定并验证公众号。</p>
+        <p v-if="!loading && review && !review.versionId" class="hint">请选好封面和正文插图，再点顶部「文章存档」。</p>
+        <div class="row">
+          <NButton type="primary" size="small" :disabled="loading || busyAction || !accountId || !review?.versionId || Boolean(currentDraft)" :loading="action === 'push'" @click="pushDraft">推送到草稿箱</NButton>
+          <span v-if="currentDraft" class="hint">该版本：{{ statusLabel[currentDraft.status] }}</span>
         </div>
-        <div class="platform-list">
-          <label v-for="item in platforms" :key="item.platform" class="platform-item" :class="{ disabled: item.available === false }">
-            <NCheckbox
-              :checked="selected.includes(item.platform)"
-              :disabled="busyAction || item.available === false"
-              @update:checked="(checked) => togglePlatform(item.platform, checked)"
-            />
-            <span class="platform-name">{{ item.label || item.platform }}</span>
-            <span v-if="item.available === false" class="platform-note">未接入</span>
-            <span v-else-if="item.draftUpload" class="platform-note">草稿箱</span>
-          </label>
-        </div>
-        <p v-if="platformFallback" class="hint">平台能力接口不可用，暂按微信公众号处理。</p>
-
-        <div class="row actions">
-          <NButton size="small" type="primary" :disabled="busyAction" :loading="isAction('publish')" @click="publish(false)">立即发布</NButton>
-        </div>
-        <p class="hint">存档请用顶部「文章存档」。这里只负责排期和发布。</p>
       </section>
 
-      <section class="block-section">
+      <section class="block-section review-section">
+        <div class="section-kicker">03 / REVIEW</div>
         <div class="setting-head">
           <h3>复盘</h3>
-          <span class="state" :class="reviewed ? 'ok' : 'idle'">
-            {{ reviewed ? '已刷新' : '未发布' }}
-          </span>
+          <NButton size="tiny" quaternary :disabled="loading || busyAction" @click="loadReview">刷新复盘</NButton>
         </div>
-        <p v-if="reviewStats" class="hint">
-          {{ reviewStats.blocks }} 段 · {{ reviewStats.chars }} 字<template v-if="reviewStats.checked"> · 质检 {{ reviewStats.flagged }} 处待改</template>
-        </p>
+        <p v-if="reviewError" class="panel-error" role="alert">{{ reviewError }}</p>
+        <div v-if="reviewStats" class="review-summary"><p>这篇内容已有 <strong>{{ reviewStats.blocks }}</strong> 段、<strong>{{ reviewStats.chars }}</strong> 字<span v-if="reviewStats.checked">，质检有 <strong>{{ reviewStats.flagged }}</strong> 处待改</span>。</p><span>稿件概览</span></div>
         <p v-if="publishedAt" class="hint">已发布：{{ formatTime(publishedAt) }}</p>
-
-        <table v-if="reviewRows.length" class="review-table">
-          <thead>
-            <tr><th>平台</th><th>状态</th><th>链接</th></tr>
-          </thead>
-          <tbody>
-            <tr v-for="(row, index) in reviewRows" :key="`${row.platform}-${index}`">
-              <td>{{ row.platformLabel || platformLabel[row.platform] || row.platform }}</td>
-              <td>
-                <span class="state" :class="statusClass[row.status] || 'idle'">{{ statusLabel[row.status] || row.status }}</span>
-                <small v-if="row.error" class="row-error" :title="row.error">{{ row.error }}</small>
-              </td>
-              <td>
-                <a v-if="row.url" :href="row.url" target="_blank" rel="noopener noreferrer">打开</a>
-                <span v-else class="hint">—</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-else class="hint">还没有发布记录，发布后这里会按平台列出结果。</p>
-        <div class="row">
-          <NButton size="tiny" quaternary :disabled="loading" @click="loadReview">刷新复盘</NButton>
-        </div>
+        <ul v-if="reviewRows.length" class="review-list" aria-live="polite">
+          <li v-for="row in reviewRows" :key="row.jobId">
+            <div class="row">
+              <strong>{{ row.accountLabel || row.platformLabel }}</strong>
+              <span class="state" :class="statusClass[row.status]">{{ statusLabel[row.status] || row.status }}</span>
+              <time v-if="row.at" :datetime="row.at" class="hint">{{ formatTime(row.at) }}</time>
+            </div>
+            <p v-if="row.error" class="row-error">{{ row.error }}</p>
+            <p v-if="row.draftMediaId" class="hint draft-id">草稿 ID：{{ row.draftMediaId }}</p>
+            <a v-if="row.url" :href="row.url" target="_blank" rel="noopener noreferrer">查看已发布文章</a>
+            <NButton v-if="row.canRetry" size="tiny" :disabled="busyAction" :loading="action === row.jobId" @click="retryDraft(row.jobId)">重试推送</NButton>
+          </li>
+        </ul>
+        <p v-else-if="!loading && !reviewError" class="hint">暂无推送或发布记录。</p>
       </section>
     </template>
   </section>
 </template>
 
 <style scoped>
-.publish-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-surface);
-}
-.panel-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  font-size: 13px;
-  font-weight: 600;
-}
-.panel-note { font-size: 11px; font-weight: 400; color: var(--color-text-tertiary); }
-.block-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-top: 10px;
-  border-top: 1px solid var(--color-border);
-}
-.block-section:first-of-type { padding-top: 0; border-top: 0; }
-.setting-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.setting-head h3 { margin: 0; font-size: 12px; font-weight: 600; }
-.state { font-size: 10px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--color-border); color: var(--color-text-tertiary); }
+.publish-panel, .block-section { display: flex; flex-direction: column; gap: 8px; }
+.block-section + .block-section { padding-top: 12px; border-top: 1px solid var(--color-border); }
+.setting-head, .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.setting-head { justify-content: space-between; }
+.setting-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.state { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--color-border); color: var(--color-text-secondary); }
 .state.ok { color: var(--paper-success); border-color: var(--paper-success); }
-.state.bad { color: var(--paper-danger); border-color: var(--paper-danger-line); background: var(--paper-danger-soft); }
-.state.idle { color: var(--color-text-tertiary); }
-
-.date-picker { width: 100%; }
-.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.row.actions { justify-content: flex-start; }
-
-.platform-list { display: flex; flex-direction: column; gap: 4px; }
-.platform-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--color-text-secondary); }
-.platform-item.disabled { opacity: 0.55; }
-.platform-name { flex: none; }
-.platform-note { font-size: 10px; color: var(--color-text-tertiary); }
-
-.review-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-.review-table th {
-  text-align: left;
-  padding: 4px 6px;
-  font-weight: 500;
-  color: var(--color-text-tertiary);
-  border-bottom: 1px solid var(--color-border);
-}
-.review-table td { padding: 5px 6px; border-bottom: 1px solid var(--color-border); vertical-align: top; color: var(--color-text-secondary); }
-.review-table a { color: var(--paper-accent); text-decoration: none; }
-.review-table a:hover { text-decoration: underline; }
-.row-error {
-  display: block;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--paper-danger);
-}
-
-.hint { margin: 0; font-size: 11px; line-height: 1.6; color: var(--color-text-tertiary); }
-.panel-error {
-  margin: 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  font-size: 12px;
-  color: var(--paper-danger);
-  background: var(--paper-danger-soft);
-  border: 1px solid var(--paper-danger-line);
-}
-.panel-empty { margin: 0; font-size: 12px; color: var(--color-text-tertiary); }
+.state.bad, .panel-error, .row-error { color: var(--paper-danger); }
+.panel-error { margin: 0; padding: 6px 8px; border-radius: 6px; background: var(--paper-danger-soft); }
+.hint, .row-error { margin: 0; font-size: 12px; line-height: 1.6; }
+.hint { color: var(--color-text-secondary); }
+.draft-id { overflow-wrap: anywhere; }
+.review-list { margin: 0; padding: 0; list-style: none; }
+.review-list li { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--color-border); font-size: 12px; }
+.review-list a { color: var(--paper-accent); }
+.publish-panel { gap: 12px; }
+.block-section { gap: 10px; padding: 14px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface-raised); }
+.block-section + .block-section { padding-top: 14px; }
+.section-kicker { color: var(--color-text-secondary); font-size: 10px; font-weight: 700; letter-spacing: .12em; }
+.setting-head h3 { font-size: 15px; letter-spacing: -.02em; }
+.schedule-section :deep(.n-date-picker), .block-section :deep(.n-select) { width: 100%; }
+.review-list { display: grid; gap: 8px; }
+.review-list li { padding: 10px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-surface); }
+.review-list time { margin-left: auto; }
+.review-summary { padding: 14px; border: 1px solid var(--color-border); border-radius: 9px; background: radial-gradient(ellipse at 100% 0%, color-mix(in srgb, var(--color-accent) 18%, transparent), transparent 58%), radial-gradient(ellipse at 85% 100%, color-mix(in srgb, var(--color-warning) 14%, transparent), transparent 55%), var(--color-surface); }
+.review-summary p { margin: 0; color: var(--color-text-secondary); font-size: 15px; line-height: 1.6; }
+.review-summary strong { color: var(--color-text-primary); font-family: Georgia, serif; font-size: 20px; font-weight: 500; }
+.review-summary > span { display: block; margin-top: 10px; color: var(--color-text-secondary); font-size: 11px; }
 </style>

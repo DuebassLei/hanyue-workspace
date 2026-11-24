@@ -54,6 +54,8 @@ result = render_studio_document(body, options, image_urls)
 
 ## 5. 安全及行为边界
 
+界面框架和主题调整不得改变成稿台排版组件、文章预览或导出排版的实际效果；隔离要求及回归检查见 [成稿台界面框架与文章排版的隔离约束](paper-studio.md#界面框架与文章排版的隔离约束)。
+
 - 原文 HTML 转义，URL 校验，拒绝危险地址；头像配置仅接受安全 HTTPS URL。
 - 正文输出内联样式，不输出可执行脚本；预览 iframe 使用无脚本 sandbox。
 - 复制到公众号使用 `text/html` 与 `text/plain` 富文本剪贴板；HTML 源码复制单独提供。

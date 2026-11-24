@@ -170,8 +170,7 @@ const stats = computed(() => {
 }
 .stat.ins {
   color: var(--paper-success, #3f7a4f);
-  /* 主题里只有实色 --paper-success，没有配套的浅底，这里用同色低透明度顶上 */
-  background: rgba(57, 113, 94, 0.14);
+  background: var(--paper-success-soft, rgba(57, 113, 94, 0.14));
 }
 .stat.quiet {
   padding: 0;

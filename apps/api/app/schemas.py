@@ -2010,6 +2010,11 @@ class StudioRevisionsOut(CamelModel):
     revisions: list[StudioRevisionOut] = Field(default_factory=list)
 
 
+class StudioMarkdownPatchIn(CamelModel):
+    markdown: str = Field(max_length=300_000)
+    expected_markdown: str = Field(max_length=300_000)
+
+
 class StudioMarkdownOut(CamelModel):
     markdown: str
 

@@ -457,17 +457,6 @@ onMounted(load)
 
 <template>
   <div class="page">
-    <div class="page-head">
-      <div>
-        <h1 class="page-title">角色库</h1>
-        <p class="page-sub">一次建档、多个分镜项目复用。改名或换参考图后，新生成的镜头会用最新形象，历史提示词仍保留在生成快照里。</p>
-      </div>
-      <div class="head-actions">
-        <n-button secondary @click="showExtract = true; extractError = ''">从正文抽取</n-button>
-        <n-button type="primary" @click="openCreate">新建角色</n-button>
-      </div>
-    </div>
-
     <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
 
     <section class="card">
@@ -475,6 +464,10 @@ onMounted(load)
         <n-input v-model:value="keyword" clearable placeholder="搜索名字、别名或外貌" aria-label="搜索角色" />
         <div class="spacer" />
         <span class="field-hint">{{ filtered.length }} / {{ characters.length }} 个角色</span>
+        <div class="head-actions">
+          <n-button secondary @click="showExtract = true; extractError = ''">从正文抽取</n-button>
+          <n-button type="primary" @click="openCreate">新建角色</n-button>
+        </div>
       </div>
 
       <div v-if="loading" class="skeleton" style="height: 120px" />
@@ -780,8 +773,33 @@ onMounted(load)
 .pending-failed { color: var(--color-danger); font-size: 16px; }
 .pending-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .pending-error { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+/* Portrait-led catalog, while keeping the editing workflows unchanged. */
+.page-head { align-items: center; padding-bottom: 22px; border-bottom: 1px solid var(--color-border); }
+.page-title { font-size: 26px; letter-spacing: .02em; }
+.page-sub { margin-top: 8px; line-height: 1.7; }
+.head-actions { flex-wrap: wrap; }
+.card { padding: 20px; border-radius: 14px; }
+.toolbar { flex-wrap: wrap; }
+.role-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 16px; margin-top: 20px; }
+.role-card { gap: 16px; padding: 16px; border-radius: 14px; background: var(--color-surface-raised); transition: box-shadow .18s ease, transform .18s ease; }
+.role-card:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.role-thumb { width: 92px; height: 120px; border-radius: 9px; background: var(--color-accent-soft); }
+.role-initial { color: var(--color-accent); font-family: Georgia, serif; font-size: 36px; }
+.role-head { flex-wrap: wrap; padding-bottom: 10px; border-bottom: 1px solid var(--color-border); }
+.role-head strong { font-size: 16px; }
+.role-line { line-height: 1.7; }
+.role-actions { flex-wrap: wrap; gap: 2px; padding-top: 12px; }
+.head-actions :deep(.n-button) { border-radius: 999px; }
+.card { padding: 0; border: 0; background: transparent; }
+.role-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 10px; margin-top: 14px; }
+.role-card { gap: 12px; padding: 16px; border-radius: 16px; background: var(--color-surface); box-shadow: var(--shadow-sm); }
+.role-thumb { width: 64px; height: 80px; border-radius: 12px; }
+.role-head { padding-bottom: 0; border: 0; }
+.role-head strong { font-size: 15px; }
+.role-actions { padding-top: 8px; }
+@media (prefers-reduced-motion: reduce) { .role-card { transition: none; } }
 @media (max-width: 800px) {
-  .page-head { flex-direction: column; }
+  .page-head { flex-direction: column; align-items: flex-start; }
   .editor-grid, .appearance-grid, .gen-controls { grid-template-columns: 1fr 1fr; }
   /* 窄屏：参考图占满整行，其余控件两列排布 */
   .image-row { grid-template-columns: 1fr 1fr; }

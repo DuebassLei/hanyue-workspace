@@ -35,10 +35,10 @@ const analysis = ref(null)
 const history = ref([])
 
 const levelStyles = {
-  excellent: { color: '#18a058', backgroundColor: '#f0f9ff' },
-  good: { color: '#0969da', backgroundColor: '#f0f9ff' },
-  fair: { color: '#f59e0b', backgroundColor: '#fffbf0' },
-  poor: { color: '#d32f2f', backgroundColor: '#fef2f2' },
+  excellent: { color: 'var(--color-success)' },
+  good: { color: 'var(--color-accent)' },
+  fair: { color: 'var(--color-warning)' },
+  poor: { color: 'var(--color-danger)' },
 }
 
 const levelLabels = { excellent: '优秀', good: '良好', fair: '中等', poor: '偏低' }
@@ -65,9 +65,9 @@ const currentLevelLabel = computed(() => levelLabels[analysis.value?.level] || '
 // 相似度是「越高越像」，进度条填得越满越危险，所以按阈值换色而不是固定色
 const similarityColor = computed(() => {
   const value = analysis.value?.scoreboard?.similarity ?? 0
-  if (value >= 60) return '#d32f2f'
-  if (value >= 30) return '#f59e0b'
-  return '#18a058'
+  if (value >= 60) return 'var(--color-danger)'
+  if (value >= 30) return 'var(--color-warning)'
+  return 'var(--color-success)'
 })
 
 const segments = computed(() => {
@@ -162,16 +162,17 @@ onMounted(loadDrafts)
 
 <template>
   <NLayout class="originality-view">
-    <NLayoutContent content-style="padding: 20px;">
+    <NLayoutContent class="originality-content">
       <div class="originality-container">
         <!-- 标题 -->
         <div class="page-header">
-          <h1>文章原创度检测</h1>
+          <span class="page-eyebrow">内容质量 / ORIGINALITY</span>
+          <h1>文章原创度检测<span class="title-dot">.</span></h1>
           <p>一键检测文章原创度，获得多维度评分与改进建议</p>
         </div>
 
         <!-- 输入区域 -->
-        <NCard class="input-section" :segmented="{ content: 'hard', footer: 'soft' }" size="large">
+        <NCard class="input-section" :segmented="{ content: 'hard', footer: 'soft' }" size="medium">
           <template #header>
             <span>选择要检测的稿件</span>
           </template>
@@ -184,7 +185,7 @@ onMounted(loadDrafts)
                 :options="draftOptions"
                 filterable
                 placeholder="选择一篇已保存版本的稿件"
-                size="large"
+                size="medium"
               />
               <p class="setting-hint">
                 检测对象是稿件的当前版本；正文改过之后再检测会新增一条记录。
@@ -208,7 +209,7 @@ onMounted(loadDrafts)
           <template #footer>
             <NSpace :size="12" justify="space-between">
               <NButton text type="primary" @click="resetAnalysis"> 清空结果 </NButton>
-              <NButton type="primary" :loading="loading" size="large" @click="handleAnalyze">
+              <NButton type="primary" :loading="loading" size="medium" @click="handleAnalyze">
                 开始检测
               </NButton>
             </NSpace>
@@ -312,7 +313,7 @@ onMounted(loadDrafts)
               <NGridItem>
                 <div class="score-item">
                   <div class="score-item-label">观点独特性</div>
-                  <NProgress :percentage="analysis.scoreboard.originality" show-indicator color="#18a058" />
+                  <NProgress :percentage="analysis.scoreboard.originality" show-indicator color="var(--color-success)" />
                   <div class="score-item-value">{{ analysis.scoreboard.originality }}/100</div>
                   <div class="score-item-hint">越高越好 · 权重 25%</div>
                 </div>
@@ -320,7 +321,7 @@ onMounted(loadDrafts)
               <NGridItem>
                 <div class="score-item">
                   <div class="score-item-label">结构层次</div>
-                  <NProgress :percentage="analysis.scoreboard.structure" show-indicator color="#0969da" />
+                  <NProgress :percentage="analysis.scoreboard.structure" show-indicator color="var(--color-accent)" />
                   <div class="score-item-value">{{ analysis.scoreboard.structure }}/100</div>
                   <div class="score-item-hint">越高越好 · 权重 15%</div>
                 </div>
@@ -328,7 +329,7 @@ onMounted(loadDrafts)
               <NGridItem>
                 <div class="score-item">
                   <div class="score-item-label">数据支撑度</div>
-                  <NProgress :percentage="analysis.scoreboard.dataAccuracy" show-indicator color="#f59e0b" />
+                  <NProgress :percentage="analysis.scoreboard.dataAccuracy" show-indicator color="var(--color-warning)" />
                   <div class="score-item-value">{{ analysis.scoreboard.dataAccuracy }}/100</div>
                   <div class="score-item-hint">越高越好 · 权重 12%</div>
                 </div>
@@ -336,7 +337,7 @@ onMounted(loadDrafts)
               <NGridItem>
                 <div class="score-item">
                   <div class="score-item-label">文风辨识度</div>
-                  <NProgress :percentage="analysis.scoreboard.styleUniqueness" show-indicator color="#d946ef" />
+                  <NProgress :percentage="analysis.scoreboard.styleUniqueness" show-indicator color="var(--color-accent)" />
                   <div class="score-item-value">{{ analysis.scoreboard.styleUniqueness }}/100</div>
                   <div class="score-item-hint">越高越好 · 权重 8%</div>
                 </div>
@@ -382,7 +383,7 @@ onMounted(loadDrafts)
                 </template>
                 <div>
                   <strong>{{ flag.position }}</strong>
-                  <div style="font-size: 13px; color: #666;">{{ flag.reason }}</div>
+                  <div class="muted-detail">{{ flag.reason }}</div>
                 </div>
                 <template #suffix>
                   <NTag :type="flag.severity === 'error' ? 'error' : 'warning'">
@@ -445,13 +446,13 @@ onMounted(loadDrafts)
               <NListItem v-for="item in history" :key="item.analysisId">
                 <div>
                   <strong>{{ item.totalScore }}</strong>
-                  <span style="margin-left: 8px; color: #666;">
+                  <span class="history-detail">
                     {{ levelLabels[item.level] || item.level }} · 相似度
                     {{ item.corpusSize ? item.similarity + '%' : '样本不足' }}
                   </span>
                 </div>
                 <template #suffix>
-                  <span style="font-size: 12px; color: #999;">{{ formatDateTime(item.analyzedAt) }}</span>
+                  <span class="history-time">{{ formatDateTime(item.analyzedAt) }}</span>
                 </template>
               </NListItem>
             </NList>
@@ -495,6 +496,13 @@ onMounted(loadDrafts)
 </template>
 
 <style scoped>
+.originality-content { padding: 16px 20px; }
+.page-eyebrow { display: block; margin-bottom: 6px; color: var(--color-text-muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; }
+.title-dot { color: var(--color-accent); }
+.muted-detail, .history-detail { color: var(--color-text-secondary); font-size: 13px; }
+.history-detail { margin-left: 8px; }
+.history-time { color: var(--color-text-muted); font-size: 12px; }
+
 .originality-view {
   width: 100%;
   height: 100%;
@@ -506,20 +514,22 @@ onMounted(loadDrafts)
 }
 
 .page-header {
-  margin-bottom: 24px;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .page-header h1 {
-  margin: 0;
-  font-size: 28px;
+  margin: 0 0 4px;
+  color: var(--color-text-primary);
+  font-size: 23px;
   font-weight: 600;
-  margin-bottom: 8px;
 }
 
 .page-header p {
   margin: 0;
   font-size: 14px;
-  color: #666;
+  color: var(--color-text-secondary);
 }
 
 .input-section {
@@ -528,9 +538,8 @@ onMounted(loadDrafts)
 
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 20px;
-  margin-bottom: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 16px;
 }
 
 .setting-item label {
@@ -543,7 +552,7 @@ onMounted(loadDrafts)
 .setting-hint {
   margin: 8px 0 0 0;
   font-size: 12px;
-  color: #999;
+  color: var(--color-text-muted);
 }
 
 .results-section {
@@ -566,14 +575,15 @@ onMounted(loadDrafts)
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 12px;
   border-radius: 8px;
+  background: var(--color-surface-raised);
   text-align: center;
-  min-height: 140px;
+  min-height: 80px;
 }
 
 .score-number {
-  font-size: 48px;
+  font-size: 36px;
   font-weight: 700;
   line-height: 1;
   margin-bottom: 8px;
@@ -587,7 +597,7 @@ onMounted(loadDrafts)
 .score-item {
   padding: 12px;
   border-radius: 6px;
-  background: #f5f5f5;
+  background: var(--color-surface-raised);
 }
 
 .score-item-label {
@@ -604,7 +614,7 @@ onMounted(loadDrafts)
 
 .score-item-hint {
   font-size: 12px;
-  color: #999;
+  color: var(--color-text-muted);
   margin-top: 4px;
 }
 
@@ -627,7 +637,7 @@ onMounted(loadDrafts)
 
 .matching-count {
   font-size: 12px;
-  color: #666;
+  color: var(--color-text-secondary);
 }
 
 .matching-snippets {
@@ -637,18 +647,18 @@ onMounted(loadDrafts)
 .snippet {
   padding: 8px;
   margin: 4px 0;
-  background: #fef2f2;
-  border-left: 2px solid #d32f2f;
+  background: var(--color-surface-raised);
+  border-left: 2px solid var(--color-danger);
   border-radius: 2px;
   font-size: 12px;
-  color: #666;
+  color: var(--color-text-secondary);
 }
 
 /* 重合片段 */
 .segment-row {
   padding: 10px 12px;
   margin-bottom: 8px;
-  background: #fafafa;
+  background: var(--color-surface-raised);
   border-radius: 4px;
 }
 
@@ -658,17 +668,26 @@ onMounted(loadDrafts)
   justify-content: space-between;
   margin-bottom: 6px;
   font-size: 12px;
-  color: #666;
+  color: var(--color-text-secondary);
 }
 
 .segment-row-line {
   margin: 0;
   font-size: 13px;
   line-height: 1.7;
-  color: #333;
+  color: var(--color-text-primary);
 }
 
 .segment-row-muted {
-  color: #888;
+  color: var(--color-text-muted);
+}
+@media (max-width: 600px) {
+  .originality-content { padding: 12px; }
+  .page-header h1 { font-size: 20px; }
+  .similar-article-meta { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .results-section { animation: none; }
 }
 </style>

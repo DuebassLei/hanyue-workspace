@@ -75,7 +75,7 @@ def image_capabilities(db, user_id: str) -> dict:
     return {
         "available": bool(provider),
         "modelCode": provider.get("modelCode") if provider else None,
-        "ratios": [ratio for ratio in RATIOS if ratio in sizes],
+        "ratios": [ratio for ratio in RATIOS if ratio in sizes] + [ratio for ratio in sizes if ratio not in RATIOS],
     }
 
 
@@ -166,7 +166,7 @@ def _insert_after(data: dict, anchor_id: str, block: dict) -> bool:
 
 
 def generate_cover(db, row, data: dict, *, user_id: str, prompt: str | None, aspect_ratio: str | None) -> None:
-    ratio = _ratio(aspect_ratio, "2.35:1")
+    ratio = (aspect_ratio or "").strip() or "2.35:1"
     text = (prompt or "").strip() or _default_cover_prompt(data)
     base = {
         "jobId": None,

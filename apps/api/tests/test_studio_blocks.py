@@ -13,6 +13,19 @@ def test_split_markdown_keeps_fence_blank_lines_and_extracts_title():
     assert parsed["blocks"][1].startswith("```py")
 
 
+def test_edit_markdown_keeps_unchanged_blocks_and_image_identity():
+    article = AB.build_article(markdown="# 原标题\n\n第一段。\n\n![旧图注](asset://abc)\n\n末段。")
+    _, image, last = article["blocks"]
+    image["inserted_diagram_id"] = "diagram"
+    article["inline_diagrams"] = [{"id": "diagram", "assetId": "abc"}]
+    AB.edit_markdown(article, "# 新标题\n\n改写。\n\n![新图注](asset://abc)\n\n末段。")
+    assert article["title"] == "新标题"
+    assert article["blocks"][1]["id"] == image["id"]
+    assert article["blocks"][1]["inserted_diagram_id"] == "diagram"
+    assert article["blocks"][2] is last
+    assert article["inline_diagrams"][0]["id"] == "diagram"
+
+
 def test_block_kind_and_checkable():
     assert AB.block_kind("```py\nx\n```") == "code"
     assert AB.block_kind("## 小标题") == "heading"

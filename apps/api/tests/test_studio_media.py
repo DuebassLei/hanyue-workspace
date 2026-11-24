@@ -201,6 +201,34 @@ def test_cover_generate_enqueues_and_marks_running(client, monkeypatch):
     assert payload["prompt"] == "抽象几何封面"
 
 
+def test_custom_ratio_is_exact_for_cover_and_does_not_change_inline(client, monkeypatch):
+    from app.services import image_provider
+
+    headers, article, _uid = _client_with_article(client, "media-cover-custom-ratio")
+    _provider(monkeypatch, True)
+    monkeypatch.setattr(image_provider, "resolve_image_provider", lambda *args: {
+        "modelCode": "test", "supportedImageSizes": {"5:4": "1250x1000"},
+    })
+    calls = _fake_enqueue(monkeypatch)
+    cover_url = _article_url(article["id"], "cover/generate")
+    unsupported = client.post(cover_url, json={"aspectRatio": "10:8"}, headers=headers)
+    assert unsupported.status_code == 400
+    assert unsupported.json()["code"] == "unsupported_aspect_ratio"
+    assert not calls
+
+    cover = client.post(cover_url, json={"aspectRatio": " 5:4 "}, headers=headers)
+    assert cover.status_code == 200, cover.text
+    assert cover.json()["cover"]["aspectRatio"] == "5:4"
+    assert calls[0]["payload"]["aspectRatio"] == "5:4"
+    assert calls[0]["payload"]["exactAspect"] is True
+
+    block_id = article["blocks"][0]["id"]
+    inline = client.post(_article_url(article["id"], "inline/generate"), json={"blockId": block_id, "aspectRatio": "5:4"}, headers=headers)
+    assert inline.status_code == 400
+    assert inline.json()["code"] == "invalid_aspect_ratio"
+    assert len(calls) == 1
+
+
 def test_cover_generate_defaults_prompt_from_title_and_body(client, monkeypatch):
     headers, article, _uid = _client_with_article(client, "media-cover-prompt")
     _provider(monkeypatch, True)

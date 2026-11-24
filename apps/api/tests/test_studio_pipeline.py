@@ -42,6 +42,20 @@ def test_create_article_splits_blocks_and_lists_state(client):
     assert state["settings"]["zhuqueConfigured"] is False
 
 
+def test_markdown_save_updates_original_and_rejects_stale_source(client):
+    headers, article = _client_with_article(client, "studio-edit-source")
+    url = f"/api/v1/studio/articles/{article['id']}/markdown"
+    original = client.get(url, headers=headers).json()["markdown"]
+    modified = original.replace("# 原标题", "# 新标题") + "\n新增段落。\n"
+    saved = client.patch(url, headers=headers, json={"markdown": modified, "expectedMarkdown": original})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["title"] == "新标题"
+    assert saved.json()["blocks"][0]["id"] == article["blocks"][0]["id"]
+    assert client.get(url, headers=headers).json()["markdown"] == modified
+    stale = client.patch(url, headers=headers, json={"markdown": original, "expectedMarkdown": original})
+    assert stale.status_code == 409
+
+
 def test_patch_block_splits_paragraphs_and_rejects_stale_edit(client):
     headers, article = _client_with_article(client, "studio-patch")
     block = article["blocks"][0]
@@ -552,6 +566,19 @@ def test_draft_route_accepts_empty_body_and_style(client, monkeypatch):
     assert response.status_code == 200, response.text
     assert response.json()["writerStyle"] == "review"
     assert len(seen) == 2
+
+
+def test_empty_only_draft_does_not_rewrite_existing_body(client, monkeypatch):
+    from app.services import studio_pipeline as SP
+
+    def unexpected_generation(*args, **kwargs):
+        raise AssertionError("已有正文不应启动初稿流水线")
+
+    monkeypatch.setattr(SP.PIPELINE, "draft", unexpected_generation)
+    headers, article = _client_with_article(client, "studio-draft-empty-only")
+    response = client.post(f"/api/v1/studio/articles/{article['id']}/draft?emptyOnly=true", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["blocks"] == article["blocks"]
 
 
 def test_draft_uses_selected_writer_style(client, monkeypatch):

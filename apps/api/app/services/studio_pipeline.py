@@ -21,6 +21,8 @@ import re
 import threading
 from pathlib import Path
 
+from sqlalchemy import select, text as sql_text
+
 from .. import models
 from ..core.db import SessionLocal
 from . import ai_gateway, article_blocks as AB, article_quality as AQ, studio_repo, wechat_layout_engine
@@ -315,16 +317,20 @@ class StudioPipeline:
 
     # ---- 写正文 ----
 
-    def draft(self, article_id: str) -> dict:
-        return self.jobs.start(article_id, "draft", "写正文", lambda job: self._draft(article_id, job))
+    def draft(self, article_id: str, *, empty_only: bool = False) -> dict:
+        return self.jobs.start(
+            article_id, "draft", "写正文", lambda job: self._draft(article_id, job, empty_only=empty_only)
+        )
 
     def draft_now(self, article_id: str) -> None:
         self.jobs.run_now("draft", "写正文", lambda job: self._draft(article_id, job))
 
-    async def _draft(self, article_id: str, job: dict) -> None:
+    async def _draft(self, article_id: str, job: dict, *, empty_only: bool = False) -> None:
         with SessionLocal() as db:
             row = _session_article(db, article_id)
             data = studio_repo.row_to_dict(row)
+            if empty_only and data["blocks"]:
+                return
             owner = row.owner_user_id
             style = data.get("writer_style") or DEFAULT_WRITER_STYLE
             # 人设（writer）+ 本次风格档 + 输出硬规则，三层各管一件事
@@ -332,12 +338,24 @@ class StudioPipeline:
         user = f"选题：{data.get('topic') or '（作者没有写选题，请从素材里提炼）'}\n\n素材：\n{data.get('material') or '（没有额外素材）'}"
         text = await _model(owner, system, user, "studio_draft")
         with SessionLocal() as db:
-            row = _session_article(db, article_id)
+            if empty_only:
+                # 模型等待期间可能有正文写入，持锁重看，不覆盖已存在的段落。
+                if db.get_bind().dialect.name == "sqlite":
+                    db.execute(sql_text("BEGIN IMMEDIATE"))
+                row = db.scalar(select(models.StudioArticle).where(models.StudioArticle.id == article_id).with_for_update())
+                if row is None:
+                    return
+            else:
+                row = _session_article(db, article_id)
             data = studio_repo.row_to_dict(row)
-            # 模型成功后才留快照：失败的话不留空记录；快照取的是覆盖前的最新一版
             if data["blocks"]:
+                if empty_only:
+                    return
+                # 模型成功后才留快照，快照取覆盖前的最新一版。
                 studio_repo.snapshot(db, row, data, "重写正文")
             AB.set_body(data, clean_markdown(text))
+            if empty_only and not data["blocks"]:
+                raise PipelineError("模型没有给出可用的正文", 502)
             data["notice"] = None
             studio_repo.save(db, row, data)
             db.commit()

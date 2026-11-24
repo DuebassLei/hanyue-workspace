@@ -87,6 +87,23 @@ const allSelected = computed(
   () => rows.value.length > 0 && selected.value.length === rows.value.length,
 )
 const selectedCount = computed(() => selected.value.length)
+const viewMode = ref('board')
+// 看板只组织当前已加载的结果，不改变服务端筛选或发布状态。
+const boardGroups = computed(() => {
+  const groups = [
+    { id: 'draft', label: '草稿', statuses: ['draft', 'none'], rows: [] },
+    { id: 'pending', label: '待处理', statuses: ['pending_review', 'approved'], rows: [] },
+    { id: 'progress', label: '进行中', statuses: ['queued', 'publishing'], rows: [] },
+    { id: 'attention', label: '需处理', statuses: ['failed', 'needs_attention', 'cancelled'], rows: [] },
+    { id: 'published', label: '已发布', statuses: ['succeeded'], rows: [] },
+  ]
+  for (const row of rows.value) {
+    const status = publishStatusById.value[row.id] || 'draft'
+    const group = groups.find((item) => item.statuses.includes(status)) || groups[0]
+    group.rows.push(row)
+  }
+  return groups
+})
 
 function isoDaysAgo(days) {
   return new Date(Date.now() - days * 86400000).toISOString()
@@ -231,22 +248,6 @@ async function enterStudio(row) {
   }
 }
 
-async function openLayout(row) {
-  rowBusyId.value = row.id
-  try {
-    const detail = await api.get(`/content/${encodeURIComponent(row.id)}`)
-    const versionId = detail.item?.currentVersionId || detail.versions?.[0]?.id
-    await router.push({
-      path: '/wechat-layout',
-      query: { articleId: row.id, ...(versionId ? { versionId } : {}) },
-    })
-  } catch (err) {
-    toast(`无法打开排版预览：${err.message}`, 'error')
-  } finally {
-    rowBusyId.value = ''
-  }
-}
-
 async function createArticle() {
   creating.value = true
   try {
@@ -312,21 +313,12 @@ async function batchArchive(archived) {
 </script>
 
 <template>
-  <div class="page">
-    <header class="page-head">
-      <div>
-        <h1 class="page-title">文章管理</h1>
-        <p class="page-sub">我的稿件：服务端检索、筛选与分页，点开直接进成稿台按段落改。</p>
-      </div>
-      <n-button type="primary" size="small" :loading="creating" @click="createArticle">
-        + 新建稿件
-      </n-button>
-    </header>
-
-    <section class="card">
+  <div class="page articles-page">
+    <section class="card articles-library" aria-label="稿件列表">
       <div class="articles-toolbar">
         <div class="articles-batch">
-          <span class="articles-selected">已选 {{ selectedCount }} 篇</span>
+          <n-button type="primary" size="small" :loading="creating" @click="createArticle">+ 新建稿件</n-button>
+          <span class="articles-selected">已加载 {{ rows.length }} 篇 · 已选 {{ selectedCount }} 篇</span>
           <n-button
             size="small"
             tertiary
@@ -347,6 +339,10 @@ async function batchArchive(archived) {
           </n-button>
         </div>
         <div class="articles-sort">
+          <div class="articles-view-toggle" role="group" aria-label="显示方式">
+            <button type="button" :class="{ 'is-active': viewMode === 'board' }" :aria-pressed="viewMode === 'board'" @click="viewMode = 'board'">看板</button>
+            <button type="button" :class="{ 'is-active': viewMode === 'table' }" :aria-pressed="viewMode === 'table'" @click="viewMode = 'table'">表格</button>
+          </div>
           <span class="articles-sort-label">排序</span>
           <n-select
             v-model:value="filters.sort"
@@ -399,7 +395,31 @@ async function batchArchive(archived) {
 
       <p v-if="errorText" class="articles-error">{{ errorText }}</p>
 
-      <div class="articles-table-wrap">
+      <p v-if="publishDisabledReason && viewMode === 'board'" class="articles-board-hint">{{ publishDisabledReason }}；状态不可见，稿件暂显示在草稿列。</p>
+      <div v-if="viewMode === 'board' && rows.length" class="articles-board" aria-label="稿件状态看板">
+        <section v-for="group in boardGroups" :key="group.id" class="articles-board-col">
+          <header class="articles-board-header">
+            <span class="articles-board-dot" :class="`is-${group.id}`" aria-hidden="true" />
+            <h3>{{ group.label }}</h3><span>{{ group.rows.length }}</span>
+          </header>
+          <div class="articles-board-list">
+            <article v-for="row in group.rows" :key="row.id" class="articles-board-card" :class="{ 'is-selected': selected.includes(row.id), 'is-archived': row.archived }">
+              <div class="articles-card-top">
+                <n-checkbox :checked="selected.includes(row.id)" :aria-label="`选择稿件 ${row.title}`" @update:checked="(checked) => toggleSelect(row.id, checked)" />
+                <span v-if="row.archived" class="articles-archived-tag">已归档</span>
+              </div>
+              <button class="articles-card-title" type="button" @click="enterStudio(row)">{{ row.title }}</button>
+              <div class="articles-card-meta"><span>v{{ row.versionNo || 1 }}</span><span>{{ dateLabel(row.updatedAt) }}</span></div>
+              <div class="articles-card-actions">
+                <n-button size="tiny" quaternary :loading="rowBusyId === row.id" @click="enterStudio(row)">进入成稿台</n-button>
+                <n-button size="tiny" quaternary :disabled="rowBusyId === row.id" @click="toggleArchive(row)">{{ row.archived ? '恢复' : '归档' }}</n-button>
+                <n-button size="tiny" type="error" quaternary :disabled="rowBusyId === row.id" @click="deleteRow(row)">删除</n-button>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+      <div v-show="viewMode === 'table' || !rows.length" class="articles-table-wrap">
         <table class="articles-table">
           <thead>
             <tr>
@@ -455,14 +475,6 @@ async function batchArchive(archived) {
                 <n-button
                   size="tiny"
                   tertiary
-                  :loading="rowBusyId === row.id"
-                  @click="openLayout(row)"
-                >
-                  排版预览
-                </n-button>
-                <n-button
-                  size="tiny"
-                  tertiary
                   :disabled="rowBusyId === row.id"
                   @click="toggleArchive(row)"
                 >
@@ -498,19 +510,108 @@ async function batchArchive(archived) {
 </template>
 
 <style scoped>
+.articles-page {
+  --library-line: var(--color-border);
+  min-width: 0;
+}
+.articles-head {
+  position: relative;
+  align-items: flex-end;
+  gap: 24px;
+  padding: 22px 4px 30px;
+  border-bottom: 1px solid var(--library-line);
+}
+.articles-heading { min-width: 0; }
+.articles-eyebrow,
+.articles-section-kicker,
+.articles-section-index {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .16em;
+}
+.articles-eyebrow span { color: var(--color-accent); margin-right: 6px; font-size: 8px; }
+.articles-head .page-title {
+  margin: 0 0 8px;
+  font-size: 34px;
+  line-height: 1.3;
+  font-weight: 400;
+  letter-spacing: -.015em;
+}
+.articles-title-dot { color: var(--color-accent); }
+.articles-head .page-sub { line-height: 1.7; }
+.articles-library { margin-top: 0; padding: 0; border: 0; background: transparent; box-shadow: none; }
+.articles-view-toggle { display: inline-flex; gap: 2px; padding: 3px; border-radius: 9px; background: var(--color-surface-raised); }
+.articles-view-toggle button { padding: 5px 12px; border: 0; border-radius: 7px; background: transparent; color: var(--color-text-secondary); font: inherit; font-size: 12px; cursor: pointer; }
+.articles-view-toggle button.is-active { background: var(--color-surface); color: var(--color-text-primary); box-shadow: var(--shadow-sm); }
+.articles-board { display: grid; grid-template-columns: repeat(5, minmax(190px, 1fr)); gap: 10px; align-items: start; min-width: 0; max-width: 100%; overflow-x: auto; padding-bottom: 8px; }
+.articles-board-col { min-width: 0; min-height: 240px; padding: 10px; border-radius: 14px; background: var(--color-surface-raised); }
+.articles-board-header { display: flex; align-items: center; gap: 7px; padding: 2px 4px 10px; color: var(--color-text-muted); font-size: 12px; }
+.articles-board-header h3 { margin: 0; color: var(--color-text-primary); font-size: 13px; font-weight: 500; }
+.articles-board-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-muted); }
+.articles-board-dot.is-pending { background: var(--color-warning); }
+.articles-board-dot.is-progress { background: var(--color-info); }
+.articles-board-dot.is-attention { background: var(--color-danger); }
+.articles-board-dot.is-published { background: var(--color-success); }
+.articles-board-list { display: flex; flex-direction: column; gap: 8px; }
+.articles-board-card { padding: 10px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); box-shadow: var(--shadow-sm); }
+.articles-board-card.is-selected { border-color: var(--color-accent); }
+.articles-card-top { display: flex; align-items: center; justify-content: space-between; min-height: 20px; }
+.articles-card-title { display: block; width: 100%; margin: 8px 0; padding: 0; border: 0; background: none; color: var(--color-text-primary); font: inherit; font-size: 13px; font-weight: 500; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.articles-card-title:hover { color: var(--color-accent); }
+.articles-board-card.is-archived .articles-card-title { color: var(--color-text-muted); text-decoration: line-through; }
+.articles-card-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--color-text-muted); font-size: 11px; }
+.articles-card-actions { display: flex; flex-wrap: wrap; gap: 2px; min-width: 0; margin-top: 8px; }
+.articles-card-actions :deep(.n-button) { flex: 0 0 auto; max-width: 100%; }
+.articles-board-hint { color: var(--color-text-muted); font-size: 12px; }
+.articles-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 24px;
+}
+.articles-section-head h2 {
+  margin: 8px 0 5px;
+  color: var(--color-text-primary);
+  font-size: 20px;
+  letter-spacing: .02em;
+}
+.articles-section-head h2 span {
+  display: inline-flex;
+  margin-left: 8px;
+  padding: 3px 8px;
+  border-radius: 20px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: 11px;
+  vertical-align: middle;
+}
+.articles-section-head p:not(.articles-section-kicker) {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+.articles-section-index { padding-top: 5px; white-space: nowrap; }
 .articles-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
   flex-wrap: wrap;
+  padding: 14px 16px;
   margin-bottom: var(--space-3);
+  border: 1px solid var(--library-line);
+  border-radius: 10px;
+  background: var(--color-surface-raised);
 }
 .articles-batch,
 .articles-sort {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  flex-wrap: wrap;
 }
 .articles-selected,
 .articles-sort-label {
@@ -541,10 +642,10 @@ async function batchArchive(archived) {
   cursor: pointer;
 }
 .articles-chips button.is-active {
-  border-color: var(--color-border);
-  background: var(--color-surface-raised);
-  color: var(--color-text-primary);
-  font-weight: 600;
+  border-color: transparent;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 700;
 }
 .articles-filters {
   display: flex;
@@ -596,10 +697,11 @@ async function batchArchive(archived) {
   text-align: left;
 }
 .articles-table td {
-  padding: 7px 10px;
+  padding: 9px 10px;
   border-top: 1px solid var(--color-border);
   vertical-align: middle;
 }
+.articles-table tbody tr:hover td { background: var(--color-surface-raised); }
 .articles-table tr.is-selected td {
   background: var(--color-surface-raised);
 }
@@ -672,5 +774,13 @@ async function batchArchive(archived) {
   font-size: var(--font-xs);
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
+}
+@media (max-width: 680px) {
+  .articles-head { align-items: flex-start; flex-direction: column; padding-top: 12px; }
+  .articles-library { padding: 18px 14px; }
+  .articles-section-index { display: none; }
+  .articles-toolbar { align-items: flex-start; }
+  .articles-table-wrap { overflow-x: auto; }
+  .articles-table { min-width: 760px; }
 }
 </style>

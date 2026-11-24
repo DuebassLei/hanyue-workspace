@@ -19,6 +19,7 @@ export const studioApi = {
   remove: (id) => api.del(base(id)),
   duplicate: (id) => api.post(`${base(id)}/duplicate`, {}),
   markdown: (id) => api.get(`${base(id)}/markdown`),
+  saveMarkdown: (id, markdown, expectedMarkdown) => api.patch(`${base(id)}/markdown`, { markdown, expectedMarkdown }),
   exportToContent: (id) => api.post(`${base(id)}/export`, {}),
 
   chat: (id, message) => api.post(`${base(id)}/chat`, { message }),
@@ -33,6 +34,7 @@ export const studioApi = {
 
   // style 为空用稿件当前风格；带了就是换风格重写
   draft: (id, style) => api.post(`${base(id)}/draft`, style ? { style } : {}),
+  draftIfEmpty: (id) => api.post(`${base(id)}/draft?emptyOnly=true`, {}),
   setWriterStyle: (id, style) => api.post(`${base(id)}/writer-style`, { style }),
   fixAll: (id) => api.post(`${base(id)}/fix-all`, {}),
   stop: (id) => api.post(`${base(id)}/job/stop`, {}),

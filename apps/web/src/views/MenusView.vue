@@ -173,11 +173,11 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="menus-page">
+  <section class="page menus-page">
     <header class="page-head">
       <div>
-        <h1>菜单管理</h1>
-        <p>
+        <h1 class="page-title">菜单管理</h1>
+        <p class="page-sub">
           侧栏由这里的数据生成。改动立即影响所有用户；页面类型的「标识」必须等于前端路由名，
           否则点击不会跳转。
         </p>
@@ -282,11 +282,8 @@ onMounted(load)
 </template>
 
 <style scoped>
-.menus-page { padding: 24px 28px 40px; }
-.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-.page-head h1 { margin: 0 0 6px; font-size: 20px; font-weight: 500; color: var(--color-text-primary); }
-.page-head p { margin: 0; font-size: 13px; color: var(--color-text-muted); max-width: 620px; line-height: 1.6; }
-.table { border: 1px solid var(--color-border); border-radius: 12px; overflow: hidden; background: var(--color-surface); }
+.page-head p { max-width: 620px; line-height: 1.6; }
+.table { border: 1px solid var(--color-border); border-radius: var(--radius-md); overflow: hidden; background: var(--color-surface); }
 .table-head,
 .table-row {
   display: grid;

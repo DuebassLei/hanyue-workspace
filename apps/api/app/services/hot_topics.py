@@ -824,15 +824,11 @@ def _new_draft(
         owner_user_id=user.id,
         title=cluster.title[:200],
         type="article",
+        draft_title=cluster.title[:200],
+        draft_body="",
     )
     db.add(item)
     db.flush()
-    version = models.ContentVersion(
-        content_item_id=item.id, version_no=1, title=item.title, body=""
-    )
-    db.add(version)
-    db.flush()
-    item.current_version_id = version.id
     return item
 
 

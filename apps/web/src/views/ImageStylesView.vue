@@ -32,6 +32,7 @@ onMounted(go)
 <style scoped>
 .redirect-shell {
   max-width: 720px;
-  margin: 48px auto;
+  margin: var(--space-6) auto;
+  padding: 0 var(--space-3);
 }
 </style>

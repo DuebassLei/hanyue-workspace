@@ -620,6 +620,10 @@ onBeforeUnmount(() => {
   text-align: left;
   cursor: pointer;
 }
+.style-card:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+}
 .style-card.is-active {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 1px var(--color-accent);

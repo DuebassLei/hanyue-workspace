@@ -27,9 +27,6 @@ services:
       - "127.0.0.1:${DEV_PG_PORT:-5433}:5432"
     volumes:
       - pgdata-dev:/var/lib/postgresql/data
-      # 官方 entrypoint 只在数据卷为空时执行（首次 initdb 用）；
-      # 之后的脚本变更由下方 db-init 服务按内容哈希自动重跑，不必 reset。
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test:
         ["CMD-SHELL", "pg_isready -U ${DEV_POSTGRES_USER:-hanyue} -d ${DEV_POSTGRES_DB:-hanyue}"]

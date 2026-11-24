@@ -11,7 +11,7 @@
  * 不做乐观更新，避免和后台改稿互相覆盖。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { NButton, NInput, NModal, NPopover, NSelect } from 'naive-ui'
 import PetChatPanel from '../components/PetChatPanel.vue'
 import { studioApi, uploadReport } from '../api/studio'
@@ -42,15 +42,26 @@ const listError = ref('')
 const articleQuery = ref('')
 const createError = ref('')
 const error = ref('')
-const tab = ref('quality')
+const tab = ref('layout')
 const mediaSection = ref('cover')
 watch(mediaSection, (value) => {
   if (value !== 'svg') sourceSelection.stop()
 })
 const showPublish = ref(false)
-const petOpen = ref(false)
-const petMode = ref('chat')
-const message = ref('')
+const petMode = ref('create')
+const assistantApplyBusy = ref(false)
+const assistantNarrow = ref(false)
+const assistantMounted = ref(false)
+const assistantEntry = ref(null)
+const assistantMobileEntry = ref(null)
+const assistantPanel = ref(null)
+const assistantClose = ref(null)
+const previousSideTab = ref('layout')
+const assistantOpen = computed(() => tab.value === 'assistant')
+const sideTab = computed(() => assistantNarrow.value && assistantOpen.value ? previousSideTab.value : tab.value)
+const assistantDrawer = computed(() => assistantNarrow.value && assistantOpen.value)
+let assistantOpener = null
+let assistantMedia = null
 const actionBusy = ref('')
 // 同一时刻只展开一段：参考项目也是单段编辑，多段同时挂 textarea 会互相抢焦点，
 // 而且草稿已经落到本机，没必要用「同时开几段」来保住修改。
@@ -68,9 +79,62 @@ const reportText = ref('')
 const qualityKey = ref('')
 const qualityEndpoint = ref('')
 const reportFile = ref(null)
-// 中间栏两种查看方式：段号稿纸（改稿）/ 公众号排版预览（定稿后看效果）。
-// 放在同一页而不是跳去「排版工作台」，是因为排版要跟着稿件走，跳走再回来容易丢上下文。
 const sheetMode = ref('paper')
+const sourceText = ref('')
+const sourceOriginal = ref(null)
+const sourceLoading = ref(false)
+const sourceError = ref('')
+const sourceDirty = computed(() => sourceOriginal.value !== null && sourceText.value !== sourceOriginal.value)
+let sourceRequest = 0
+
+async function openSource() {
+  sheetMode.value = 'source'
+  if (sourceDirty.value) return
+  const id = article.value?.id
+  const seq = ++sourceRequest
+  sourceLoading.value = true
+  sourceOriginal.value = null
+  sourceError.value = ''
+  try {
+    const { markdown } = await studioApi.markdown(id)
+    if (seq !== sourceRequest || article.value?.id !== id) return
+    sourceText.value = markdown
+    sourceOriginal.value = markdown
+  } catch (err) {
+    if (seq === sourceRequest) sourceError.value = err.message || '无法加载源码'
+  } finally {
+    if (seq === sourceRequest) sourceLoading.value = false
+  }
+}
+
+function reloadSource() {
+  if (sourceDirty.value && !window.confirm('确定放弃未保存的源码修改？')) return
+  sourceOriginal.value = null
+  return openSource()
+}
+
+function saveSource() {
+  if (editingLocked.value || unsavedCount.value || !sourceDirty.value) return
+  return run('source', async () => {
+    try {
+      sourceError.value = ''
+      const snapshot = await studioApi.saveMarkdown(article.value.id, sourceText.value, sourceOriginal.value)
+      sourceText.value = snapshotMarkdown(snapshot)
+      sourceOriginal.value = sourceText.value
+      toast('Markdown 源码已保存', 'success')
+      return snapshot
+    } catch (err) {
+      sourceError.value = err.message || '无法保存源码'
+      throw err
+    }
+  }, { poll: false })
+}
+
+function canUseSavedDraft() {
+  if (!sourceDirty.value && !unsavedCount.value) return true
+  toast('请先保存 Markdown 源码或段落修改。', 'warning')
+  return false
+}
 const layoutOptions = ref({})
 const selectedBlockId = ref('')
 const getPaperBlocks = () => article.value?.blocks || []
@@ -84,11 +148,11 @@ const svgSourceIds = computed(() => {
   return getPaperBlocks().some((block) => block.id === selectedBlockId.value) ? [selectedBlockId.value] : []
 })
 const visiblePickedIds = computed(() => {
-  if (tab.value === 'media') return svgSourceIds.value
-  if (tab.value === 'quality' && detectScope.value === 'selection') return detectBlockIds.value
+  if (sideTab.value === 'media') return svgSourceIds.value
+  if (sideTab.value === 'quality' && detectScope.value === 'selection') return detectBlockIds.value
   return []
 })
-watch(tab, (value) => {
+watch(sideTab, (value) => {
   if (value !== 'media') sourceSelection.stop()
   if (value !== 'quality') detectSelection.stop()
 })
@@ -156,7 +220,7 @@ const outline = computed(() =>
     .map((block, index) => ({ block, number: index + 1 }))
     .filter((item) => item.block.kind === 'heading'),
 )
-// 就绪度前端算：接口只给正文/质检/标题/封面/横幅五项，不额外多一次请求
+// 就绪度前端算：接口只给正文/检测/标题/封面/横幅五项，不额外多一次请求
 const readiness = computed(() => {
   const current = article.value
   if (!current) return { items: [], done: 0, total: 5 }
@@ -164,7 +228,7 @@ const readiness = computed(() => {
   const items = [
     { id: 'body', label: '正文', done: Boolean(current.blocks?.length) },
     { id: 'title', label: '标题', done: Boolean(current.title) },
-    { id: 'quality', label: '质检', done: Boolean(current.zhuque?.round) && !pending },
+    { id: 'quality', label: '检测', done: Boolean(current.zhuque?.round) && !pending },
     { id: 'cover', label: '封面', done: Boolean(current.cover?.assetId || current.cover?.id) },
     { id: 'banner', label: '横幅', done: Boolean(current.banners?.[current.bannerStyle]?.spec) },
   ]
@@ -227,6 +291,7 @@ async function openArticle(id) {
     showArticles.value = false
     return true
   }
+  if (sourceDirty.value && !window.confirm('Markdown 源码尚未保存，确定要切换稿件并放弃修改？')) return false
   if (storageFailed.value && unsavedCount.value && !window.confirm('本地暂存失败，切换稿件可能丢失未保存修改。仍要切换吗？')) return false
   loading.value = true
   error.value = ''
@@ -249,6 +314,16 @@ async function openArticle(id) {
 }
 
 function activateArticle(next) {
+  if (article.value?.id !== next.id) {
+    petMode.value = 'create'
+    showCreate.value = false
+    sourceRequest += 1
+    sourceOriginal.value = null
+    sourceText.value = ''
+    sourceLoading.value = false
+    sourceError.value = ''
+    if (sheetMode.value === 'source') sheetMode.value = 'paper'
+  }
   stopPolling()
   applySnapshot(next)
   layoutOptions.value = { ...(next.layoutOptions || {}) }
@@ -317,9 +392,115 @@ function stopPolling() {
   timer = null
 }
 
-function openPet(mode = 'chat') {
-  petMode.value = article.value && !loading.value ? mode : 'tools'
-  petOpen.value = true
+function openPet(mode = petMode.value, event) {
+  if (!assistantOpen.value) {
+    previousSideTab.value = tab.value
+    assistantOpener = event?.currentTarget || null
+  }
+  petMode.value = mode
+  if (mode !== 'tools') assistantMounted.value = true
+  tab.value = 'assistant'
+}
+
+function closeAssistant() {
+  if (!assistantOpen.value) return
+  tab.value = previousSideTab.value
+  nextTick(() => {
+    if (assistantOpen.value) return
+    const entry = assistantNarrow.value ? assistantMobileEntry.value : assistantEntry.value
+    const opener = assistantOpener?.getClientRects().length ? assistantOpener : entry
+    opener?.focus()
+    assistantOpener = null
+  })
+}
+
+function onAssistantKeydown(event) {
+  if (event.key === 'Escape') {
+    event.stopPropagation()
+    closeAssistant()
+    return
+  }
+  if (event.key !== 'Tab' || !assistantDrawer.value) return
+  const buttons = [...assistantPanel.value.querySelectorAll('button, input, textarea, select, a[href], summary, [tabindex]')]
+    .filter((element) => element.tabIndex >= 0 && !element.matches(':disabled') && element.getClientRects().length)
+  const first = buttons[0]
+  const last = buttons.at(-1)
+  if ((event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
+    event.preventDefault()
+    const target = event.shiftKey ? last : first
+    target?.focus()
+  }
+}
+
+function syncAssistantViewport() {
+  assistantNarrow.value = assistantMedia?.matches ?? false
+}
+
+watch(assistantDrawer, (open) => {
+  if (open) assistantClose.value?.focus()
+}, { flush: 'post' })
+
+function snapshotMarkdown(snapshot) {
+  // 与服务端的 to_markdown 序列化一致，以便比较稿纸与 GET 的基线。
+  const parts = [snapshot.front, snapshot.title && `# ${snapshot.title}`].filter(Boolean)
+  return [...parts, ...(snapshot.blocks || []).map((block) => block.text)].join('\n\n') + '\n'
+}
+
+async function applyAssistantMarkdown(markdown) {
+  const body = typeof markdown === 'string'
+    ? markdown.replace(/\r\n?/g, '\n').replace(/^---\n[\s\S]*?\n---(?:\n|$)/, '').trim()
+    : ''
+  if (petMode.value !== 'create' || !body || /^#\s+[^\n]+$/.test(body)) {
+    throw new Error('只有包含正文的初稿才能写入当前稿。')
+  }
+  if (assistantApplyBusy.value) throw new Error('正在核对初稿，请稍候。')
+  const current = article.value
+  const request = articleRequest
+  const routeId = route.query.id
+  const stale = '当前稿件已有新版本，初稿已保留。请重新核对最新正文后再试。'
+  const assertWritable = () => {
+    if (!current?.id || disposed || loading.value || request !== articleRequest || route.query.id !== routeId || article.value?.id !== current.id) {
+      throw new Error('当前稿件已切换或正在加载，不能写入。')
+    }
+    if (sourceDirty.value || unsavedCount.value) throw new Error('请先处理未保存的 Markdown 源码或段落修改。')
+    if (editingBlockId.value) throw new Error('请先完成或关闭当前段落编辑，再写入初稿。')
+    if (job.value || switchingLocked.value) throw new Error('当前稿件有任务正在处理，请稍后再试。')
+    if (petMode.value !== 'create') throw new Error('已切换写作任务，不能写入当前稿。')
+  }
+  assertWritable()
+  const viewedMarkdown = snapshotMarkdown(current)
+  assistantApplyBusy.value = true
+  try {
+    const { markdown: baseline } = await studioApi.markdown(current.id)
+    assertWritable()
+    if (baseline !== viewedMarkdown || baseline !== snapshotMarkdown(article.value)) throw new Error(stale)
+    if (current.blocks?.length && !(await confirm('写入初稿会替换当前标题和正文，可用撤销恢复上一版。确定写入？', '写入当前稿'))) return false
+    assertWritable()
+    if (baseline !== snapshotMarkdown(article.value)) throw new Error(stale)
+    // 只在真正提交时锁稿，确认期间仍检查切稿、编辑和后台任务。
+    actionBusy.value = 'assistant-apply'
+    try {
+      const snapshot = await studioApi.saveMarkdown(current.id, markdown, baseline)
+      if (!disposed && article.value?.id === current.id) {
+        applySnapshot(snapshot)
+        sourceRequest += 1
+        sourceText.value = snapshotMarkdown(snapshot)
+        sourceOriginal.value = sourceText.value
+        sourceLoading.value = false
+        sourceError.value = ''
+        selectedBlockId.value = ''
+        toast('初稿已写入当前稿', 'success')
+      }
+      return true
+    } catch (err) {
+      if (err.status === 409) throw new Error('写入遇到版本冲突或后台任务，初稿已保留。请重新核对当前稿件。')
+      throw err
+    } finally {
+      actionBusy.value = ''
+    }
+  } finally {
+    assistantApplyBusy.value = false
+  }
 }
 
 function openCreateTools() {
@@ -329,6 +510,7 @@ function openCreateTools() {
 }
 
 const createArticle = () => {
+  if (sourceDirty.value && !window.confirm('Markdown 源码尚未保存，确定要新建稿件并放弃修改？')) return
   if (storageFailed.value && unsavedCount.value && !window.confirm('本地暂存失败，新建稿件可能丢失未保存修改。仍要继续吗？')) return
   return run('create', async () => {
     const snapshot = await studioApi.create({
@@ -353,15 +535,6 @@ const createArticle = () => {
 // ---- 对话改稿 ----
 // 改稿最费劲的往往不是「改什么」，而是「怎么说」。常用说法做成胶囊，
 // 点一下就把话说全；详细指令放 title 里，鼠标停一下能看全。
-const CHAT_PRESETS = [
-  { label: '去 AI 味', text: '把 AI 味重的句子改成本人平时说话的样子，意思和信息都不变。' },
-  { label: '开头换场景', text: '开头太像总结，换成一个具体的场景或动作。' },
-  { label: '压短', text: '太长了，压到三句以内，关键信息保留。' },
-  { label: '补例子', text: '补一个具体的例子或数字，别只讲道理。' },
-  { label: '拆段', text: '太挤了，拆成两段，每段只说一件事。' },
-  { label: '收结尾', text: '结尾别喊口号，用一句具体的话收住。' },
-]
-
 /**
  * 对话能不能指定「只改哪一段」：跟着正文当前选中的段落走。
  * 后端拿到的全文本来就带段号，前端把「第 N 段」写进指令，
@@ -374,21 +547,12 @@ const chatAnchor = computed(() => {
   return { number: index + 1, text: plainText(blocks[index].text) }
 })
 
-const chatInput = ref(null)
-
-// 只填不直接发：多数时候要点一下再补半句话，直接发出去反而要撤回重来
-function usePreset(preset) {
-  message.value = preset.text
-  nextTick(() => chatInput.value?.focus())
-}
-
-const sendChat = async (value = message.value) => {
+const sendPetEdit = async (value) => {
   const text = String(value || '').trim()
   if (!text || !article.value || editingLocked.value) return
   const articleId = article.value.id
   const requestId = articleRequest
   const target = chatAnchor.value
-  if (value === message.value) message.value = ''
   actionBusy.value = 'chat'
   error.value = ''
   try {
@@ -406,7 +570,6 @@ const sendChat = async (value = message.value) => {
     if (article.value?.id === articleId && articleRequest === requestId) actionBusy.value = ''
   }
 }
-const sendPetEdit = (text) => sendChat(text)
 
 // 助手新建成稿后直接打开，避免用户还要去列表里翻
 async function onPetCreated(id) {
@@ -639,8 +802,10 @@ function closeNav(event) {
 
 // 只在本机暂存失败时才拦关闭：草稿正常写进 localStorage 的话，
 // 刷新页面不丢修改，没必要每次都弹一个浏览器确认框。
+onBeforeRouteLeave(() => !sourceDirty.value || window.confirm('Markdown 源码尚未保存，确定要离开并放弃修改？'))
+
 function onBeforeUnload(event) {
-  if (!storageFailed.value || !unsavedCount.value) return
+  if (!sourceDirty.value && (!storageFailed.value || !unsavedCount.value)) return
   event.preventDefault()
   event.returnValue = ''
 }
@@ -715,8 +880,9 @@ const exportArticle = () =>
   run(
     'export',
     async () => {
+      if (!canUseSavedDraft()) return null
       const result = await studioApi.exportToContent(article.value.id)
-      toast(`已生成稿件版本：${result.title}`, 'success')
+      toast(`已存档：${result.title}`, 'success')
       return null
     },
     { poll: false },
@@ -749,6 +915,12 @@ function pickReport(event) {
   reportFile.value = event.target.files?.[0] || null
 }
 
+const assistantHotspot = computed(() => {
+  const material = article.value?.material?.trim() || ''
+  if (!material.startsWith('【热点选题】')) return null
+  return { title: material.split('\n', 1)[0].slice('【热点选题】'.length).trim() || article.value.topic, material }
+})
+
 let routeReady = false
 let routePending = false
 let disposed = false
@@ -762,10 +934,14 @@ async function syncRouteArticle(initial = false) {
   }
   // A deep link may point to an archived draft or one outside the list limit.
   if (targetId && !(await openArticle(targetId))) return
-  if (!disposed && route.query.pet === '1' && (!wanted || article.value?.id === wanted) && wanted === (route.query.id || '')) openPet()
+  if (disposed || route.query.pet !== '1' || wanted !== (route.query.id || '') || (wanted && article.value?.id !== wanted)) return
+  openPet('create')
 }
 
 onMounted(async () => {
+  assistantMedia = window.matchMedia?.('(max-width: 1180px)')
+  syncAssistantViewport()
+  assistantMedia?.addEventListener('change', syncAssistantViewport)
   window.addEventListener('beforeunload', onBeforeUnload)
   document.addEventListener('pointerdown', closeNav)
   await loadState()
@@ -789,6 +965,7 @@ onBeforeUnmount(() => {
   articleRequest += 1
   stateRequest += 1
   stopPolling()
+  assistantMedia?.removeEventListener('change', syncAssistantViewport)
   window.removeEventListener('beforeunload', onBeforeUnload)
   document.removeEventListener('pointerdown', closeNav)
 })
@@ -796,13 +973,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="paper-view">
-    <header class="paper-head">
+    <header class="paper-head" :inert="assistantDrawer || undefined">
       <div class="head-actions">
         <NButton size="small" @click="showArticlePicker">选择稿件</NButton>
+        <button ref="assistantMobileEntry" type="button" class="assistant-mobile-entry nav-btn" aria-controls="paper-assistant" :aria-expanded="assistantOpen" @click="openPet(undefined, $event)">创作助手</button>
       </div>
       <div class="head-actions head-actions-end">
         <NButton size="small" type="primary" :disabled="!article || editingLocked" :loading="actionBusy === 'export'" @click="exportArticle">文章存档</NButton>
-        <NButton size="small" :disabled="!article" @click="showPublish = true">发布</NButton>
+        <NButton size="small" :disabled="!article" @click="canUseSavedDraft() && (showPublish = true)">发布</NButton>
       </div>
     </header>
 
@@ -811,6 +989,7 @@ onBeforeUnmount(() => {
       <span>{{ article.notice.text }}</span>
       <button class="text-button" @click="studioApi.clearNotice(article.id).then(applyPanelSnapshot)">知道了</button>
     </div>
+
 
     <NModal v-model:show="showArticles" preset="card" title="选择稿件" class="paper-dialog">
       <div class="article-picker-head">
@@ -847,7 +1026,7 @@ onBeforeUnmount(() => {
               {{ item.chars }} 字 · {{ item.blocks }} 段
               <span v-if="article?.id === item.id" class="badge current">正在编辑</span>
               <span v-if="item.review" class="badge flag">{{ item.review }} 待改</span>
-              <span v-else-if="item.checked" class="badge pass">已质检</span>
+              <span v-else-if="item.checked" class="badge pass">已检测</span>
             </span>
           </button>
         </template>
@@ -855,7 +1034,7 @@ onBeforeUnmount(() => {
     </NModal>
 
     <div class="paper-grid">
-      <main class="paper-column">
+      <main class="paper-column" :inert="assistantDrawer || undefined">
         <template v-if="article">
           <section class="paper-sheet" :class="{ 'with-preview': sheetMode === 'layout' }" :aria-busy="loading">
             <!-- 稿纸头部：标题 + 两种看法 + 这篇稿件的就绪度。
@@ -868,6 +1047,7 @@ onBeforeUnmount(() => {
                   class="sheet-title"
                   size="large"
                   placeholder="给文章一个标题"
+                  :disabled="sheetMode === 'source'"
                   @blur="changeTitle(article.title)"
                 />
                 <div class="view-switch" role="tablist" aria-label="查看方式">
@@ -883,6 +1063,14 @@ onBeforeUnmount(() => {
                     :class="{ active: sheetMode === 'layout' }"
                     @click="openLayout"
                   >排版预览</button>
+                  <button
+                    type="button"
+                    role="tab"
+                    :aria-selected="sheetMode === 'source'"
+                    :class="{ active: sheetMode === 'source' }"
+                    :disabled="switchingLocked"
+                    @click="openSource"
+                  >Markdown 源码<span v-if="sourceDirty" aria-label="未保存"> *</span></button>
                 </div>
               </div>
 
@@ -1062,13 +1250,27 @@ onBeforeUnmount(() => {
               </li>
             </ol>
             <PaperLayoutPreview
-              v-else
+              v-else-if="sheetMode === 'layout'"
               :article="article"
               :options="layoutOptions"
-              :active="sheetMode === 'layout'"
+              active
             />
+            <section v-else class="source-editor" aria-label="Markdown 源码">
+              <div class="source-toolbar">
+                <span v-if="sourceLoading" role="status">正在加载源码…</span>
+                <span v-else-if="unsavedCount" role="status">请先回到段号稿纸保存段落修改。</span>
+                <span v-else-if="sourceDirty" role="status">源码未保存 · 预览仍使用已保存版本</span>
+                <span v-else-if="sourceOriginal !== null">正文及一级标题可直接编辑</span>
+                <div>
+                  <NButton v-if="sourceDirty || (sourceError && sourceOriginal === null)" size="small" :disabled="switchingLocked" @click="reloadSource">{{ sourceDirty ? '放弃修改并重新载入' : '重新载入' }}</NButton>
+                  <NButton size="small" type="primary" :loading="actionBusy === 'source'" :disabled="editingLocked || unsavedCount > 0 || !sourceDirty" @click="saveSource">保存源码</NButton>
+                </div>
+              </div>
+              <p v-if="sourceError" role="alert" class="source-error">{{ sourceError }}</p>
+              <textarea v-if="sourceOriginal !== null" v-model="sourceText" aria-label="编辑 Markdown 源码" :readonly="editingLocked || unsavedCount > 0" spellcheck="false" />
+            </section>
             <p v-if="sheetMode === 'paper' && !article.blocks.length" class="empty">
-              还没有正文。<button type="button" class="text-button" @click="openPet('tools')">打开写作工具</button>
+              还没有正文。<button type="button" class="text-button" @click="openPet('create', $event)">打开助手写初稿</button>
             </p>
           </section>
         </template>
@@ -1082,21 +1284,22 @@ onBeforeUnmount(() => {
       </main>
 
       <aside class="paper-side">
-        <div class="tabs">
+        <div class="tabs" :inert="assistantDrawer || undefined">
           <button
-            v-for="item in [['quality', '质检'], ['layout', '排版'], ['media', '素材']]"
+            v-for="item in [['layout', '排版'], ['media', '素材'], ['quality', '检测']]"
             :key="item[0]"
-            :class="{ active: tab === item[0] }"
+            :class="{ active: sideTab === item[0] }"
+            :aria-pressed="sideTab === item[0]"
             @click="tab = item[0]"
           >{{ item[1] }}</button>
+          <button ref="assistantEntry" type="button" class="assistant-side-entry" :class="{ active: assistantOpen }" aria-controls="paper-assistant" :aria-expanded="assistantOpen" @click="openPet(undefined, $event)">创作助手</button>
         </div>
 
-
-        <section v-if="tab === 'quality'" class="panel quality-panel" aria-label="稿件质检">
+        <section v-if="sideTab === 'quality'" :inert="assistantDrawer || undefined" class="panel quality-panel" aria-label="稿件检测">
           <div class="quality-summary">
             <div class="quality-head">
               <div>
-                <strong>稿件质检</strong>
+                <strong>稿件检测</strong>
                 <span>{{ sourceLabel }}<template v-if="article?.zhuque?.round"> · 第 {{ article.zhuque.round }} 轮</template></span>
               </div>
             </div>
@@ -1110,8 +1313,8 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <div class="qc-row">
-                <span class="qc-label">质检来源</span>
-                <div class="seg" role="group" aria-label="质检来源">
+                <span class="qc-label">检测来源</span>
+                <div class="seg" role="group" aria-label="检测来源">
                   <button :class="{ active: qualitySource === 'auto' }" @click="setQualitySource('auto')">自动</button>
                   <button
                     :class="{ active: qualitySource === 'zhuque' }"
@@ -1143,7 +1346,7 @@ onBeforeUnmount(() => {
               <div><dt>待改段落</dt><dd :class="{ 'needs-work': flagged }">{{ flagged }}</dd></div>
               <div><dt>已改段落</dt><dd>{{ fixedCount }}</dd></div>
             </dl>
-            <p v-else class="quality-empty">{{ article ? '开始检测后，可查看待改段落和质检结果。' : '选择稿件后即可开始检测。' }}</p>
+            <p v-else class="quality-empty">{{ article ? '开始检测后，可查看待改段落和检测结果。' : '选择稿件后即可开始检测。' }}</p>
             <div v-if="flagged || job?.kind === 'fixall'" class="panel-row">
               <NButton size="small" :disabled="!article || !!job || !flagged" :loading="actionBusy === 'fixAll'" @click="fixAll">一键处理 {{ flagged }} 段</NButton>
               <NButton v-if="job?.kind === 'fixall'" size="small" @click="stop">停止</NButton>
@@ -1152,9 +1355,9 @@ onBeforeUnmount(() => {
           <p v-if="article?.zhuque?.note" class="hint">{{ article.zhuque.note }}</p>
           <p v-else-if="article?.zhuque?.source === 'local'" class="hint">这是旧版三维结果，再检测一次后显示六维写作质量。</p>
           <figure v-if="qualityDimensions.length >= 6" class="quality-radar">
-            <figcaption><strong>本地质检维度</strong><span>0–100 分 · 越高越好</span></figcaption>
+            <figcaption><strong>本地检测维度</strong><span>0–100 分 · 越高越好</span></figcaption>
             <QualityRadar :dimensions="qualityDimensions" />
-            <ul class="radar-legend" aria-label="本地质检各维度分数">
+            <ul class="radar-legend" aria-label="本地检测各维度分数">
               <li v-for="dimension in qualityDimensions" :key="dimension.id">
                 <span class="radar-legend-label">{{ dimension.label }}</span>
                 <span class="radar-legend-score">{{ dimension.score }}</span>
@@ -1177,7 +1380,7 @@ onBeforeUnmount(() => {
           </details>
         </section>
 
-        <section v-else-if="tab === 'layout'" class="panel">
+        <section v-else-if="sideTab === 'layout'" :inert="assistantDrawer || undefined" class="panel">
           <PaperLayoutPanel
             :article="article"
             :options="layoutOptions"
@@ -1188,7 +1391,7 @@ onBeforeUnmount(() => {
           />
         </section>
 
-        <section v-else-if="tab === 'media'" class="panel">
+        <section v-else-if="sideTab === 'media'" :inert="assistantDrawer || undefined" class="panel">
           <PaperMediaPanel
             v-model:section="mediaSection"
             :article="article"
@@ -1205,6 +1408,97 @@ onBeforeUnmount(() => {
           />
         </section>
 
+        <div v-if="assistantDrawer" class="assistant-backdrop" aria-hidden="true" @click="closeAssistant" />
+        <section
+          v-show="assistantOpen"
+          id="paper-assistant"
+          ref="assistantPanel"
+          class="panel assistant-panel"
+          :role="assistantDrawer ? 'dialog' : undefined"
+          :aria-modal="assistantDrawer || undefined"
+          aria-label="创作助手"
+          @keydown="onAssistantKeydown"
+        >
+          <div class="assistant-toolbar">
+            <div class="assistant-tasks" role="group" aria-label="写作任务">
+              <button type="button" :aria-pressed="petMode === 'create'" @click="openPet('create')">写初稿</button>
+              <button type="button" :aria-pressed="petMode === 'edit'" :disabled="!article || loading" @click="openPet('edit')">改段落</button>
+              <button type="button" :aria-pressed="petMode === 'tools'" @click="petMode = 'tools'">写作工具</button>
+            </div>
+            <button ref="assistantClose" type="button" class="assistant-close" aria-label="关闭创作助手" title="关闭创作助手" @click="closeAssistant">×</button>
+          </div>
+          <div v-if="assistantMounted" v-show="petMode !== 'tools' && !loading" class="assistant-conversation">
+            <PetChatPanel
+              :key="article?.id || 'new'"
+              :studio-article-id="article?.id"
+              :article-title="article?.title"
+              :mode="petMode === 'edit' ? 'edit' : 'create'"
+              :apply-busy="assistantApplyBusy"
+              :apply-markdown="article?.id ? applyAssistantMarkdown : undefined"
+              :hotspot="assistantHotspot"
+              :chat-turns="article?.chat || []"
+              :chat-busy="editingLocked"
+              :selected-block="chatAnchor"
+              @chat="sendPetEdit"
+              @created="onPetCreated"
+              @clear-selection="selectedBlockId = ''"
+            />
+          </div>
+          <div v-show="petMode === 'tools'" class="pet-tools">
+            <NButton v-if="article && !showCreate" size="small" @click="openCreateTools">新建稿件</NButton>
+            <form v-if="showCreate || !article" class="create-form" @submit.prevent="createArticle">
+              <div v-if="createError" role="alert" class="pet-error">{{ createError }}</div>
+              <div class="tool-section-heading">
+                <strong>新建稿件</strong>
+                <NButton v-if="article" size="tiny" :disabled="actionBusy === 'create'" @click="showCreate = false">返回</NButton>
+              </div>
+              <label class="field"><span>选题</span><NInput v-model:value="createForm.topic" size="small" placeholder="可留空，由模型提炼" /></label>
+              <label class="field"><span>创作素材</span><NInput v-model:value="createForm.material" size="small" type="textarea" :rows="2" placeholder="事实、数字或经历" /></label>
+              <label class="field"><span>导入 Markdown</span><NInput v-model:value="createForm.markdown" size="small" type="textarea" :rows="3" placeholder="粘贴已有正文" /></label>
+              <label class="field">
+                <span>写作风格</span>
+                <NSelect v-model:value="createForm.writerStyle" size="small" :options="styleOptions" :disabled="!styleOptions.length || switchingLocked" />
+              </label>
+              <p v-if="createStyleHint" class="hint">{{ createStyleHint }}</p>
+              <div class="create-actions">
+                <NButton size="small" attr-type="submit" type="primary" :disabled="loading || switchingLocked" :loading="actionBusy === 'create'">
+                  {{ createForm.markdown.trim() ? '导入稿件' : '让模型写正文' }}
+                </NButton>
+              </div>
+            </form>
+            <template v-else>
+              <section class="assistant-tool-section">
+                <label class="field">
+                  <span>写作风格</span>
+                  <NSelect :value="writerStyle" size="small" :options="styleOptions" :disabled="editingLocked || !styleOptions.length" @update:value="changeWriterStyle" />
+                </label>
+                <p v-if="writerStyleHint" class="hint">{{ writerStyleHint }}</p>
+                <div class="create-actions">
+                  <NButton size="small" :disabled="editingLocked || !styleOptions.length" :loading="actionBusy === 'draft'" @click="draftArticle">
+                    {{ article.blocks?.length ? '按这个风格重写' : '让模型写正文' }}
+                  </NButton>
+                </div>
+              </section>
+              <section class="assistant-tool-section">
+                <div class="tool-section-heading">
+                  <strong>候选标题</strong>
+                  <NButton size="small" :disabled="editingLocked || !article.blocks?.length" :loading="actionBusy === 'titles'" @click="regenTitles">
+                    {{ article.titles?.length ? '重新出 5 个' : '生成候选标题' }}
+                  </NButton>
+                </div>
+                <ul v-if="article.titles?.length" class="title-list">
+                  <li v-for="(item, index) in article.titles" :key="index" :class="{ active: item.text === article.title }">
+                    <button type="button" class="title-pick" :aria-current="item.text === article.title ? 'true' : undefined" :disabled="editingLocked || item.text === article.title" @click="pickTitle(item.text)">
+                      <span>{{ item.text }}</span><em v-if="item.text === article.title">当前</em><em v-else-if="item.recommended">推荐</em>
+                    </button>
+                    <p v-if="item.hook || item.reason" class="hint">{{ [item.hook, item.reason].filter(Boolean).join(' · ') }}</p>
+                  </li>
+                </ul>
+                <p v-else class="hint">{{ article.blocks?.length ? '还没有候选标题。' : '有正文后可以生成候选标题。' }}</p>
+              </section>
+            </template>
+          </div>
+        </section>
       </aside>
       <NModal v-model:show="showPublish" preset="card" title="发布" class="publish-modal" :style="{ width: 'min(440px, calc(100vw - 32px))' }">
         <PaperPublishPanel
@@ -1215,170 +1509,22 @@ onBeforeUnmount(() => {
         />
       </NModal>
     </div>
-    <div class="pet-dock">
-      <button v-if="!petOpen" type="button" class="pet-launcher" title="打开创作小助手" aria-label="打开创作小助手" @click="openPet()">月</button>
-      <section v-else class="pet-shell" aria-label="创作小助手">
-        <div class="pet-toolbar">
-          <div class="pet-views" role="group" aria-label="助手视图">
-            <NButton size="small" :type="petMode === 'chat' ? 'primary' : 'default'" :aria-pressed="petMode === 'chat'" :disabled="!article || loading" @click="openPet()">对话</NButton>
-            <NButton size="small" :type="petMode === 'tools' ? 'primary' : 'default'" :aria-pressed="petMode === 'tools'" @click="openPet('tools')">写作工具</NButton>
-          </div>
-          <button v-if="petMode === 'tools'" type="button" class="pet-close" aria-label="关闭创作小助手" title="关闭创作小助手" @click="petOpen = false">×</button>
-        </div>
-        <div v-if="article?.id" v-show="petMode === 'chat' && !loading" class="pet-conversation">
-          <PetChatPanel
-            :key="article.id"
-            :studio-article-id="article.id"
-            :studio-article="article"
-            :chat-turns="article.chat || []"
-            :chat-busy="editingLocked"
-            :selected-block="chatAnchor"
-            @chat="sendPetEdit"
-            @created="onPetCreated"
-            @clear-selection="selectedBlockId = ''"
-            @close="petOpen = false"
-          />
-        </div>
-        <div v-if="petMode === 'tools'" class="pet-tools">
-          <h3 class="pet-tools-heading">创作小助手</h3>
-          <NButton v-if="article && !showCreate" size="small" @click="openCreateTools">新建稿件</NButton>
-          <form v-if="showCreate || !article" class="create-form" @submit.prevent="createArticle">
-            <div v-if="createError" role="alert" class="pet-error">{{ createError }}</div>
-            <div class="tool-section-heading">
-              <strong>新建稿件</strong>
-              <NButton v-if="article" size="tiny" :disabled="actionBusy === 'create'" @click="showCreate = false">返回</NButton>
-            </div>
-            <label class="field"><span>选题</span><NInput v-model:value="createForm.topic" size="small" placeholder="可留空，由模型提炼" /></label>
-            <label class="field"><span>创作素材</span><NInput v-model:value="createForm.material" size="small" type="textarea" :rows="2" placeholder="事实、数字或经历" /></label>
-            <label class="field"><span>导入 Markdown</span><NInput v-model:value="createForm.markdown" size="small" type="textarea" :rows="3" placeholder="粘贴已有正文" /></label>
-            <label class="field">
-              <span>写作风格</span>
-              <NSelect v-model:value="createForm.writerStyle" size="small" :options="styleOptions" :disabled="!styleOptions.length || switchingLocked" />
-            </label>
-            <p v-if="createStyleHint" class="hint">{{ createStyleHint }}</p>
-            <div class="create-actions">
-              <NButton size="small" attr-type="submit" type="primary" :disabled="loading || switchingLocked" :loading="actionBusy === 'create'">
-                {{ createForm.markdown.trim() ? '导入稿件' : '让模型写正文' }}
-              </NButton>
-            </div>
-          </form>
-          <template v-else>
-            <section class="assistant-tool-section">
-              <label class="field">
-                <span>写作风格</span>
-                <NSelect :value="writerStyle" size="small" :options="styleOptions" :disabled="editingLocked || !styleOptions.length" @update:value="changeWriterStyle" />
-              </label>
-              <p v-if="writerStyleHint" class="hint">{{ writerStyleHint }}</p>
-              <div class="create-actions">
-                <NButton size="small" :disabled="editingLocked || !styleOptions.length" :loading="actionBusy === 'draft'" @click="draftArticle">
-                  {{ article.blocks?.length ? '按这个风格重写' : '让模型写正文' }}
-                </NButton>
-              </div>
-            </section>
-            <section class="assistant-tool-section">
-              <div class="tool-section-heading">
-                <strong>候选标题</strong>
-                <NButton size="small" :disabled="editingLocked || !article.blocks?.length" :loading="actionBusy === 'titles'" @click="regenTitles">
-                  {{ article.titles?.length ? '重新出 5 个' : '生成候选标题' }}
-                </NButton>
-              </div>
-              <ul v-if="article.titles?.length" class="title-list">
-                <li v-for="(item, index) in article.titles" :key="index" :class="{ active: item.text === article.title }">
-                  <button type="button" class="title-pick" :aria-current="item.text === article.title ? 'true' : undefined" :disabled="editingLocked || item.text === article.title" @click="pickTitle(item.text)">
-                    <span>{{ item.text }}</span><em v-if="item.text === article.title">当前</em><em v-else-if="item.recommended">推荐</em>
-                  </button>
-                  <p v-if="item.hook || item.reason" class="hint">{{ [item.hook, item.reason].filter(Boolean).join(' · ') }}</p>
-                </li>
-              </ul>
-              <p v-else class="hint">{{ article.blocks?.length ? '还没有候选标题。' : '有正文后可以生成候选标题。' }}</p>
-            </section>
-          </template>
-        </div>
-      </section>
-    </div>
   </div>
 </template>
 
 <style scoped>
-.pet-dock {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 60;
-}
-.pet-shell {
-  display: flex;
-  flex-direction: column;
-  width: min(560px, calc(100vw - 40px));
-  max-height: min(860px, calc(100dvh - 40px));
-  overflow: hidden;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: var(--color-surface);
-  box-shadow: var(--shadow-lg);
-}
-.pet-toolbar, .tool-section-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
-.pet-toolbar { flex: none; padding: 8px 12px; border-bottom: 1px solid var(--color-border); }
-.pet-views { display: flex; gap: 6px; }
-.pet-close { width: 28px; height: 28px; padding: 0; border: 1px solid var(--color-border); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+.assistant-mobile-entry { display: none; }
+.assistant-toolbar, .tool-section-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.assistant-toolbar { flex: none; padding: 8px 12px; border-bottom: 1px solid var(--color-border); }
+.assistant-tasks { display: flex; flex-wrap: wrap; gap: 4px; }
+.assistant-tasks button, .assistant-close { padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-secondary); cursor: pointer; font-size: 12px; }
+.assistant-tasks button[aria-pressed='true'], .assistant-close:hover { background: var(--color-surface-muted); color: var(--color-text-primary); }
+.assistant-tasks button:disabled { opacity: .5; cursor: not-allowed; }
+.assistant-close { font-size: 18px; line-height: 1; }
 .pet-tools { display: flex; flex-direction: column; align-items: stretch; gap: 12px; padding: 12px; overflow: auto; overscroll-behavior: contain; }
 .pet-tools > .n-button { align-self: flex-start; }
-.pet-tools-heading { margin: 0; font-size: 14px; }
 .assistant-tool-section { border-top: 1px solid var(--color-border); padding-top: 12px; font-size: 13px; }
-.pet-conversation { min-height: 0; overflow: auto; }
-.pet-conversation :deep(.pet-chat-panel) {
-  position: relative;
-  inset: auto !important;
-  width: 100%;
-  height: min(720px, calc(100dvh - 91px));
-  max-height: none;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-.pet-conversation :deep(.pet-chat-panel.minimized) { height: auto; }
-.pet-conversation :deep(.pet-header) { cursor: default; touch-action: auto; }
-.pet-conversation :deep(.message-container) { min-height: 72px; }
-.pet-launcher {
-  display: grid;
-  place-items: center;
-  width: 52px;
-  height: 52px;
-  border: 2px solid rgba(255, 255, 255, 0.4);
-  border-radius: 50%;
-  /* 主色→hover 色渐变 + 柔光描边：浅灰稿纸和深色底都醒目 */
-  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-hover) 100%);
-  color: var(--color-on-accent, #fff);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
-  box-shadow:
-    0 8px 24px var(--color-accent-soft),
-    0 6px 18px rgba(0, 0, 0, 0.16);
-  cursor: pointer;
-  font-size: 20px;
-  font-weight: 700;
-  transition: transform 0.18s ease, box-shadow 0.18s ease;
-}
-.pet-launcher:hover {
-  transform: translateY(-2px) scale(1.05);
-  box-shadow:
-    0 12px 28px var(--color-accent-soft),
-    0 8px 22px rgba(0, 0, 0, 0.2);
-}
-.pet-launcher:active { transform: scale(0.96); }
-/* 待机呼吸：柔光起伏提示「我在这儿」。只动阴影不动几何，
-   元素边界稳定（自动化与真实点击都不受影响）；偏好减弱动效时静止 */
-@keyframes pet-breathe {
-  0%, 100% { box-shadow: 0 8px 24px var(--color-accent-soft), 0 6px 18px rgba(0, 0, 0, 0.16); }
-  50% { box-shadow: 0 10px 30px var(--color-accent-hover), 0 6px 18px rgba(0, 0, 0, 0.16); }
-}
-.pet-launcher { animation: pet-breathe 2.6s ease-in-out infinite; }
-.pet-launcher:hover { animation-play-state: paused; }
-@media (prefers-reduced-motion: reduce) {
-  .pet-launcher { animation: none; transition: none; }
-}
-@media (max-width: 640px) {
-  .pet-dock { right: 12px; bottom: 12px; }
-}
+.assistant-conversation { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 
 .paper-view {
   display: flex;
@@ -1470,7 +1616,7 @@ onBeforeUnmount(() => {
   margin-bottom: 10px;
 }
 /* 标题行：标题占满，切换按钮贴右 */
-.sheet-head-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.sheet-head-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; }
 .sheet-head-row + .sheet-head-row { margin-top: 8px; }
 .sheet-title { flex: 1 1 auto; min-width: 0; }
 .sheet-head-meta { flex-wrap: wrap; justify-content: space-between; }
@@ -1496,6 +1642,16 @@ onBeforeUnmount(() => {
 .paper-sheet > .empty { padding: var(--sheet-pad-y) var(--sheet-pad-x); }
 
 /* 稿纸 / 排版预览：分段控制器（一整块底 + 选中块），比两个独立胶囊更像一个开关 */
+.source-editor { display: flex; flex-direction: column; gap: 10px; padding: 16px; flex: 1; min-height: 0; }
+.source-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+.source-toolbar > div { display: flex; gap: 8px; margin-inline-start: auto; }
+.source-error { color: var(--color-danger); margin: 0; }
+.source-editor textarea {
+  flex: 1; min-height: 260px; width: 100%; box-sizing: border-box; resize: vertical;
+  background: transparent; color: inherit; padding: 12px; border: 1px solid var(--border-color, #777); border-radius: 6px;
+  font: 13px/1.75 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.source-editor textarea:focus-visible { outline: 2px solid var(--paper-accent); outline-offset: 1px; }
 .view-switch {
   display: inline-flex;
   flex: none;
@@ -1630,7 +1786,7 @@ onBeforeUnmount(() => {
 /* 触屏没有 hover，常驻半透明，免得根本找不到删除入口 */
 @media (hover: none) { .block-del { opacity: .6; } .block-del:disabled { opacity: 0; } }
 
-/* 稿纸勾选：质检和素材统一用绿色显示已选段落。 */
+/* 稿纸勾选：检测和素材统一用绿色显示已选段落。 */
 .block.picking { cursor: pointer; }
 .block.picking:hover { background: var(--paper-accent-tint); }
 .block.picking .block-body { cursor: pointer; }
@@ -1704,7 +1860,7 @@ onBeforeUnmount(() => {
 .nav-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .paper-side { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: hidden; }
-.tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; border-radius: 10px; background: var(--color-surface-muted); }
+.tabs { display: grid; grid-template-columns: repeat(3, 1fr) minmax(68px, 1.3fr); gap: 4px; padding: 4px; border-radius: 10px; background: var(--color-surface-muted); }
 .tabs button { padding: 6px 4px; font-size: 12px; border: none; border-radius: 7px; background: transparent; cursor: pointer; color: var(--color-text-secondary); }
 .tabs button.active { background: var(--color-surface); color: var(--color-text-primary); box-shadow: var(--shadow-sm); }
 .panel {
@@ -1713,7 +1869,10 @@ onBeforeUnmount(() => {
   flex: 1; min-height: 0; overflow: auto;
 }
 
-/* 窄屏改回整页滚动：三栏叠起来后再锁死高度，下面两栏会被挤出视野 */
+.panel.assistant-panel { padding: 0; gap: 0; min-width: 0; overflow: hidden; }
+.assistant-backdrop { display: none; }
+
+/* 窄屏改回整页滚动，只有创作助手使用同一实例的抽屉布局。 */
 @media (max-width: 1180px) {
   .paper-view { height: auto; overflow: visible; }
   .paper-grid { grid-template-columns: 1fr; flex: none; }
@@ -1723,6 +1882,15 @@ onBeforeUnmount(() => {
   .blocks { overflow: visible; }
   .paper-sheet > :deep(.layout-preview) { min-height: 70vh; }
   .paper-sheet > :deep(.preview-frame) { flex: none; height: 70vh; }
+  .assistant-mobile-entry { display: inline-flex; }
+  .tabs { grid-template-columns: repeat(3, 1fr); }
+  .assistant-side-entry { display: none; }
+  .assistant-backdrop { display: block; position: fixed; inset: 0; z-index: 59; background: var(--color-overlay); }
+  .panel.assistant-panel {
+    position: fixed; inset: 0 0 0 auto; z-index: 60;
+    width: min(100%, 460px); height: 100dvh; box-sizing: border-box;
+    border-radius: 12px 0 0 12px; box-shadow: var(--shadow-lg);
+  }
 }
 .panel-actions, .panel-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 

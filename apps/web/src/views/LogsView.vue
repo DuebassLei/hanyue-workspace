@@ -385,7 +385,7 @@ onBeforeUnmount(stopLogPolling)
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
-  margin: var(--space-3) 0;
+  margin: var(--space-2) 0;
 }
 .log-service-select {
   width: 120px;
@@ -428,10 +428,10 @@ onBeforeUnmount(stopLogPolling)
   overflow: auto;
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: var(--space-2) var(--space-3);
   font-family: 'JetBrains Mono', Consolas, Menlo, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
   line-height: 1.7;
 }
 .log-empty {

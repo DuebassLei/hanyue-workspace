@@ -512,6 +512,10 @@ def test_status_and_draft_flow(client):
     item = created.json()
     assert item["title"] == rows[0]["title"]
 
+    detail = client.get(f"{PREFIX}/content/{item['id']}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["versions"] == []  # 热点原稿入档前没有占位版本
+
     # 重复点击返回同一篇，不重复建稿
     again = client.post(
         f"{PREFIX}/hot-topics/clusters/{cluster_id}/draft", headers=headers
@@ -522,6 +526,56 @@ def test_status_and_draft_flow(client):
     detail = client.get(f"{PREFIX}/hot-topics/clusters/{cluster_id}", headers=headers).json()
     assert detail["status"] == "generated"
     assert detail["contentItemId"] == item["id"]
+
+
+def test_hotspot_draft_pipeline_retries_then_fills_original_paper(client, monkeypatch):
+    import time
+
+    from app.services import ai_gateway, studio_pipeline as SP
+
+    headers = _login(client, "hot-pipeline-first-draft")
+    day = "2026-02-09"
+    assert _ingest(client, headers, "微博", [{"title": "首稿回填测试", "rank": 1}], date=day).status_code == 200
+    cluster = next(row for row in _clusters(client, headers, day) if row["title"] == "首稿回填测试")
+    item = client.post(f"{PREFIX}/hot-topics/clusters/{cluster['id']}/draft", headers=headers).json()
+    imported = client.post(f"{PREFIX}/studio/articles/from-content/{item['id']}", params={"hotClusterId": cluster["id"]}, headers=headers)
+    assert imported.status_code == 200, imported.text
+    paper = imported.json()
+    base = f"{PREFIX}/studio/articles/{paper['id']}"
+    assert paper["blocks"] == []
+    assert "【热点选题】首稿回填测试" in paper["material"]
+    prompts = []
+
+    async def model(db, **kwargs):
+        if kwargs["task_type"] == "studio_draft":
+            prompts.append(kwargs["prompt"])
+            if len(prompts) == 1:
+                raise RuntimeError("模拟模型失败")
+            return {"text": "# 首稿标题\n\n热点正文由初稿流水线回填。"}
+        return {"text": '{"titles":[{"text":"候选标题","hook":"C"}]}'}
+
+    monkeypatch.setattr(ai_gateway, "generate_text", model)
+
+    def request_draft():
+        response = client.post(f"{base}/draft?emptyOnly=true", headers=headers)
+        assert response.status_code == 200, response.text
+        deadline = time.monotonic() + 5
+        while SP.JOBS.busy(paper["id"]) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not SP.JOBS.busy(paper["id"])
+        return client.get(base, headers=headers).json()
+
+    failed = request_draft()
+    assert failed["notice"]["error"] and "模拟模型失败" in failed["notice"]["text"]
+    assert failed["blocks"] == []
+    ready = request_draft()
+    assert ready["id"] == paper["id"] and ready["notice"] is None
+    assert ready["blocks"][0]["text"] == "热点正文由初稿流水线回填。"
+    assert all("首稿回填测试" in prompt for prompt in prompts)
+    assert request_draft()["blocks"] == ready["blocks"]
+    assert len(prompts) == 2
+    saved = client.post(f"{base}/export", headers=headers).json()
+    assert saved["contentId"] == item["id"]
 
 
 def test_summary_and_degraded(client):

@@ -296,12 +296,12 @@ onMounted(loadProjects)
 <style scoped>
 .head-actions { display: flex; align-items: center; gap: 8px; }
 
-.loading-card { padding: 40px 20px; border: 1px solid var(--paper-line-strong); border-radius: 10px; background: var(--paper-bg); color: var(--paper-ink-muted); font-size: 13px; }
+.loading-card { padding: var(--space-6) var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-text-muted); font-size: var(--font-sm); }
 
-.workspace { display: flex; flex-direction: column; border: 1px solid var(--paper-line-strong); border-radius: 10px; background: var(--paper-bg); overflow: hidden; }
+.workspace { display: flex; flex-direction: column; border: 1px solid var(--paper-line-strong); border-radius: var(--radius-md); background: var(--paper-bg); overflow: hidden; }
 
-.project-bar { display: flex; align-items: center; gap: 14px; padding: 13px 18px; background: var(--paper-header); border-bottom: 1px solid var(--paper-line); }
-.project-mark { flex: 0 0 auto; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 6px; background: var(--paper-accent-soft); color: var(--paper-accent); }
+.project-bar { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--paper-header); border-bottom: 1px solid var(--paper-line); }
+.project-mark { flex: 0 0 auto; display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-sm); background: var(--paper-accent-soft); color: var(--paper-accent); }
 .project-id { min-width: 0; }
 .project-name { margin: 0; font-family: 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', Georgia, serif; font-size: 17px; font-weight: 650; color: var(--paper-ink); overflow-wrap: anywhere; }
 .project-meta { margin: 3px 0 0; font-size: 11.5px; color: var(--paper-ink-muted); font-variant-numeric: tabular-nums; }

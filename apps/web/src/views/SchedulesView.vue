@@ -1081,7 +1081,7 @@ onBeforeUnmount(() => {
   gap: var(--space-4);
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg, 10px);
+  border-radius: var(--radius-md);
   background: var(--color-surface);
 }
 .sched-row.is-paused {

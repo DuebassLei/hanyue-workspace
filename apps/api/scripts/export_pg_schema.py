@@ -13,9 +13,8 @@
   - 补充索引（db.py 的 _INDEXES）与两个特殊唯一索引 -> 直接 import db.py 的清单复用，
     因为这些索引不在 metadata 中（当初是纯 SQL 创建的），不带上会导致生成的库与应用不一致。
 
-生成物是**幂等**的（CREATE TABLE/INDEX IF NOT EXISTS + ADD COLUMN IF NOT EXISTS +
-ON CONFLICT DO NOTHING），可在空库直接执行，也可在已有库重跑（只补缺失对象；老库
-补列用可空语义，不带约束/默认值，约束差异由应用 init_db 兜底）。
+生成物仅初始化没有应用表的库；检测到任何应用表时跳过全部 DDL，交由应用 init_db
+处理已有库升级，避免提前补列或创建唯一索引破坏迁移顺序。
 
 生成物只包含结构，不包含引导账号或固定口令哈希。部署后必须立即运行
 infra/scripts/dev-pg.sh bootstrap（Windows 用 dev-pg.ps1 bootstrap）设置首个账号的
@@ -68,9 +67,8 @@ HEADER = """\
 -- CI 校验一致性（模型改了但忘了重新生成会失败）：
 --   cd apps/api && python scripts/export_pg_schema.py -o ../../infra/postgres/schema.sql --check
 --
--- 适用：全新数据库一次性建表。幂等（IF NOT EXISTS），已有库重跑只补缺失对象、
---       绝不覆盖已有数据；补列段用 ADD COLUMN IF NOT EXISTS 为老库补齐模型新增列
---       （可空、不带约束/默认值，约束差异仍由应用启动时的 init_db() 兜底）。
+-- 适用：全新数据库一次性建表。发现任意应用表时跳过全部 DDL，
+--       已有库升级必须由应用 init_db() 执行；本脚本不是迁移脚本。
 -- 部署后必须立即运行 bootstrap 设置独立强密码，见 docs/setup.md；本文件不播种账号。
 -- 说明：本脚本按「当前模型的理想全新库」建表，个别列会比渐进迁移的老库更严格
 --       （如新列是 NOT NULL，而老库经 ALTER TABLE ADD COLUMN 补列时为可空）——这是
@@ -80,8 +78,6 @@ HEADER = """\
 -- ============================================================================
 
 \\set ON_ERROR_STOP on
-
-BEGIN;
 """
 
 
@@ -94,32 +90,25 @@ def _stmt(node) -> str:
 
 def build_schema() -> str:
     lines: list[str] = [HEADER]
+    table_names = ", ".join("'" + name.replace("'", "''") + "'" for name in sorted(Base.metadata.tables))
+    lines.extend([
+        "-- 任一应用表已存在，全部结构迁移交给 init_db。",
+        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace",
+        "  WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p')",
+        f"    AND c.relname IN ({table_names})) AS hanyue_existing_schema",
+        "\\gset",
+        "\\if :hanyue_existing_schema",
+        "\\echo '检测到已有应用表，跳过 schema.sql；请启动应用执行迁移。'",
+        "\\else",
+        "BEGIN;",
+        "",
+    ])
 
     # 1) 表 + 表级的 CHECK / UNIQUE / 外键约束：按外键依赖顺序输出
     lines.append("-- ---------- 表（含主键 / 外键 / CHECK / 唯一约束） ----------\n")
     for table in Base.metadata.sorted_tables:
         lines.append(f"-- {table.name}")
         lines.append(_stmt(CreateTable(table, if_not_exists=True)))
-        lines.append("")
-
-    # 1.5) 老库补列：CREATE TABLE IF NOT EXISTS 对已存在的表是空操作，老库建表
-    #      之后模型新增的列不会补上；索引段又引用这些列，ON_ERROR_STOP 下会因
-    #      列缺失直接失败（如 scheduled_tasks.active_job_id）。这里为每列生成
-    #      幂等的 ADD COLUMN IF NOT EXISTS——可空、不带约束/默认值，与应用
-    #      init_db 的补列语义一致；新库上列已存在，均为空操作。
-    lines.append("-- ---------- 老库补列（可空、不带约束，与应用 init_db 补列语义一致） ----------\n")
-    preparer = PG_DIALECT.identifier_preparer
-    for table in Base.metadata.sorted_tables:
-        alters = [
-            "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS {c} {ty};".format(
-                t=preparer.quote(table.name),
-                c=preparer.quote(column.name),
-                ty=str(column.type.compile(dialect=PG_DIALECT)),
-            )
-            for column in table.columns
-        ]
-        lines.append(f"-- {table.name}")
-        lines.extend(alters)
         lines.append("")
 
     # 2) 模型内定义的索引（表级 Index，不在 CreateTable 输出里）
@@ -180,6 +169,7 @@ def build_schema() -> str:
     )
 
     lines.append("COMMIT;")
+    lines.append("\\endif")
     lines.append("")
     return "\n".join(lines)
 

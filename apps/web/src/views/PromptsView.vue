@@ -373,17 +373,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page">
-    <div class="page-head">
-      <div>
-        <h1 class="page-title">提示词库</h1>
-        <p class="page-sub">
-          统一维护普通 / 封面 / 配图等提示词，支持正反向两段与示例图预览。
-          {{ canManage ? '你正在以管理员身份维护全局提示词库。' : '当前为只读视图，编辑需 image_styles.manage 权限。' }}
-        </p>
-      </div>
-      <n-button v-if="canManage" type="primary" @click="openCreate">新建提示词</n-button>
-    </div>
-
     <n-space class="prompt-tabs" role="tablist" aria-label="提示词库视图" :size="8">
       <n-button
         v-for="option in TYPE_OPTIONS"
@@ -420,6 +409,8 @@ onBeforeUnmount(() => {
         />
         <div class="spacer" />
         <span class="field-hint">{{ filtered.length }} / {{ prompts.length }} 条</span>
+        <span v-if="!canManage" class="field-hint">只读 · 编辑需 image_styles.manage 权限</span>
+        <n-button v-if="canManage" type="primary" @click="openCreate">新建提示词</n-button>
       </div>
 
       <div v-if="loading" class="skeleton" style="height: 120px; margin-top: var(--space-3)" />
@@ -621,6 +612,7 @@ onBeforeUnmount(() => {
 }
 .prompt-toolbar {
   align-items: center;
+  flex-wrap: wrap;
 }
 .prompt-search {
   flex: 1 1 220px;
@@ -784,4 +776,33 @@ onBeforeUnmount(() => {
   gap: var(--space-2);
   align-items: center;
 }
+/* Catalog layout: filters stay compact while content gets room to breathe. */
+.page-head { align-items: center; padding-bottom: 22px; border-bottom: 1px solid var(--color-border); }
+.page-title { font-size: 26px; letter-spacing: .02em; }
+.page-sub { max-width: 720px; line-height: 1.7; }
+.prompt-tabs { margin: 20px 0 16px; }
+.prompt-toolbar { gap: 12px; }
+.prompt-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 16px; margin-top: 20px; }
+.prompt-card { gap: 12px; padding: 20px; border-radius: 14px; transition: box-shadow .18s ease, transform .18s ease; }
+.prompt-card:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.prompt-head { padding-bottom: 12px; border-bottom: 1px solid var(--color-border); }
+.prompt-title { flex: 1 1 140px; font-size: 16px; }
+.prompt-content { line-height: 1.75; }
+.prompt-previews { padding: 4px 0; }
+.prompt-preview-thumb { width: 80px; height: 80px; }
+.prompt-preview-thumb:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.prompt-actions { padding-top: 12px; border-top-style: solid; }
+@media (max-width: 767px) {
+  .page-head { align-items: flex-start; }
+  .prompt-editor-row { grid-template-columns: minmax(0, 1fr); }
+}
+.prompt-tabs { margin: 14px 0 10px; }
+.prompt-tabs :deep(.n-button) { border-radius: 999px; }
+.card { padding: 0; border: 0; background: transparent; box-shadow: none; }
+.prompt-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 10px; margin-top: 14px; }
+.prompt-card { gap: 9px; padding: 16px; border-radius: 16px; background: var(--color-surface); box-shadow: var(--shadow-sm); }
+.prompt-head { padding-bottom: 0; border: 0; }
+.prompt-title { font-size: 15px; }
+.prompt-content { padding-left: 10px; border-left: 2px solid var(--color-border-strong); line-height: 1.6; }
+@media (prefers-reduced-motion: reduce) { .prompt-card { transition: none; } }
 </style>

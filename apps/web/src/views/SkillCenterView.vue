@@ -1,17 +1,5 @@
 <template>
   <div class="skill-center">
-    <header class="sc-head">
-      <div>
-        <h1>技能中心</h1>
-        <p class="sc-sub">沉淀写作风格、人物思维与领域知识；宠物与改稿工具按需调用。</p>
-      </div>
-      <div class="sc-head-actions">
-        <button class="btn" type="button" @click="openImport">导入</button>
-        <button class="btn" type="button" :disabled="!skills.length" @click="exportAll">导出全部</button>
-        <button class="btn btn-primary" type="button" @click="openCreate">新建技能</button>
-      </div>
-    </header>
-
     <div class="sc-toolbar">
       <div class="sc-tabs">
         <button
@@ -24,7 +12,12 @@
           {{ tab.label }}<span class="sc-count">{{ countOf(tab.value) }}</span>
         </button>
       </div>
-      <input v-model="keyword" class="sc-search" type="search" placeholder="搜索名称或定位" />
+      <input v-model="keyword" class="sc-search" type="search" placeholder="搜索名称或定位" aria-label="搜索技能" />
+      <div class="sc-head-actions">
+        <button class="btn" type="button" @click="openImport">导入</button>
+        <button class="btn" type="button" :disabled="!skills.length" @click="exportAll">导出全部</button>
+        <button class="btn btn-primary" type="button" @click="openCreate">新建技能</button>
+      </div>
     </div>
 
     <p v-if="notice" class="sc-notice" :class="noticeKind">{{ notice }}</p>
@@ -666,7 +659,7 @@ onMounted(load)
 .sc-sub { margin: 4px 0 0; max-width: 640px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
 .sc-head-actions { display: flex; gap: 8px; }
 .btn { padding: 6px 14px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-surface); color: var(--color-text-primary); font-size: 12px; cursor: pointer; }
-.btn-primary { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent, #fff); }
+.btn-primary { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
 .sc-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 .sc-tabs { display: flex; gap: 4px; padding: 3px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-surface-muted); }
@@ -675,7 +668,7 @@ onMounted(load)
 .sc-count { padding: 0 5px; border-radius: 8px; background: var(--color-surface-muted); font-size: 11px; }
 .sc-search { width: 220px; height: 34px; padding: 0 14px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-surface); color: var(--color-text-primary); font-size: 12px; }
 .sc-notice { margin: 0; padding: 8px 12px; border: 1px solid var(--color-border); border-left: 3px solid var(--color-accent); border-radius: 10px; background: var(--color-surface); font-size: 12px; }
-.sc-notice.error { border-left-color: var(--color-danger, #dc2626); }
+.sc-notice.error { border-left-color: var(--color-danger); }
 .sc-empty { padding: 40px 12px; border: 1px dashed var(--color-border); border-radius: 16px; color: var(--color-text-secondary); font-size: 13px; text-align: center; }
 .sc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
 .sc-card { display: flex; flex-direction: column; gap: 8px; padding: 16px; border: 1px solid var(--color-border); border-radius: 16px; background: var(--color-surface); transition: box-shadow .18s ease, transform .18s ease; }
@@ -683,7 +676,7 @@ onMounted(load)
 .sc-card-top { display: flex; align-items: center; justify-content: space-between; }
 .sc-badge { padding: 2px 7px; border-radius: 10px; font-size: 11px; }
 .type-writing { background: var(--color-accent-soft); color: var(--color-accent); }
-.type-persona { background: rgba(240, 160, 32, 0.16); color: var(--color-warning); }
+.type-persona { background: color-mix(in srgb, var(--color-warning) 16%, transparent); color: var(--color-warning); }
 .type-knowledge { background: var(--color-accent-soft); color: var(--color-accent); }
 .sc-source { color: var(--color-text-secondary); font-size: 11px; }
 .sc-name { margin: 0; font-size: 14px; }
@@ -694,8 +687,8 @@ onMounted(load)
 .sc-meta dd { margin: 0; }
 .sc-card-actions { display: flex; flex-wrap: wrap; gap: 10px; padding-top: 8px; border-top: 1px solid var(--color-border); }
 .link { padding: 0; border: 0; background: none; color: var(--color-accent); font-size: 12px; cursor: pointer; }
-.link.danger { color: var(--color-danger, #dc2626); }
-.sc-drawer-mask { position: fixed; inset: 0; z-index: 60; display: flex; justify-content: flex-end; background: rgba(15, 23, 42, .28); backdrop-filter: blur(3px); }
+.link.danger { color: var(--color-danger); }
+.sc-drawer-mask { position: fixed; inset: 0; z-index: 60; display: flex; justify-content: flex-end; background: var(--color-overlay); backdrop-filter: blur(3px); }
 .sc-drawer { display: flex; flex-direction: column; width: min(560px, 100vw); height: 100%; background: var(--color-surface); border-radius: 20px 0 0 20px; box-shadow: var(--shadow-lg); }
 .sc-drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--color-border); }
 .sc-drawer-head h2 { margin: 0; font-size: 15px; }
@@ -707,9 +700,44 @@ onMounted(load)
 .field input, .field select, .field textarea { width: 100%; padding: 8px 12px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); color: var(--color-text-primary); font: inherit; font-size: 13px; }
 .field textarea { resize: vertical; line-height: 1.55; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.sc-error { margin: 0; color: var(--color-danger, #dc2626); font-size: 12px; }
+.sc-error { margin: 0; color: var(--color-danger); font-size: 12px; }
 .sc-success { margin: 0; color: var(--color-success); font-size: 12px; }
 .sc-drawer-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--color-border); }
+/* A quiet catalog treatment keeps the library readable as it grows. */
+.skill-center { gap: 22px; padding: 20px 20px 28px; }
+.sc-head { align-items: center; padding-bottom: 22px; border-bottom: 1px solid var(--color-border); }
+.sc-head h1 { font-size: 26px; letter-spacing: .02em; }
+.sc-sub { margin-top: 8px; font-size: 13px; }
+.sc-head-actions { flex-wrap: wrap; }
+.btn { min-height: 36px; padding-inline: 16px; }
+.sc-toolbar { gap: 14px; }
+.sc-tabs { flex-wrap: wrap; border-radius: 14px; }
+.sc-search { width: 260px; height: 38px; }
+.sc-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 16px; }
+.sc-card { gap: 12px; min-width: 0; padding: 20px; border-radius: 14px; }
+.sc-card-top { padding-bottom: 12px; border-bottom: 1px solid var(--color-border); }
+.sc-name { font-size: 17px; line-height: 1.4; overflow-wrap: anywhere; }
+.sc-summary { flex: 1; line-height: 1.75; overflow-wrap: anywhere; }
+.sc-meta { gap: 22px; padding: 10px 0; }
+.sc-meta div { flex-direction: column; gap: 4px; }
+.sc-meta dd { font-weight: 600; }
+.sc-card-actions { gap: 16px; padding-top: 12px; }
+.sc-card-actions .link { min-height: 28px; }
+.btn:focus-visible, .sc-tab:focus-visible, .link:focus-visible, .sc-search:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+/* The reference style board uses a soft atmospheric hero and compact, independent cards. */
+.skill-center { gap: 12px; }
+.sc-head-actions .btn { min-height: 32px; border-radius: 999px; }
+.sc-tabs { padding: 0; border: 0; background: transparent; }
+.sc-tab { min-height: 32px; }
+.sc-tab.active { background: var(--color-text-primary); color: var(--color-surface); box-shadow: none; }
+.sc-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 10px; }
+.sc-card { gap: 9px; padding: 16px; border-radius: 16px; box-shadow: var(--shadow-sm); }
+.sc-card-top { padding-bottom: 0; border: 0; }
+.sc-name { font-size: 15px; }
+.sc-summary { line-height: 1.6; }
+.sc-meta { padding: 4px 0; }
+.sc-card-actions { gap: 12px; padding-top: 8px; }
+@media (prefers-reduced-motion: reduce) { .sc-card { transition: none; } }
 @media (max-width: 720px) {
   .skill-center { padding: 14px; }
   .sc-search { width: 100%; }

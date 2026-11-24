@@ -48,7 +48,21 @@ const prompts = ref([])
 const promptError = ref('')
 const coverPrompt = ref('')
 const coverStyle = ref('')
-const coverRatio = ref('2.35:1')
+const coverRatioInput = ref(null)
+const coverRatios = computed(() => capabilities.value?.available ? capabilities.value.ratios || [] : [])
+const coverAspectOptions = computed(() => ASPECTS.filter((ratio) => coverRatios.value.includes(ratio)).map((value) => ({ label: value, value })))
+const coverRatio = computed(() => coverRatioInput.value?.trim() ?? (coverAspectOptions.value[0]?.value || coverRatios.value[0] || ''))
+const coverPreset = computed(() => coverAspectOptions.value.some(({ value }) => value === coverRatio.value) ? coverRatio.value : null)
+const canGenerateCover = computed(() => coverRatios.value.includes(coverRatio.value))
+const coverRatioHint = computed(() => {
+  if (capabilityError.value) return capabilityError.value
+  if (!capabilities.value) return '正在读取当前模型支持的封面比例…'
+  if (!capabilities.value.available) return '未配置可用的生图模型，可在模型管理配置，或从素材图库选封面。'
+  if (!coverRatios.value.length) return '当前模型没有已确认的封面比例，请在模型管理登记支持的精确尺寸。'
+  if (!coverRatio.value) return '请输入宽:高格式的比例，或选择一个预设。'
+  if (!canGenerateCover.value) return `当前模型不支持或未确认支持 ${coverRatio.value}；可用比例：${coverRatios.value.join('、')}。不会用近似比例代替。`
+  return `当前模型已确认的比例：${coverRatios.value.join('、')}。`
+})
 const inlinePrompt = ref('')
 const inlineStyle = ref('')
 const inlineRatio = ref('16:9')
@@ -237,7 +251,8 @@ async function run(actionName, work, message) {
   }
 }
 
-const generateCover = () =>
+function generateCover() {
+  if (!canGenerateCover.value) return
   run(
     'cover',
     () =>
@@ -247,6 +262,7 @@ const generateCover = () =>
       }),
     '封面已提交生成，出图后自动刷新',
   )
+}
 
 const removeCover = () =>
   run('cover-remove', () => studioExtraApi.pickCover(props.article.id, null), '封面已移除')
@@ -336,6 +352,7 @@ watch(
   () => {
     stopPolling()
     coverPrompt.value = props.article?.cover?.prompt || ''
+    coverRatioInput.value = null
     inlinePrompt.value = ''
     error.value = ''
     suggestions.value = []
@@ -436,21 +453,35 @@ onBeforeUnmount(() => {
           </div>
         </details>
         <NSelect v-model:value="coverStyle" size="small" :options="styles" aria-label="封面风格" />
-        <p v-if="capabilityError || (capabilities && !capabilities.ratios?.includes(coverRatio))" class="hint strong">{{ capabilityError || (capabilities.ratios?.length ? '请选择模型支持的比例。' : '请在模型管理为默认生图模型配置支持的尺寸。') }}</p>
         <div class="row">
           <NSelect
-            :value="coverRatio"
+            v-if="coverAspectOptions.length"
+            :value="coverPreset"
             size="small"
             class="ratio"
-            :options="aspectOptions"
+            aria-label="封面比例预设"
+            placeholder="比例预设"
+            :options="coverAspectOptions"
             :disabled="busyAction"
-            @update:value="(value) => (coverRatio = value)"
+            @update:value="(value) => (coverRatioInput = value)"
           />
+          <NInput
+            :value="coverRatioInput ?? coverRatio"
+            size="small"
+            class="grow"
+            placeholder="宽:高，如 5:4"
+            :input-props="{ 'aria-label': '封面比例', 'aria-describedby': 'paper-cover-ratio-hint', 'aria-invalid': Boolean(coverRatios.length && !canGenerateCover) }"
+            :disabled="busyAction || !coverRatios.length"
+            @update:value="(value) => (coverRatioInput = value)"
+          />
+        </div>
+        <p id="paper-cover-ratio-hint" class="hint" :class="{ strong: !canGenerateCover }" aria-live="polite">{{ coverRatioHint }}</p>
+        <div class="row">
           <NButton
             size="small"
             type="primary"
             class="grow"
-            :disabled="busyAction || !capabilities?.ratios?.includes(coverRatio)"
+            :disabled="busyAction || !canGenerateCover"
             :loading="isAction('cover')"
             @click="generateCover"
           >

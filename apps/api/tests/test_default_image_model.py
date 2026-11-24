@@ -95,6 +95,9 @@ def test_image_size_registration_preserves_other_options_and_validates(client):
         assert response.status_code == 400, response.text
     capabilities = client.get(f"{PREFIX}/studio/image-capabilities", headers=headers)
     assert capabilities.json()["ratios"] == ["1:1"]
+    custom = client.patch(endpoint, json={"supportedImageSizes": {"1:1": "1024x1024", "5:4": "1250x1000"}}, headers=headers)
+    assert custom.status_code == 200, custom.text
+    assert client.get(f"{PREFIX}/studio/image-capabilities", headers=headers).json()["ratios"] == ["1:1", "5:4"]
     cleared = client.patch(endpoint, json={"supportedImageSizes": {}}, headers=headers)
     assert cleared.json()["supportedImageSizes"] == {}
 
